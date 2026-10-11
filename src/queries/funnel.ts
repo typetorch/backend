@@ -1,7 +1,7 @@
 /** Funnels (e.g. onboarding steps) and one player's timeline. */
 import { PROP_KEYS } from "../schema.ts";
 import { assertSafeKey, lit } from "../sql/dialect.ts";
-import { checkPid, defineQuery, eventsTable, intOption, iso, num, numOrNull, ratio, round, str, strOrNull, where } from "./core.ts";
+import { checkPid, defineQuery, eventsTable, int, intOption, iso, num, numOrNull, playerRows, ratio, round, str, strOrNull, where } from "./core.ts";
 
 // funnel ------------------------------------------------------------------------------------------------------------------
 
@@ -261,5 +261,97 @@ export const funnelProgress = defineQuery<FunnelProgressOptions, FunnelProgressR
 			progress.push({ pid: str(r.pid), funnel: str(r.name), step, label: steps[at]?.label ?? null, reached, of: steps.length, share: ratio(reached, steps.length) });
 		}
 		return { funnels: [...ordered].map(([name, steps]) => ({ name, steps })), progress };
+	},
+});
+
+// playtime-funnel ---------------------------------------------------------------------------------------------------------
+
+/** The playtime funnel's thresholds, seconds (each step: playtime >= this, edges inclusive). */
+export const PLAYTIME_STEPS_SECONDS = [30, 60, 180, 300, 600, 1800, 3600, 7200] as const;
+
+/**
+ * A session counts at most this long. A session's length is its first to its last event (the same as every other
+ * query; a session still running counts up to its latest event). A server that kept a stuck or AFK session alive for
+ * days would otherwise put one player past every step.
+ */
+export const PLAYTIME_SESSION_CAP_MS = 12 * 3_600_000;
+
+/**
+ * `total`: each player's playtime in the range (their sessions summed); the base is every player with a session row.
+ * `first`: each new player's first-ever session (the rows the framework flags `newp`) found in the range; the base is
+ * those new players. Players whose first session was before the range aren't in it (their first session isn't there).
+ */
+export type PlaytimeMeasure = "total" | "first";
+
+export interface PlaytimeFunnelOptions {
+	measure: PlaytimeMeasure;
+}
+
+export interface PlaytimeStep {
+	/** The threshold: playtime >= seconds. */
+	seconds: number;
+	label: string;
+	reached: number;
+	/** Share of the base (every player, zero playtime included). */
+	ofTotal: number;
+	/** Share of the step before (the first step: of the base). */
+	fromPrevious: number;
+}
+
+export interface PlaytimeFunnelResult {
+	measure: PlaytimeMeasure;
+	/** Players in the base (zero recorded playtime included). */
+	players: number;
+	/** The cap on one session's length, hours. */
+	sessionCapHours: number;
+	steps: PlaytimeStep[];
+	biggestDrop: { seconds: number; lost: number; share: number } | null;
+}
+
+export function playtimeLabel(seconds: number): string {
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600 || seconds % 3600 !== 0) return `${seconds / 60}m`;
+	return `${seconds / 3600}h`;
+}
+
+export const playtimeFunnel = defineQuery<PlaytimeFunnelOptions, PlaytimeFunnelResult>({
+	name: "playtime-funnel",
+	summary: "share of players whose playtime reached 30s, 1m, 3m, 5m, 10m, 30m, 1h, 2h: total in the range, or (measure: first) new players' first session",
+	defaultDays: 30,
+	options: (input = {}) => {
+		const measure = input.measure ?? "total";
+		if (measure !== "total" && measure !== "first") throw new Error(`measure must be "total" or "first"`);
+		return { measure };
+	},
+	statements(ctx, f, o) {
+		const table = eventsTable(ctx, f);
+		const cap = int(PLAYTIME_SESSION_CAP_MS);
+		const first = o.measure === "first";
+		// One statement: sessions (first to last event, capped), summed per player, then one count per step.
+		const counts = PLAYTIME_STEPS_SECONDS.map((sec) => `SUM(CASE WHEN len >= ${int(sec * 1000)} THEN 1 ELSE 0 END) AS r${sec}`).join(", ");
+		return {
+			funnel:
+				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t FROM ${table} e WHERE ${playerRows(f, ctx, first ? "e.newp" : "")}), ` +
+				`s0 AS (SELECT sid, MIN(pid) AS pid, MAX(t) - MIN(t) AS len FROM ev GROUP BY sid), ` +
+				`s AS (SELECT sid, pid, CASE WHEN len > ${cap} THEN ${cap} ELSE len END AS len FROM s0), ` +
+				// A player has one first session; should two be flagged (a rejoin before the first was saved), the longest counts.
+				`u AS (SELECT pid, ${first ? "MAX(len)" : "SUM(len)"} AS len FROM s GROUP BY pid) ` +
+				`SELECT COUNT(*) AS players, ${counts} FROM u ${ctx.dialect.limit(1)}`,
+		};
+	},
+	shape(rows, _ctx, _f, o) {
+		const row = rows.funnel[0] ?? {};
+		const players = num(row.players);
+		let previous = players;
+		let biggestDrop: PlaytimeFunnelResult["biggestDrop"] = null;
+		const steps = PLAYTIME_STEPS_SECONDS.map<PlaytimeStep>((seconds) => {
+			const reached = num(row[`r${seconds}`]);
+			const lost = previous - reached;
+			if (lost > 0 && (!biggestDrop || lost > biggestDrop.lost)) biggestDrop = { seconds, lost, share: ratio(lost, previous) };
+			const out = { seconds, label: playtimeLabel(seconds), reached, ofTotal: ratio(reached, players), fromPrevious: ratio(reached, previous) };
+			previous = reached;
+			return out;
+		});
+		return { measure: o.measure, players, sessionCapHours: PLAYTIME_SESSION_CAP_MS / 3_600_000, steps, biggestDrop };
 	},
 });

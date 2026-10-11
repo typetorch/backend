@@ -97,6 +97,13 @@ describe("Basin results equal DuckDB results (Basin SQL run on DuckDB through sh
 		expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(expected)));
 	});
 
+	test("playtime-funnel, first sessions", async () => {
+		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
+		const expected = await duck.query("playtime-funnel", {}, { measure: "first" });
+		expect(expected.players).toBeGreaterThan(0);
+		expect(await basinStore().query("playtime-funnel", {}, { measure: "first" })).toEqual(expected);
+	});
+
 	test("one-session graph with moments and node details", async () => {
 		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
 		const timeline = await duck.query("timeline", {}, { pid: "p0003" });
