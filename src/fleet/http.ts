@@ -3,23 +3,32 @@
  * and the rate limiters.
  *
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | mark     API key (game role)
+ *   POST /v1/fleet/bundle                                           API key; kernel 0.5.3 debug bundle (<= 512 KB) -> 202 { ok, id }
  *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token
- *   GET  /v1/fleet/servers/<jobId>/metrics?since=<unix ms>         kernel 0.4.2: { points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }
+ *   GET  /v1/fleet/servers?gone=1&branch=&limit=                    closed and lost servers, the most recently gone first
+ *   GET  /v1/fleet/servers/<jobId>/metrics?since=<unix ms>         kernel 0.4.2: { points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] };
+ *                                                                   a since older than 2 h adds 5-minute rollups (`rolledUntil`)
+ *   GET  /v1/fleet/servers/<jobId>/bundles                          { bundles: [summary] } newest first
+ *   GET  /v1/fleet/bundles/<id>                                     { bundle: { ...summary, body } } (the web role: no body.playerLogs)
  *   GET  /v1/fleet/marks?since=&until=&branch=&kinds=&limit=        chart marks: releases, kernel publishes, backup refreshes
  *   GET  /v1/fleet/reports?seq=|artifact=|latest&branch=
  *   GET  /v1/fleet/alerts?since=&level=&unacked=&limit=
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
  */
-import { FleetInputError, JOB_ID_MAX, parseClosing, parseDeploy, parseHeartbeat, parseMark, parseReport, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
+import { BUNDLE_BODY_MAX, FleetInputError, JOB_ID_MAX, parseBundle, parseClosing, parseDeploy, parseHeartbeat, parseMark, parseReport, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
 
 export const FLEET_BODY_LIMIT = 16 * 1024;
 
 /**
  * Per-JobId limits per minute. The kernel sends at most 30 requests a minute in all (burst 10; Constants
- * FLEET_RATE_PER_MINUTE), so these never bite a healthy server. CLI alerts all come as j = "cli".
+ * FLEET_RATE_PER_MINUTE), so these never bite a healthy server. CLI alerts all come as j = "cli". Debug bundles
+ * (kernel 0.5.3): one per trigger code a minute, 11 in a server's life at most, so a few a minute is plenty.
  */
-export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10, deploy: 30, mark: 30 } as const;
+export const FLEET_LIMITS = { heartbeat: 40, report: 40, alert: 40, closing: 10, deploy: 30, mark: 30, bundle: 6 } as const;
+
+/** A route's body at most: 16 KB, a debug bundle 512 KB. */
+const bodyLimit = (kind: keyof typeof FLEET_LIMITS) => (kind === "bundle" ? BUNDLE_BODY_MAX : FLEET_BODY_LIMIT);
 
 /**
  * Never-seen JobIds (no servers row) accepted per minute, across all senders. Anyone with the ingest token (any code
@@ -107,6 +116,8 @@ export interface FleetHttpOptions {
 	pingSeconds?: number;
 	/** Plans/25: extra fields for a heartbeat's 202 reply (`rd: 1` while the explorer watches that JobId). */
 	heartbeatReply?(job: string): Record<string, unknown> | undefined;
+	/** A debug bundle's `playerLogs` go to owners (the admin role) only; the read-only web role gets the body without them. Default: nobody. */
+	canReadPlayerLogs?(req: Request): boolean;
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -128,16 +139,56 @@ function intParam(value: string | null, name: string): number | undefined {
 	return n;
 }
 
-async function readJson(req: Request): Promise<unknown> {
+/** The body as text, at most `limit` bytes (read in chunks: a larger body is refused without holding it all). */
+async function readText(req: Request, limit: number): Promise<{ text: string; bytes: number }> {
 	const declared = Number(req.headers.get("content-length") ?? "0");
-	if (declared > FLEET_BODY_LIMIT) throw new BodyTooLarge();
-	const text = await req.text();
-	if (text.length > FLEET_BODY_LIMIT) throw new BodyTooLarge();
+	if (declared > limit) throw new BodyTooLarge();
+	if (!req.body) return { text: "", bytes: 0 };
+	const reader = req.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let bytes = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		bytes += value.byteLength;
+		if (bytes > limit) {
+			await reader.cancel().catch(() => {});
+			throw new BodyTooLarge();
+		}
+		chunks.push(value);
+	}
+	const all = new Uint8Array(bytes);
+	let at = 0;
+	for (const chunk of chunks) {
+		all.set(chunk, at);
+		at += chunk.byteLength;
+	}
+	return { text: new TextDecoder().decode(all), bytes };
+}
+
+async function readJson(req: Request, limit = FLEET_BODY_LIMIT): Promise<unknown> {
+	return (await readJsonSized(req, limit)).value;
+}
+
+async function readJsonSized(req: Request, limit: number): Promise<{ value: unknown; bytes: number }> {
+	const { text, bytes } = await readText(req, limit);
 	try {
-		return JSON.parse(text);
+		return { value: JSON.parse(text), bytes };
 	} catch {
 		throw new FleetInputError("body must be JSON");
 	}
+}
+
+/** A JobId from the path, URL-decoded and checked. */
+function pathJob(encoded: string): string {
+	let job: string;
+	try {
+		job = decodeURIComponent(encoded);
+	} catch {
+		throw new FleetInputError("the JobId in the path is not valid URL encoding");
+	}
+	if (!job || job.length > JOB_ID_MAX || job.includes("\0")) throw new FleetInputError(`the JobId must be 1-${JOB_ID_MAX} characters`);
+	return job;
 }
 
 class BodyTooLarge extends Error {}
@@ -150,7 +201,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		if (req.method === "POST" && Object.hasOwn(FLEET_LIMITS, route)) {
 			if (!o.isIngest(req)) return json(401, { error: "ingest token required" });
 			const kind = route as keyof typeof FLEET_LIMITS;
-			const body = await readJson(req);
+			const { value: body, bytes } = await readJsonSized(req, bodyLimit(kind));
 			const job = typeof (body as { j?: unknown })?.j === "string" ? (body as { j: string }).j : (req.headers.get("x-tt-job") ?? "");
 			// Checked here, before any limiter keeps the key (the service checks the same per route).
 			if (job.length > JOB_ID_MAX || job.includes("\0")) throw new FleetInputError(`j must be a string of at most ${JOB_ID_MAX} characters`);
@@ -181,7 +232,11 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			else if (kind === "closing") await accept("heartbeat", { kind: "closing", ...parseClosing(body, header) });
 			else if (kind === "deploy") await accept("deploy", { kind: "start", deploy: parseDeploy(body) });
 			else if (kind === "mark") await accept("deploy", { kind: "mark", mark: parseMark(body) });
-			else {
+			else if (kind === "bundle") {
+				// Straight into the store (like alerts): a repeat id is accepted again and stores nothing.
+				const stored = await o.service.addBundle(parseBundle(body, bytes));
+				return json(202, { ok: true, id: stored.id, ...(stored.duplicate ? { duplicate: true } : {}) });
+			} else {
 				const alert = await o.service.alert(body);
 				return json(202, { ok: true, id: alert.id });
 			}
@@ -196,6 +251,10 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		}
 		if (req.method !== "GET") return json(405, { error: "method not allowed" });
 		const q = url.searchParams;
+		if (route === "servers" && (q.get("gone") === "1" || q.get("gone") === "true")) {
+			const limit = intParam(q.get("limit"), "limit");
+			return json(200, await o.service.goneServers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(limit !== undefined ? { limit } : {}) }));
+		}
 		if (route === "servers") {
 			const maxAge = intParam(q.get("maxAge"), "maxAge");
 			return json(200, await o.service.servers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(maxAge !== undefined ? { maxAgeSeconds: maxAge } : {}) }));
@@ -203,15 +262,17 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		// Kernel 0.4.2: one server's TPS / memory / players history, oldest first (the explorer's /servers/<JobId> graphs).
 		const metrics = /^servers\/([^/]+)\/metrics$/.exec(route);
 		if (metrics) {
-			let job: string;
-			try {
-				job = decodeURIComponent(metrics[1]);
-			} catch {
-				throw new FleetInputError("the JobId in the path is not valid URL encoding");
-			}
-			if (!job || job.length > JOB_ID_MAX || job.includes("\0")) throw new FleetInputError(`the JobId must be 1-${JOB_ID_MAX} characters`);
+			const job = pathJob(metrics[1]);
 			const since = timeParam(q.get("since"));
 			return json(200, await o.service.metrics(job, since !== undefined ? { since } : {}));
+		}
+		// Kernel 0.5.3 debug bundles: one server's list (summaries), and one bundle with its body.
+		const bundles = /^servers\/([^/]+)\/bundles$/.exec(route);
+		if (bundles) return json(200, { bundles: await o.service.bundles(pathJob(bundles[1])) });
+		const bundle = /^bundles\/([^/]+)$/.exec(route);
+		if (bundle) {
+			const found = await o.service.bundleById(bundle[1], { playerLogs: o.canReadPlayerLogs?.(req) ?? false });
+			return found ? json(200, { bundle: found }) : json(404, { error: "no such bundle (bundles are kept 30 days, 20 per server)" });
 		}
 		if (route === "reports") {
 			const seq = intParam(q.get("seq"), "seq");
@@ -294,7 +355,9 @@ function stream(req: Request, url: URL, o: FleetHttpOptions): Response {
 										? event.mark.kind === "kernel" || event.mark.kind === "backup"
 											? branch
 											: event.mark.branch
-										: event.branch;
+										: event.type === "bundle"
+											? event.bundle.branch
+											: event.branch;
 					if (b !== branch) return;
 				}
 				send(event.type, event);

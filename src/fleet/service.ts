@@ -20,7 +20,16 @@ export const STUCK_AFTER_MS = 3 * 60_000;
 export const STUCK_WINDOW_MS = 30 * 60_000;
 export const KEEP_REPORTS_MS = 30 * 86_400_000;
 export const KEEP_ALERTS_MS = 90 * 86_400_000;
-export const KEEP_GONE_SERVERS_MS = 86_400_000;
+/**
+ * A closed or lost server's row stays this long (its offline history on the server page: the row, its alerts, reports,
+ * debug bundles and metrics rollups), and at most GONE_SERVERS_MAX of them (the oldest gone first).
+ */
+export const KEEP_GONE_SERVERS_MS = 30 * 86_400_000;
+/**
+ * Gone rows at most: a 1,250-server fleet that restarts every few hours closes ~10,000 servers a day, so 50,000 is
+ * about five days of a big fleet and the whole 30 days of a small one. Live rows never count.
+ */
+export const GONE_SERVERS_MAX = 50_000;
 /** Kernel 0.4.2 metrics history: one point per heartbeat, kept this long per server (the sweep prunes older ones). */
 export const KEEP_METRICS_MS = 2 * 3_600_000;
 /** And at most this many points per server (heartbeats come every 30 s, sooner on changes; the oldest go first). */
@@ -30,6 +39,25 @@ export const METRICS_MAX_POINTS = 720;
  * fits, while made-up JobIds (up to TYPETORCH_NEW_JOBS_PER_MINUTE of them a minute) can't grow the table without end.
  */
 export const METRICS_MAX_ROWS = 1_000_000;
+/**
+ * The metrics rollup: every finished 5-minute bucket of the raw points (server_metrics), one row per server and bucket
+ * (averages; the slowest second and the most players), kept 30 days so a server's charts cover its whole life after
+ * the raw points (2 hours) are gone.
+ */
+export const ROLLUP_MS = 5 * 60_000;
+export const KEEP_ROLLUPS_MS = 30 * 86_400_000;
+/**
+ * And at most this many rollup rows in all (the oldest go first): 288 a day per server, so ~5 server-years. A big fleet
+ * reaches it before 30 days; a made-up JobId adds at most a few rows (its raw points are capped the same way).
+ */
+export const ROLLUP_MAX_ROWS = 5_000_000;
+/** Debug bundles (kernel 0.5.3, POST /v1/fleet/bundle): kept 30 days, at most BUNDLES_PER_JOB per JobId, BUNDLES_MAX_BYTES in all. */
+export const KEEP_BUNDLES_MS = 30 * 86_400_000;
+export const BUNDLES_PER_JOB = 20;
+/** Counted as stored (gzipped) bytes: what the bundles take on disk. */
+export const BUNDLES_MAX_BYTES = 500 * 1024 * 1024;
+/** A bundle's JSON body at most (the kernel caps its own at ~200 KB); larger posts get 413. */
+export const BUNDLE_BODY_MAX = 512 * 1024;
 /** Kernel publishes and backup refreshes (the marks table) are rare and useful on long charts: kept a year. */
 export const KEEP_MARKS_MS = 365 * 86_400_000;
 /** GET marks reads at most this long a window. */
@@ -141,7 +169,8 @@ export type FleetEvent =
 	| { type: "deploy"; seq: number; branch: string | null; artifact: string | null; kind?: string | null }
 	| { type: "mark"; mark: DeployMark }
 	| { type: "alert"; alert: Alert }
-	| { type: "alert_ack"; id: number };
+	| { type: "alert_ack"; id: number }
+	| { type: "bundle"; bundle: BundleSummary };
 
 export class FleetInputError extends Error {
 	override name = "FleetInputError";
@@ -489,8 +518,179 @@ export function parseAlert(raw: unknown, source: "game" | "cli" = "game"): NewAl
 		generation: int(b, "g"),
 		kernel: text(b, "k", 32),
 		source: fromCli ? "cli" : "game",
-		details: null,
+		details: parseAlertDetails(b.d),
 	};
+}
+
+/** An alert's `d` at most: this many keys, and this many bytes as JSON. */
+export const ALERT_DETAILS_MAX_KEYS = 16;
+export const ALERT_DETAILS_MAX_BYTES = 4096;
+/** And each string value at most this many bytes (UTF-8). */
+export const ALERT_DETAIL_TEXT_MAX = 1000;
+const DETAIL_KEY = /^[A-Za-z0-9_.-]{1,64}$/;
+const utf8 = new TextEncoder();
+
+/**
+ * Kernel 0.5.2: an alert's `d`, a FLAT object of strings, numbers and booleans (deploy_failed: { stage, error,
+ * attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }; from 0.5.3 `bundle`, the id of the debug
+ * bundle that follows). Kept when it is a plain object of at most ALERT_DETAILS_MAX_KEYS such values (strings at most
+ * ALERT_DETAIL_TEXT_MAX bytes) and at most ALERT_DETAILS_MAX_BYTES of JSON; anything else is null, never a 400 (the
+ * alert itself matters more than its details).
+ */
+export function parseAlertDetails(value: unknown): Record<string, string | number | boolean> | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+	const entries = Object.entries(value as Record<string, unknown>);
+	if (!entries.length || entries.length > ALERT_DETAILS_MAX_KEYS) return null;
+	const out: Record<string, string | number | boolean> = {};
+	for (const [key, inner] of entries) {
+		if (!DETAIL_KEY.test(key)) return null;
+		if (typeof inner === "string") {
+			if (inner.includes("\0") || utf8.encode(inner).length > ALERT_DETAIL_TEXT_MAX) return null;
+		} else if (typeof inner === "number") {
+			if (!Number.isFinite(inner)) return null;
+		} else if (typeof inner !== "boolean") return null;
+		out[key] = inner;
+	}
+	return utf8.encode(JSON.stringify(out)).length <= ALERT_DETAILS_MAX_BYTES ? out : null;
+}
+
+// Debug bundles (kernel 0.5.3) --------------------------------------------------------------------------------------------
+
+/** What a bundle's `code` may be: an alert code, start_failed, health_rollback, players_moved, closing, manual. */
+const BUNDLE_CODE = /^[a-z0-9_.-]{1,64}$/;
+/** Bundle ids are made by the kernel: 32 lowercase hex characters. */
+export const BUNDLE_ID = /^[0-9a-f]{32}$/;
+/** The bundle sections that must be objects, and the ones that must be arrays, when present (their insides are opaque). */
+const BUNDLE_OBJECTS = ["failure", "server", "deploy", "fallback", "playerLogs"] as const;
+const BUNDLE_ARRAYS = ["alerts", "players", "serverLog"] as const;
+
+/** A debug bundle's summary: the top-level fields, never its sections (GET .../bundles, the server page's list). */
+export interface BundleSummary {
+	id: string;
+	job: string;
+	/** What made the kernel send it: an alert code, start_failed, health_rollback, players_moved, closing, manual. */
+	code: string;
+	level: AlertLevel;
+	message: string;
+	/** Sent from BindToClose (after a failure in the server's last 10 minutes). */
+	closing: boolean;
+	/** When the kernel made it (its `t`), else when it arrived, unix ms. */
+	at: number;
+	time: string;
+	kernel: string | null;
+	branch: string | null;
+	artifact: string | null;
+	seq: number | null;
+	generation: number | null;
+	/** Players in the bundle (`players` entries). */
+	players: number;
+	/** The posted JSON, bytes. */
+	size: number;
+	/** `failure.stage` and `failure.error`, clipped (the list and the timeline show them without reading the body). */
+	stage: string | null;
+	error: string | null;
+}
+
+/** One generation start from a bundle's `deploy.history` (the timeline's swaps; the kernel keeps the last 30). */
+export interface BundleSwap {
+	/** unix ms (the history entry's ISO `at`). */
+	at: number;
+	name: string | null;
+	artifact: string | null;
+	branch: string | null;
+	/** Why it started: boot, deploy, rollback, ... */
+	reason: string | null;
+	loadSeconds: number | null;
+	swapSeconds: number | null;
+	/** The bundle it came from. */
+	bundle: string;
+}
+
+/** A bundle after validation: the summary fields, the swaps, and the body as JSON text (stored gzipped). */
+export interface ParsedBundle {
+	id: string;
+	job: string;
+	code: string;
+	level: AlertLevel;
+	message: string;
+	closing: boolean;
+	t: number | null;
+	kernel: string | null;
+	branch: string | null;
+	artifact: string | null;
+	seq: number | null;
+	generation: number | null;
+	players: number;
+	stage: string | null;
+	error: string | null;
+	swaps: Omit<BundleSwap, "bundle">[];
+	body: string;
+	size: number;
+}
+
+const clip = (v: unknown, max: number): string | null => (typeof v === "string" && v !== "" ? v.replaceAll("\0", "").slice(0, max) : null);
+const finite = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/**
+ * POST /v1/fleet/bundle (kernel 0.5.3): `{ v: 1, id, j, t, k, b, a, s, g, code, level, message, closing, failure, server,
+ * deploy, fallback, alerts, players, serverLog, playerLogs }`. Only the top-level summary fields are read; every section
+ * is opaque JSON (checked to be an object or an array, never trusted, never run: the explorer shows it as text).
+ * `size` is the posted JSON's length in bytes (the HTTP edge refuses more than BUNDLE_BODY_MAX). Throws FleetInputError.
+ */
+export function parseBundle(raw: unknown, size?: number): ParsedBundle {
+	const b = asBody(raw);
+	if (b.v !== 1) throw new FleetInputError("v must be 1 (the bundle format)");
+	const id = typeof b.id === "string" && BUNDLE_ID.test(b.id) ? b.id : null;
+	if (!id) throw new FleetInputError("id must be 32 lowercase hex characters");
+	const job = text(b, "j", JOB, true) as string;
+	const code = text(b, "code", 64, true) as string;
+	if (!BUNDLE_CODE.test(code)) throw new FleetInputError("code must be lowercase letters, digits, _ . -");
+	const level = text(b, "level", 16, true);
+	if (!(ALERT_LEVELS as readonly string[]).includes(level ?? "")) throw new FleetInputError("level must be critical, warning or info");
+	if (b.closing !== undefined && b.closing !== null && typeof b.closing !== "boolean") throw new FleetInputError("closing must be true or false");
+	for (const key of BUNDLE_OBJECTS) {
+		const v = b[key];
+		if (v !== undefined && v !== null && (typeof v !== "object" || Array.isArray(v))) throw new FleetInputError(`${key} must be an object`);
+	}
+	for (const key of BUNDLE_ARRAYS) {
+		const v = b[key];
+		if (v !== undefined && v !== null && !Array.isArray(v)) throw new FleetInputError(`${key} must be an array`);
+	}
+	const failure = fields(b.failure);
+	const body = JSON.stringify(b);
+	return {
+		id,
+		job,
+		code,
+		level: level as AlertLevel,
+		message: text(b, "message", 2000) ?? "",
+		closing: b.closing === true,
+		t: int(b, "t"),
+		kernel: text(b, "k", 32),
+		branch: text(b, "b", 64),
+		artifact: text(b, "a", 64),
+		seq: int(b, "s"),
+		generation: int(b, "g"),
+		players: Array.isArray(b.players) ? b.players.length : 0,
+		stage: clip(failure.stage, 64),
+		error: clip(failure.error, 500),
+		swaps: bundleSwaps(fields(b.deploy).history),
+		body,
+		size: size ?? utf8.encode(body).length,
+	};
+}
+
+/** The generation starts in a bundle's `deploy.history` ({ name, artifactId, branch, at (ISO), reason, loadSeconds, swapSeconds }), at most 30. */
+function bundleSwaps(history: unknown): Omit<BundleSwap, "bundle">[] {
+	if (!Array.isArray(history)) return [];
+	const out: Omit<BundleSwap, "bundle">[] = [];
+	for (const entry of history.slice(-30)) {
+		const e = fields(entry);
+		const at = typeof e.at === "string" ? Date.parse(e.at) : typeof e.at === "number" ? toMs(e.at) : null;
+		if (at === null || !Number.isFinite(at)) continue;
+		out.push({ at, name: clip(e.name, 64), artifact: clip(e.artifactId, 64), branch: clip(e.branch, 64), reason: clip(e.reason, 32), loadSeconds: finite(e.loadSeconds), swapSeconds: finite(e.swapSeconds) });
+	}
+	return out;
 }
 
 // Rows -> API shapes ------------------------------------------------------------------------------------------------------
@@ -583,8 +783,36 @@ function budgetOf(text: string | null | undefined): Record<string, unknown> | nu
 	}
 }
 
-/** Plans/25: what the server page shows for a JobId of any age. */
-export type ServerState = "live" | "closed" | "lost" | "unknown";
+/**
+ * Plans/25: what the server page shows for a JobId of any age. "gone": no servers row (past KEEP_GONE_SERVERS_MS or
+ * GONE_SERVERS_MAX) but alerts, deploy reports, debug bundles or metrics rollups still mention the JobId.
+ */
+export type ServerState = "live" | "closed" | "lost" | "gone" | "unknown";
+
+/** The time range a server's metrics cover (raw points and 5-minute rollups), unix ms; nulls when it has none. */
+export interface MetricsRange {
+	from: number | null;
+	to: number | null;
+}
+
+/**
+ * A server's offline history (GET /v1/fleet/servers/<job>): what the fleet still holds about the JobId after the server
+ * is gone, newest first. Also for live servers (the page's Debug bundles and Timeline).
+ */
+export interface ServerHistory {
+	/** Alerts with this JobId (at most 200). */
+	alerts: Alert[];
+	/** Its deploy reports (at most 200). */
+	reports: ReportItem[];
+	/** Its debug bundles' summaries (at most BUNDLES_PER_JOB are kept). */
+	bundles: BundleSummary[];
+	/** Generation starts from its bundles' deploy history, one per (at, name). */
+	swaps: BundleSwap[];
+	metrics: MetricsRange;
+}
+
+/** A gone server in the Fleet page's "Recently gone" list (GET /v1/fleet/servers?gone=1). */
+export type GoneServer = ServerInfo & { closedAt: string | null; lostAt: string | null; state: "closed" | "lost"; firstSeen: string };
 
 interface AlertRow {
 	id: number;
@@ -647,22 +875,36 @@ CREATE TABLE IF NOT EXISTS servers (
 	first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
+CREATE INDEX IF NOT EXISTS servers_open ON servers (last_seen) WHERE closed_at IS NULL AND lost_at IS NULL;
+CREATE INDEX IF NOT EXISTS servers_gone ON servers (COALESCE(closed_at, lost_at)) WHERE closed_at IS NOT NULL OR lost_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS server_metrics (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, t INTEGER NOT NULL, tps REAL, tps_min REAL, phys_fps REAL, mem_mb REAL, lua_mb REAL,
 	players INTEGER);
 CREATE INDEX IF NOT EXISTS server_metrics_job ON server_metrics (job, id);
 CREATE INDEX IF NOT EXISTS server_metrics_t ON server_metrics (t);
+CREATE TABLE IF NOT EXISTS server_metrics_5m (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, t INTEGER NOT NULL, n INTEGER NOT NULL, tps REAL, tps_min REAL, phys_fps REAL,
+	mem_mb REAL, lua_mb REAL, players INTEGER, UNIQUE (job, t));
+CREATE INDEX IF NOT EXISTS server_metrics_5m_t ON server_metrics_5m (t);
+CREATE TABLE IF NOT EXISTS bundles (
+	id TEXT PRIMARY KEY, job TEXT NOT NULL, code TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL, closing INTEGER NOT NULL, at INTEGER NOT NULL,
+	kernel TEXT, branch TEXT, artifact TEXT, seq INTEGER, generation INTEGER, players INTEGER NOT NULL, size INTEGER NOT NULL, stage TEXT, error TEXT,
+	swaps TEXT, stored INTEGER NOT NULL, received INTEGER NOT NULL, body BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS bundles_job ON bundles (job, received);
+CREATE INDEX IF NOT EXISTS bundles_received ON bundles (received);
 CREATE TABLE IF NOT EXISTS reports (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL, branch TEXT, artifact TEXT, job TEXT NOT NULL, result TEXT NOT NULL,
 	error TEXT, seconds REAL, t INTEGER, generation INTEGER, kernel TEXT, players INTEGER, received INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS reports_seq ON reports (seq, job);
 CREATE INDEX IF NOT EXISTS reports_artifact ON reports (artifact);
 CREATE INDEX IF NOT EXISTS reports_received ON reports (received);
+CREATE INDEX IF NOT EXISTS reports_job ON reports (job, id);
 CREATE TABLE IF NOT EXISTS alerts (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, code TEXT NOT NULL, message TEXT NOT NULL, job TEXT, branch TEXT,
 	artifact TEXT, seq INTEGER, t INTEGER, generation INTEGER, kernel TEXT, source TEXT NOT NULL, details TEXT, created INTEGER NOT NULL,
 	acked_at INTEGER, acked_by TEXT);
 CREATE INDEX IF NOT EXISTS alerts_created ON alerts (created);
+CREATE INDEX IF NOT EXISTS alerts_job ON alerts (job, id);
 CREATE TABLE IF NOT EXISTS deploys (
 	seq INTEGER PRIMARY KEY, branch TEXT, artifact TEXT, channel TEXT, t INTEGER, received INTEGER NOT NULL, stuck_at INTEGER);
 CREATE INDEX IF NOT EXISTS deploys_received ON deploys (received);
@@ -705,13 +947,76 @@ export interface FleetServiceOptions {
 	log?: (line: string) => void;
 	/** The metrics history's total cap (default METRICS_MAX_ROWS; tests use a small one). */
 	metricsMaxRows?: number;
+	/** The rollups' total cap (default ROLLUP_MAX_ROWS). */
+	rollupMaxRows?: number;
+	/** Gone servers kept at most (default GONE_SERVERS_MAX). */
+	goneServersMax?: number;
+	/** Debug bundles' stored bytes at most (default BUNDLES_MAX_BYTES). */
+	bundlesMaxBytes?: number;
 }
+
+/** gzip / gunzip through the web's CompressionStream (Bun, Node 18+, Workers: no Node APIs here). */
+async function gzip(text: string): Promise<Uint8Array> {
+	return new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+}
+
+async function gunzip(bytes: Uint8Array): Promise<string> {
+	return new Response(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+}
+
+interface BundleRow {
+	id: string;
+	job: string;
+	code: string;
+	level: AlertLevel;
+	message: string;
+	closing: number;
+	at: number;
+	kernel: string | null;
+	branch: string | null;
+	artifact: string | null;
+	seq: number | null;
+	generation: number | null;
+	players: number;
+	size: number;
+	stage: string | null;
+	error: string | null;
+}
+
+const BUNDLE_COLUMNS = "id, job, code, level, message, closing, at, kernel, branch, artifact, seq, generation, players, size, stage, error";
+
+function bundleOf(r: BundleRow): BundleSummary {
+	return {
+		id: r.id,
+		job: r.job,
+		code: r.code,
+		level: r.level,
+		message: r.message,
+		closing: r.closing === 1,
+		at: r.at,
+		time: new Date(r.at).toISOString(),
+		kernel: r.kernel,
+		branch: r.branch,
+		artifact: r.artifact,
+		seq: r.seq,
+		generation: r.generation,
+		players: r.players,
+		size: r.size,
+		stage: r.stage,
+		error: r.error,
+	};
+}
+
+type MetricRow = { t: number; tps: number | null; tps_min: number | null; phys_fps: number | null; mem_mb: number | null; lua_mb: number | null; players: number | null };
+const pointOf = (r: MetricRow): MetricPoint => ({ t: r.t, tps: r.tps, tpsMin: r.tps_min, physFps: r.phys_fps, memMb: r.mem_mb, luaMb: r.lua_mb, players: r.players });
 
 export class FleetService {
 	private readonly db: FleetDb;
 	private readonly clock: () => number;
 	private readonly listeners = new Set<(event: FleetEvent) => void>();
 	private lastRetention = 0;
+	/** The metrics rollup's progress: buckets before this (unix ms) are rolled up (read from the table on the first sweep). */
+	private rolledUntil: number | undefined;
 
 	private constructor(private readonly options: FleetServiceOptions) {
 		this.db = options.db;
@@ -958,7 +1263,61 @@ export class FleetService {
 		return this.addAlert(parseAlert(raw, source));
 	}
 
-	/** Whether a servers row exists for this JobId (live, closed or lost; rows go a day after a server is gone). */
+	/**
+	 * Kernel 0.5.3: stores a debug bundle (the body gzipped, the summary in columns). A repeat id stores nothing
+	 * (`duplicate`): the kernel may send one again when its first try timed out.
+	 */
+	async bundle(raw: unknown, size?: number): Promise<{ id: string; duplicate: boolean }> {
+		return this.addBundle(parseBundle(raw, size));
+	}
+
+	async addBundle(p: ParsedBundle): Promise<{ id: string; duplicate: boolean }> {
+		if (await this.db.first<{ x: number }>("SELECT 1 AS x FROM bundles WHERE id = ?", [p.id])) return { id: p.id, duplicate: true };
+		const now = this.clock();
+		const at = markTime(p.t, now);
+		const body = await gzip(p.body);
+		const inserted = await this.db.transaction((tx) => {
+			const { changes } = tx.run(
+				"INSERT OR IGNORE INTO bundles (id, job, code, level, message, closing, at, kernel, branch, artifact, seq, generation, players, size, stage, error, swaps, stored, received, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				[p.id, p.job, p.code, p.level, p.message, p.closing ? 1 : 0, at, p.kernel, p.branch, p.artifact, p.seq, p.generation, p.players, p.size, p.stage, p.error, p.swaps.length ? JSON.stringify(p.swaps) : null, body.length, now, body],
+			);
+			// At most BUNDLES_PER_JOB per JobId (the kernel sends 11 in a server's life at most; this bounds a made-up one).
+			if (changes) tx.run("DELETE FROM bundles WHERE job = ? AND id NOT IN (SELECT id FROM bundles WHERE job = ? ORDER BY received DESC, at DESC LIMIT ?)", [p.job, p.job, BUNDLES_PER_JOB]);
+			return changes > 0;
+		});
+		if (!inserted) return { id: p.id, duplicate: true };
+		const row = await this.db.first<BundleRow>(`SELECT ${BUNDLE_COLUMNS} FROM bundles WHERE id = ?`, [p.id]);
+		if (row) this.emit({ type: "bundle", bundle: bundleOf(row) });
+		return { id: p.id, duplicate: false };
+	}
+
+	/** A JobId's debug bundles, newest first (summaries only). */
+	async bundles(job: string): Promise<BundleSummary[]> {
+		return (await this.db.all<BundleRow>(`SELECT ${BUNDLE_COLUMNS} FROM bundles WHERE job = ? ORDER BY at DESC, received DESC LIMIT ?`, [job, BUNDLES_PER_JOB * 2])).map(bundleOf);
+	}
+
+	/**
+	 * One debug bundle: the summary and the posted JSON as `body`. Without `playerLogs` (the read-only web role) the
+	 * body comes without `playerLogs` (what each player's client logged is for owners) and says so (`playerLogsHidden`).
+	 */
+	async bundleById(id: string, options: { playerLogs: boolean }): Promise<(BundleSummary & { body: Record<string, unknown>; playerLogsHidden?: true }) | null> {
+		if (!BUNDLE_ID.test(id)) return null;
+		const row = await this.db.first<BundleRow & { body: Uint8Array }>(`SELECT ${BUNDLE_COLUMNS}, body FROM bundles WHERE id = ?`, [id]);
+		if (!row) return null;
+		let body: Record<string, unknown> = {};
+		try {
+			const value = JSON.parse(await gunzip(row.body));
+			if (typeof value === "object" && value !== null && !Array.isArray(value)) body = value;
+		} catch {}
+		if (!options.playerLogs) {
+			const hidden = "playerLogs" in body;
+			delete body.playerLogs;
+			return { ...bundleOf(row), body, ...(hidden ? { playerLogsHidden: true as const } : {}) };
+		}
+		return { ...bundleOf(row), body };
+	}
+
+	/** Whether a servers row exists for this JobId (live, closed or lost; rows go KEEP_GONE_SERVERS_MS after a server is gone). */
 	async knows(job: string): Promise<boolean> {
 		return (await this.db.first<{ x: number }>("SELECT 1 AS x FROM servers WHERE job = ?", [job])) !== undefined;
 	}
@@ -1039,23 +1398,90 @@ export class FleetService {
 	/**
 	 * Kernel 0.4.2: a server's metrics history (one point per heartbeat, the last KEEP_METRICS_MS, at most
 	 * METRICS_MAX_POINTS), oldest first; `since` (unix ms) keeps only later points. An unknown JobId has no points.
+	 * A `since` older than the raw window adds the 5-minute rollups (KEEP_ROLLUPS_MS) up to the bucket the raw window
+	 * starts in: `rolledUntil` says where (points before it are one per ROLLUP_MS bucket, at the bucket's start).
 	 */
-	async metrics(job: string, options: { since?: number } = {}): Promise<{ points: MetricPoint[] }> {
-		const from = Math.max(options.since ?? 0, this.clock() - KEEP_METRICS_MS);
-		const rows = await this.db.all<{ t: number; tps: number | null; tps_min: number | null; phys_fps: number | null; mem_mb: number | null; lua_mb: number | null; players: number | null }>(
-			"SELECT t, tps, tps_min, phys_fps, mem_mb, lua_mb, players FROM server_metrics WHERE job = ? AND t > ? ORDER BY id",
-			[job, from],
-		);
-		return { points: rows.map((r) => ({ t: r.t, tps: r.tps, tpsMin: r.tps_min, physFps: r.phys_fps, memMb: r.mem_mb, luaMb: r.lua_mb, players: r.players })) };
+	async metrics(job: string, options: { since?: number } = {}): Promise<{ points: MetricPoint[]; rolledUntil?: number }> {
+		const rawFrom = this.clock() - KEEP_METRICS_MS;
+		const from = Math.max(options.since ?? 0, rawFrom);
+		const rows = await this.db.all<MetricRow>("SELECT t, tps, tps_min, phys_fps, mem_mb, lua_mb, players FROM server_metrics WHERE job = ? AND t > ? ORDER BY id", [job, from]);
+		if (options.since === undefined || options.since >= rawFrom) return { points: rows.map(pointOf) };
+		// The bucket the raw window starts in is left to the raw points (a rollup of it would overlap them).
+		const cut = Math.floor(rawFrom / ROLLUP_MS) * ROLLUP_MS;
+		const rolled = await this.db.all<MetricRow>("SELECT t, tps, tps_min, phys_fps, mem_mb, lua_mb, players FROM server_metrics_5m WHERE job = ? AND t > ? AND t < ? ORDER BY t", [job, options.since - ROLLUP_MS, cut]);
+		return { points: [...rolled.map(pointOf), ...rows.map(pointOf)], rolledUntil: cut };
 	}
 
-	/** Plans/25 (the server page): one server by JobId, whatever its age (rows go a day after a server is gone), and its state. */
-	async server(job: string): Promise<{ server: (ServerInfo & { closedAt: string | null; lostAt: string | null }) | null; state: ServerState }> {
+	/**
+	 * Plans/25 (the server page): one server by JobId, whatever its age, its state and its history (alerts, deploy
+	 * reports, debug bundles, swaps, the metrics' time range). Without a servers row (gone past KEEP_GONE_SERVERS_MS or
+	 * GONE_SERVERS_MAX) the state is "gone" while any of that still mentions the JobId, else "unknown".
+	 */
+	async server(job: string): Promise<{ server: (ServerInfo & { closedAt: string | null; lostAt: string | null; firstSeen: string }) | null; state: ServerState; history: ServerHistory }> {
 		const now = this.clock();
 		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
-		if (!row) return { server: null, state: "unknown" };
+		const history = await this.history(job);
+		if (!row) {
+			const any = history.alerts.length || history.reports.length || history.bundles.length || history.metrics.from !== null;
+			return { server: null, state: any ? "gone" : "unknown", history };
+		}
 		const state: ServerState = row.closed_at !== null ? "closed" : row.lost_at !== null || now - row.last_seen > LOST_AFTER_MS ? "lost" : "live";
-		return { server: { ...serverInfo(row, now), closedAt: iso(row.closed_at), lostAt: iso(row.lost_at) }, state };
+		return { server: { ...serverInfo(row, now), closedAt: iso(row.closed_at), lostAt: iso(row.lost_at), firstSeen: new Date(row.first_seen).toISOString() }, state, history };
+	}
+
+	/** What the fleet holds about a JobId, newest first (the server page's Timeline, Debug bundles and charts). */
+	async history(job: string): Promise<ServerHistory> {
+		const alerts = (await this.db.all<AlertRow>("SELECT * FROM alerts WHERE job = ? ORDER BY id DESC LIMIT 200", [job])).map(alertOf);
+		const reports = await this.db.all<{ seq: number; branch: string | null; artifact: string | null; job: string; result: string; error: string | null; seconds: number | null; t: number | null; received: number; generation: number | null; kernel: string | null; players: number | null }>(
+			"SELECT seq, branch, artifact, job, result, error, seconds, t, received, generation, kernel, players FROM reports WHERE job = ? ORDER BY id DESC LIMIT 200",
+			[job],
+		);
+		const bundleRows = await this.db.all<BundleRow & { swaps: string | null }>(`SELECT ${BUNDLE_COLUMNS}, swaps FROM bundles WHERE job = ? ORDER BY at DESC, received DESC LIMIT ?`, [job, BUNDLES_PER_JOB * 2]);
+		// Each bundle carries the server's whole generation history so far: one swap per (at, name), from the newest bundle.
+		const swaps = new Map<string, BundleSwap>();
+		for (const r of bundleRows) {
+			let list: Omit<BundleSwap, "bundle">[] = [];
+			try {
+				list = r.swaps ? JSON.parse(r.swaps) : [];
+			} catch {}
+			for (const swap of Array.isArray(list) ? list : []) {
+				const key = `${swap.at}\u0000${swap.name ?? ""}`;
+				if (!swaps.has(key)) swaps.set(key, { ...swap, bundle: r.id });
+			}
+		}
+		const raw = await this.db.first<{ lo: number | null; hi: number | null }>("SELECT MIN(t) AS lo, MAX(t) AS hi FROM server_metrics WHERE job = ?", [job]);
+		const rolled = await this.db.first<{ lo: number | null; hi: number | null }>("SELECT MIN(t) AS lo, MAX(t) AS hi FROM server_metrics_5m WHERE job = ?", [job]);
+		const los = [raw?.lo, rolled?.lo].filter((v): v is number => typeof v === "number");
+		const his = [raw?.hi, rolled?.hi === null || rolled?.hi === undefined ? null : rolled.hi + ROLLUP_MS].filter((v): v is number => typeof v === "number");
+		return {
+			alerts,
+			reports: reports.map((r) => ({ seq: r.seq, branch: r.branch, artifact: r.artifact, job: r.job, result: r.result, error: r.error, seconds: r.seconds, at: toMs(r.t) ?? r.received, generation: r.generation, kernel: r.kernel, players: r.players })),
+			bundles: bundleRows.map(bundleOf),
+			swaps: [...swaps.values()].sort((a, b) => b.at - a.at),
+			metrics: { from: los.length ? Math.min(...los) : null, to: his.length ? Math.max(...his) : null },
+		};
+	}
+
+	/** Closed and lost servers, the most recently gone first (the Fleet page's "Recently gone"). */
+	async goneServers(options: { branch?: string; limit?: number } = {}): Promise<{ servers: GoneServer[] }> {
+		const now = this.clock();
+		const params: SqlValue[] = [];
+		let sql = `SELECT ${SERVER_COLUMNS} FROM servers WHERE (closed_at IS NOT NULL OR lost_at IS NOT NULL)`;
+		if (options.branch) {
+			sql += " AND branch = ?";
+			params.push(options.branch);
+		}
+		params.push(Math.min(Math.max(1, options.limit ?? 200), 1000));
+		const rows = await this.db.all<ServerRow>(`${sql} ORDER BY COALESCE(closed_at, lost_at) DESC LIMIT ?`, params);
+		return {
+			servers: rows.map((r) => ({
+				...serverInfo(r, now),
+				closedAt: iso(r.closed_at),
+				lostAt: iso(r.lost_at),
+				state: r.closed_at !== null ? "closed" : "lost",
+				firstSeen: new Date(r.first_seen).toISOString(),
+			})),
+		};
 	}
 
 	async reports(options: { seq?: number; artifact?: string; latest?: boolean; branch?: string } = {}): Promise<FleetReport> {
@@ -1221,6 +1647,8 @@ export class FleetService {
 				details: { jobs: rows.slice(0, 100).map((r) => r.job), count: rows.length },
 			});
 		}
+		// The 5-minute rollup of the raw points, before they go (every sweep; a bucket is rolled once it has ended).
+		await this.rollup(now);
 		// Kernel 0.4.2: metrics history older than KEEP_METRICS_MS (every sweep: the index on t keeps it cheap).
 		await this.db.run("DELETE FROM server_metrics WHERE t <= ?", [now - KEEP_METRICS_MS]);
 		// And the total cap: ids only grow, so the rows at or below MAX(id) - cap are the oldest (both lookups use the key).
@@ -1237,8 +1665,55 @@ export class FleetService {
 			// can add a few thousand an hour, never an unbounded table.
 			await this.db.run("DELETE FROM marks WHERE id <= (SELECT MAX(id) FROM marks) - ?", [MARKS_MAX_ROWS]);
 			await this.db.run("DELETE FROM servers WHERE (closed_at IS NOT NULL AND closed_at < ?) OR (lost_at IS NOT NULL AND lost_at < ?)", [now - KEEP_GONE_SERVERS_MS, now - KEEP_GONE_SERVERS_MS]);
+			// And at most GONE_SERVERS_MAX gone rows, the most recently gone kept (live rows never count).
+			await this.db.run(
+				"DELETE FROM servers WHERE job IN (SELECT job FROM servers WHERE closed_at IS NOT NULL OR lost_at IS NOT NULL ORDER BY COALESCE(closed_at, lost_at) DESC LIMIT -1 OFFSET ?)",
+				[this.options.goneServersMax ?? GONE_SERVERS_MAX],
+			);
+			// The rollups: 30 days, and the total cap (ids only grow, as for the raw points; an upsert keeps a row's id).
+			await this.db.run("DELETE FROM server_metrics_5m WHERE t < ?", [now - KEEP_ROLLUPS_MS]);
+			const rollupCap = this.options.rollupMaxRows ?? ROLLUP_MAX_ROWS;
+			const topRollup = await this.db.first<{ id: number | null }>("SELECT MAX(id) AS id FROM server_metrics_5m");
+			if (topRollup?.id && topRollup.id > rollupCap) await this.db.run("DELETE FROM server_metrics_5m WHERE id <= ?", [topRollup.id - rollupCap]);
+			await this.pruneBundles(now);
 		}
 		return { lost: [...groups.values()].reduce((n, rows) => n + rows.length, 0), stuck };
+	}
+
+	/**
+	 * Debug bundle retention (hourly): KEEP_BUNDLES_MS, at most BUNDLES_PER_JOB per JobId (also checked on every insert),
+	 * and at most bundlesMaxBytes stored in all; the oldest go first.
+	 */
+	async pruneBundles(now = this.clock()): Promise<void> {
+		await this.db.run("DELETE FROM bundles WHERE received < ?", [now - KEEP_BUNDLES_MS]);
+		await this.db.run("DELETE FROM bundles WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY job ORDER BY received DESC, at DESC) AS n FROM bundles) WHERE n > ?)", [BUNDLES_PER_JOB]);
+		await this.db.run("DELETE FROM bundles WHERE id IN (SELECT id FROM (SELECT id, SUM(stored) OVER (ORDER BY received DESC, id DESC) AS total FROM bundles) WHERE total > ?)", [
+			this.options.bundlesMaxBytes ?? BUNDLES_MAX_BYTES,
+		]);
+	}
+
+	/**
+	 * Rolls the raw points of every bucket that ended since the last call into server_metrics_5m (one row per JobId and
+	 * bucket: averages, the slowest second, the most players). A point's t is when it arrived, so an ended bucket gets no
+	 * more points. Idempotent (an upsert per bucket): two servers sharing the file in a handover write the same rows.
+	 * After a restart it goes on from the newest rollup, but never from before the raw window (a bucket partly pruned
+	 * would overwrite a whole one with less).
+	 */
+	async rollup(now = this.clock()): Promise<void> {
+		const until = Math.floor(now / ROLLUP_MS) * ROLLUP_MS;
+		if (this.rolledUntil === undefined) {
+			const top = await this.db.first<{ t: number | null }>("SELECT MAX(t) AS t FROM server_metrics_5m");
+			const floor = Math.ceil((now - KEEP_METRICS_MS) / ROLLUP_MS) * ROLLUP_MS;
+			this.rolledUntil = Math.max(top?.t != null ? top.t + ROLLUP_MS : 0, floor);
+		}
+		if (until <= this.rolledUntil) return;
+		await this.db.run(
+			"INSERT INTO server_metrics_5m (job, t, n, tps, tps_min, phys_fps, mem_mb, lua_mb, players) " +
+				`SELECT job, (t / ${ROLLUP_MS}) * ${ROLLUP_MS} AS bucket, COUNT(*), AVG(tps), MIN(tps_min), AVG(phys_fps), AVG(mem_mb), AVG(lua_mb), MAX(players) FROM server_metrics WHERE t >= ? AND t < ? GROUP BY job, bucket ` +
+				"ON CONFLICT(job, t) DO UPDATE SET n = excluded.n, tps = excluded.tps, tps_min = excluded.tps_min, phys_fps = excluded.phys_fps, mem_mb = excluded.mem_mb, lua_mb = excluded.lua_mb, players = excluded.players",
+			[this.rolledUntil, until],
+		);
+		this.rolledUntil = until;
 	}
 
 	async counts(): Promise<{ servers: number; reports: number; alerts: number; unacked: number }> {

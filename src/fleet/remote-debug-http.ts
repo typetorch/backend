@@ -8,7 +8,10 @@
  *   POST /v1/fleet/results  { j, results: [...] }     -> 202 { accepted, ignored }
  *
  *   admin (the admin token or an explorer session; GET /v1/fleet/servers/<job> also for the read-only web role)
- *   GET  /v1/fleet/servers/<job>                      -> { server, state, debug }
+ *   GET  /v1/fleet/servers/<job>                      -> { server, state, debug, history }   (state: live, closed, lost,
+ *                                                        gone (no row, but alerts, reports, bundles or metrics name it) or
+ *                                                        unknown; history: its alerts, deploy reports, debug bundles, swaps
+ *                                                        and the time range its metrics cover)
  *   POST /v1/fleet/servers/<job>/watch                -> { job, ...debug, wake }   (wake: a wake message went out lately
  *                                                        for this job: "Waking server..."; remote-debug-wake.ts)
  *   POST /v1/fleet/servers/<job>/commands { op, args } -> 202 { id, op, state, expiresAt }
@@ -153,8 +156,9 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 			if (method !== "POST" || m[3]) return json(405, { error: "POST only" });
 			if (!o.limiters.watches.take(who)) return tooMany(o.limiters.watches.retryAfter(who));
 			const { state } = await o.fleet.server(job);
-			// A closed or unknown server has nothing to debug: no watch, so its (missing) heartbeats get no rd.
-			if (state === "closed" || state === "unknown") return json(409, { error: state === "closed" ? "this server closed" : "no heartbeat from this JobId", state });
+			// A closed, gone or unknown server has nothing to debug: no watch, so its (missing) heartbeats get no rd.
+			if (state === "closed" || state === "gone" || state === "unknown")
+				return json(409, { error: state === "closed" ? "this server closed" : state === "gone" ? "this server is gone" : "no heartbeat from this JobId", state });
 			const before = o.hub.status(job);
 			const status = o.hub.watch(job, caller);
 			// Instant wake: a watch that starts (new, or after it lapsed) on a server that isn't polling publishes one wake
