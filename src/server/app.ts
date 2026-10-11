@@ -22,6 +22,8 @@
  *   GET  /v1/place                  the game's name, live players and icon (TYPETORCH_UNIVERSE_ID, else the fleet's PlaceId; cached 60 s)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
+ *   GET  /v1/experiments/<key>/players?variant=&from=&to=|window=&limit=..  the players in one experiment (at most 200):
+ *        variant, random or forced, assigned / first / last seen, UserId and Roblox name (experiment-players.ts)
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
  *   GET  /v1/fleet/servers/<job>;  POST .../watch | .../commands;  GET .../commands/<id>;  GET /v1/fleet/debug/audit
@@ -56,6 +58,8 @@ import { gunzipSync } from "node:zlib";
 import { EventBus } from "../bus.ts";
 import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
 import { handleErrorReads, type PlayerIdentity } from "../errors/http.ts";
+import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
+import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { rollupDays } from "../sql/filters.ts";
@@ -182,8 +186,8 @@ const GAME_KEY_MAX_FAILURES = 30;
 const TEST_ALERTS_PER_MINUTE = 3;
 /** GET /v1/identity/<pid>/profile per address per minute (the Roblox lookups behind it have their own global cap). */
 const PROFILE_PER_MINUTE = 120;
-/** Uncached Roblox names one error -> players read looks up in the background (the profile cache's caps still apply). */
-const ERROR_PLAYER_NAME_WARM = 8;
+/** Uncached Roblox names one error/experiment -> players read looks up in the background (the profile cache's caps still apply). */
+const PLAYER_NAME_WARM = 8;
 /** Handover: DuckDB is tried again this often, a warning is logged this often while waiting. */
 const HANDOVER_RETRY_MS = 1000;
 const HANDOVER_WARN_MS = 60_000;
@@ -582,14 +586,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 
 	/**
-	 * The error -> players list's identities: UserIds from the identity table, Roblox names from the profile cache only (a
+	 * The error -> players and experiment -> players lists' identities: UserIds from the identity table, Roblox names from the profile cache only (a
 	 * few uncached ones are looked up in the background, bounded by RobloxProfiles' own caps, so the next refresh has
 	 * them), and erased pids as null (left out).
 	 */
-	async function errorPlayerIdentities(pids: string[]): Promise<Map<string, PlayerIdentity | null>> {
+	async function playerIdentities(pids: string[]): Promise<Map<string, PlayerIdentity | null>> {
 		const out = new Map<string, PlayerIdentity | null>();
 		const uids = await identities.uids(pids);
-		let warm = ERROR_PLAYER_NAME_WARM;
+		let warm = PLAYER_NAME_WARM;
 		for (const pid of pids) {
 			if (warehouse?.isErased(pid)) {
 				out.set(pid, null);
@@ -694,6 +698,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 					if (uid !== undefined) p.uid = uid;
 				}
 			}
+			if (name === "experiment-players") result = await withPlayerIdentities(result as ExperimentPlayersResult);
 			if (name === "timeline" || name === "player-graph" || name === "player-stats") {
 				const r = result as { pid?: string; uid?: number };
 				const found = r.pid ? await identities.byPid(r.pid) : undefined;
@@ -705,6 +710,44 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (/interrupt/i.test(message)) return json(504, { error: `query took longer than ${config.queryTimeoutSeconds} s` });
 			log(`query ${name} failed: ${message.slice(0, 300)}`);
 			return json(500, { error: "query failed", detail: message.slice(0, 300) });
+		}
+	}
+
+	/** An experiment -> players list with UserIds and Roblox names joined in and erased players left out (as the error list). */
+	async function withPlayerIdentities(found: ExperimentPlayersResult): Promise<ExperimentPlayersResult> {
+		const who = await playerIdentities([...new Set(found.players.map((p) => p.pid))]);
+		const shown = found.players.filter((p) => who.get(p.pid) !== null);
+		const erased = found.players.length - shown.length;
+		return {
+			...found,
+			total: Math.max(0, found.total - erased),
+			players: shown.map((p) => {
+				const id = who.get(p.pid);
+				return { ...p, ...(id?.uid !== undefined ? { uid: id.uid } : {}), ...(id?.name ? { name: id.name } : {}), ...(id?.displayName ? { displayName: id.displayName } : {}) };
+			}),
+		};
+	}
+
+	/** GET /v1/experiments/<key>/players (every signed-in reader, like the Experiments page's queries). */
+	async function experimentPlayersRead(path: string, url: URL): Promise<Response> {
+		const warehouse = analyticsOr();
+		if (warehouse instanceof Response) return warehouse;
+		let input: ReturnType<typeof parseExperimentPlayers>;
+		try {
+			input = parseExperimentPlayers(path, url.searchParams, clock());
+			renderQuery(warehouse.context(), "experiment-players", input.filters, input.options); // input errors -> 400
+		} catch (error) {
+			if (error instanceof ExperimentPlayersInput && error.message === "not found") return json(404, { error: "not found" });
+			return json(400, { error: (error as Error).message.slice(0, 300) });
+		}
+		try {
+			const found = (await warehouse.query("experiment-players", input.filters, input.options)) as ExperimentPlayersResult;
+			return json(200, await withPlayerIdentities(found));
+		} catch (error) {
+			const message = (error as Error).message ?? String(error);
+			if (/interrupt/i.test(message)) return json(504, { error: `query took longer than ${config.queryTimeoutSeconds} s` });
+			log(`experiment players failed: ${message.slice(0, 300)}`);
+			return json(500, { error: "query failed" });
 		}
 	}
 
@@ -1507,7 +1550,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
-			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: errorPlayerIdentities });
+			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
+			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
 			if (path === "/v1/admin/settings") {
 				if (method !== "GET" && method !== "PATCH") return json(405, { error: "GET or PATCH only" });
 				const admin = manage();

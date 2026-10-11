@@ -22,6 +22,7 @@ const OPTIONS: Partial<Record<QueryName, object>> = {
 	funnel: { funnel: "onboarding" },
 	"funnel-progress": { pids: ["p0003", "p0015"] },
 	experiment: { experiment: "onboarding" },
+	"experiment-players": { experiment: "onboarding" },
 	servers: { maxAgeSeconds: 150 },
 	deployReport: { maxAgeSeconds: 150 },
 	players: { search: "p00" },

@@ -441,6 +441,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
+| `GET /v1/experiments/<key>/players` | admin, web | the players in one experiment: variant, random or forced, assigned / first / last seen |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
@@ -635,6 +636,10 @@ names from the profile cache (a few uncached ones are looked up in the backgroun
 left out, and erasure deletes their error rows. The explorer's **Errors** page shows all three: a row (click, or Enter /
 Space) opens the kind in a side sheet (`?fp=` in the URL) with its players, each linking to their Players page.
 
+The **Experiments** page does the same for experiments: a row of the experiments list or of the variants table (click, or
+Enter / Space) opens the players in a side sheet (`?assigned=<experiment>&assignedVariant=<variant>`, under the page's
+range and filters), each linking to their Players page.
+
 ## The explorer
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
@@ -777,6 +782,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `player-stats` | one player (by `pid`, or `uid`): Robux, purchases, sessions and playtime per UTC day (for a range up to a day per hour, up to 6 hours per 5 minutes, up to an hour per minute: `window.bucket`; dense, sessions count where they start), totals (avg / median session, playtime per day, active days, first / last seen), each session (`sessions`, default 1,000, at most 5,000) and each purchase (`purchases`, default 500, at most 2,000), newest first, with `...Truncated` flags. The range is cut to its last 400 days (`window.clamped`). Server-sent purchases only, like the revenue queries | 30 days |
 | `flow` | the merged flow graph for a filter (where most go next, where they quit) | 7 days |
 | `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
+| `experiment-players` | the players in one `experiment` (at most 200, `limit`; one `variant` or all): per player and variant, `how` (`random`, `forced` from the row's `forced` prop, or `unknown` when the window holds only `exp` stamps), `assignedAt`, `firstAt` / `lastAt`, `events`, `mixed` (seen in two variants); `variants` (players and forced per variant), `total`, `more`. Most recently seen first. Over HTTP as `GET /v1/experiments/<key>/players?variant=&limit=&from=&to=` (or `window=7d`; the filters as repeatable params, the filter bar's variant filter as `inExperiment` + `inVariant`), with `uid` / `name` / `displayName` joined in and erased players left out | 30 days |
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
 | `top-events` | the most logged names per kind | 7 days |
 | `servers` | game servers from `fleet` heartbeat rows (history; the CLI's live view is the fleet API) | recent |

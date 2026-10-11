@@ -5,7 +5,7 @@
 import { PROP_KEYS } from "../schema.ts";
 import { assertSafeKey, lit } from "../sql/dialect.ts";
 import { bootstrapMeans, twoProportion, verdict, welch, type TestResult } from "../stats.ts";
-import { dayOf, defineQuery, eventsTable, intOption, num, playerRows, ratio, round, SERVER_PURCHASE, str, where } from "./core.ts";
+import { dayOf, defineQuery, eventsTable, intOption, iso, num, playerRows, ratio, round, SERVER_PURCHASE, str, where } from "./core.ts";
 
 /** The group of servers that run no experiment pin (`sexp` = ""). */
 export const SERVER_CONTROL = "(unpinned)";
@@ -191,6 +191,127 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 			variants: variants.map((v) => v.stats),
 			comparisons,
 			mixedPlayers: num(rows.mixed[0]?.mixed),
+		};
+	},
+});
+
+/** Most players one experiment -> players read lists (the route's cap). */
+export const EXPERIMENT_PLAYERS_MAX = 200;
+
+export interface ExperimentPlayersOptions {
+	/** The experiment (a key of `exp`, the `name` of its `experiment` rows). */
+	experiment: string;
+	/** Only this variant (the counts per variant still cover every variant). */
+	variant?: string;
+	/** Most rows listed, most recently seen first (1-200, default 200). */
+	limit: number;
+	variantKey: string;
+}
+
+/** One player in one variant of the experiment, in the window. */
+export interface ExperimentPlayer {
+	pid: string;
+	variant: string;
+	/**
+	 * How they got it, from the window's `experiment` rows: "random" (the hash of their pid, with the weights), "forced"
+	 * (the settings forced the variant: for everyone, or for this player), or "unknown" when the window holds no
+	 * `experiment` row for them (only their stamped events: the assignment came before the window).
+	 */
+	how: "random" | "forced" | "unknown";
+	/** First `experiment` row with this variant in the window (ISO), or null (see `how`). */
+	assignedAt: string | null;
+	/** First and last of their rows stamped with (or assigning) this variant in the window (ISO). */
+	firstAt: string;
+	lastAt: string;
+	/** Their rows in the window with this variant. */
+	events: number;
+	/** The player was seen in more than one variant of it in the window (one row per variant). */
+	mixed: boolean;
+	/** Joined in by the server route: the UserId (identity table) and Roblox names (profile cache), when known. */
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+export interface ExperimentPlayersResult {
+	experiment: string;
+	variant: string | null;
+	/** Players per variant in the window (every variant, whatever `variant` is), and how many of them were forced. */
+	variants: { variant: string; players: number; forced: number }[];
+	/** Rows (player + variant) matching `variant`; `more` of them are not listed. */
+	total: number;
+	more: number;
+	players: ExperimentPlayer[];
+}
+
+/**
+ * The players in one experiment (Experiments page side panel): per player and variant, how they got it, when it was
+ * assigned, and their first and last stamped row in the window. Players come from the `experiment` rows (kind
+ * `experiment`, name = the experiment, props.variant, props.forced) and from every row whose `exp` names the
+ * experiment, so a player assigned before the window still shows (how "unknown"). Most recently seen first.
+ */
+export const experimentPlayers = defineQuery<ExperimentPlayersOptions, ExperimentPlayersResult>({
+	name: "experiment-players",
+	summary: "the players in one experiment: variant, random or forced, assigned / first / last seen (at most 200)",
+	defaultDays: 30,
+	options: (input = {}) => {
+		if (!input.experiment) throw new Error("experiment is required");
+		const out: ExperimentPlayersOptions = {
+			experiment: assertSafeKey(String(input.experiment), "experiment"),
+			limit: intOption(input.limit, "limit", EXPERIMENT_PLAYERS_MAX, 1, EXPERIMENT_PLAYERS_MAX),
+			variantKey: assertSafeKey(input.variantKey ?? PROP_KEYS.experimentVariant, "variantKey"),
+		};
+		if (input.variant !== undefined && input.variant !== "") {
+			const v = input.variant;
+			if (typeof v !== "string" || v.length > 64 || /[\u0000-\u001f\u007f]/.test(v)) throw new Error("variant must be text of at most 64 characters");
+			out.variant = v;
+		}
+		return out;
+	},
+	statements(ctx, f, o) {
+		const d = ctx.dialect;
+		const table = eventsTable(ctx, f);
+		const key = lit(o.experiment);
+		const isAssign = `(e.kind = 'experiment' AND e.name = ${key})`;
+		const stamped = d.jsonText("e.exp", o.experiment);
+		const base =
+			`x AS (SELECT e.pid AS pid, e.t AS t, CASE WHEN ${isAssign} THEN ${d.jsonText("e.props", o.variantKey)} ELSE ${stamped} END AS variant, ` +
+			`CASE WHEN ${isAssign} THEN 1 ELSE 0 END AS assigned, CASE WHEN ${isAssign} AND ${d.jsonText("e.props", "forced")} = 'true' THEN 1 ELSE 0 END AS forced ` +
+			`FROM ${table} e WHERE ${where(f, ctx)} AND e.pid IS NOT NULL AND e.pid <> '' AND (${isAssign} OR ${stamped} IS NOT NULL)), ` +
+			`pv AS (SELECT pid, variant, MIN(CASE WHEN assigned = 1 THEN t END) AS assigned_t, SUM(assigned) AS assignments, MAX(forced) AS forced, ` +
+			`MIN(t) AS first_t, MAX(t) AS last_t, COUNT(*) AS events FROM x WHERE variant IS NOT NULL AND variant <> '' GROUP BY pid, variant), ` +
+			`pm AS (SELECT pid, COUNT(*) AS nvar FROM pv GROUP BY pid)`;
+		const only = o.variant !== undefined ? ` WHERE pv.variant = ${lit(o.variant)}` : "";
+		return {
+			players:
+				`WITH ${base} SELECT pv.pid AS pid, pv.variant AS variant, pv.assigned_t AS assigned_t, pv.assignments AS assignments, pv.forced AS forced, ` +
+				`pv.first_t AS first_t, pv.last_t AS last_t, pv.events AS events, pm.nvar AS nvar FROM pv JOIN pm ON pm.pid = pv.pid${only} ` +
+				`ORDER BY pv.last_t DESC, pv.pid, pv.variant ${d.limit(o.limit)}`,
+			total: `WITH ${base} SELECT COUNT(*) AS total FROM pv${only} ${d.limit(1)}`,
+			variants: `WITH ${base} SELECT variant, COUNT(*) AS players, SUM(forced) AS forced FROM pv GROUP BY variant ORDER BY variant ${d.limit(1000)}`,
+		};
+	},
+	shape(rows, _ctx, _f, o) {
+		const players = rows.players.map(
+			(r): ExperimentPlayer => ({
+				pid: str(r.pid),
+				variant: str(r.variant),
+				how: num(r.forced) > 0 ? "forced" : num(r.assignments) > 0 ? "random" : "unknown",
+				assignedAt: r.assigned_t === null || r.assigned_t === undefined ? null : iso(num(r.assigned_t)),
+				firstAt: iso(num(r.first_t)),
+				lastAt: iso(num(r.last_t)),
+				events: num(r.events),
+				mixed: num(r.nvar) > 1,
+			}),
+		);
+		const total = num(rows.total[0]?.total);
+		return {
+			experiment: o.experiment,
+			variant: o.variant ?? null,
+			variants: rows.variants.map((r) => ({ variant: str(r.variant), players: num(r.players), forced: num(r.forced) })),
+			total,
+			more: Math.max(0, total - players.length),
+			players,
 		};
 	},
 });

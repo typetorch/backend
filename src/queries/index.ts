@@ -3,7 +3,7 @@ import { normalizeFilters, type Filters, type NormalizedFilters } from "../sql/f
 import { benchmarks, realtime, trends } from "./benchmarks.ts";
 import { confusion } from "./confusion.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
-import { experiment } from "./experiment.ts";
+import { experiment, experimentPlayers } from "./experiment.ts";
 import { events, players, values } from "./explore.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { funnel, funnelProgress, timeline } from "./funnel.ts";
@@ -23,6 +23,7 @@ export const QUERIES = {
 	"player-stats": playerStats,
 	flow,
 	experiment,
+	"experiment-players": experimentPlayers,
 	confusion,
 	"top-events": topEvents,
 	servers,
