@@ -200,6 +200,9 @@ describe("funnel-progress", () => {
 			expect(p.of).toBe(5);
 			expect(p.reached).toBe(p.step);
 			expect(p.share).toBe(p.step / 5);
+			// When they first logged it: the earliest of their rows at that step.
+			const first = Math.min(...inRange(30).filter((e) => e.kind === "funnel" && e.pid === p.pid && JSON.parse(e.props as string).i === p.step).map((e) => e.t as number));
+			expect(p.reachedAt).toBe(new Date(first).toISOString());
 		}
 		const one = await store.query("funnel-progress", {}, { funnel: "onboarding", pids: [pids[0]] });
 		expect(one.progress).toHaveLength(1);

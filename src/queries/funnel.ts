@@ -195,6 +195,8 @@ export interface FunnelProgress {
 	of: number;
 	/** reached / of, 0-1. */
 	share: number;
+	/** When they first logged that furthest step (ISO). */
+	reachedAt?: string;
 }
 
 export interface FunnelProgressResult {
@@ -223,14 +225,19 @@ export const funnelProgress = defineQuery<FunnelProgressOptions, FunnelProgressR
 		const lim = d.limit;
 		const table = eventsTable(ctx, f);
 		const base =
-			`f AS (SELECT e.name AS name, e.pid AS pid, CAST(${d.jsonNumber("e.props", o.stepKey)} AS BIGINT) AS step, ${d.jsonText("e.props", o.labelKey)} AS label ` +
+			`f AS (SELECT e.name AS name, e.pid AS pid, e.t AS t, CAST(${d.jsonNumber("e.props", o.stepKey)} AS BIGINT) AS step, ${d.jsonText("e.props", o.labelKey)} AS label ` +
 			`FROM ${table} e WHERE ${where(f, ctx)} AND e.kind = 'funnel'${o.funnel ? ` AND e.name = ${lit(o.funnel)}` : ""} AND e.pid IS NOT NULL AND e.pid <> '')`;
 		const mine = `pid IN (${o.pids.map(lit).join(", ")})`;
 		// Only the funnels these players started, so a long list of funnels doesn't cost a scan of each.
 		const started = o.funnel ? "" : ` AND name IN (SELECT DISTINCT name FROM f WHERE ${mine})`;
 		return {
 			steps: `WITH ${base} SELECT name, step, label, COUNT(*) AS n FROM f WHERE step IS NOT NULL${started} GROUP BY name, step, label ORDER BY name, step, n DESC ${lim(10_000)}`,
-			players: `WITH ${base} SELECT pid, name, MAX(step) AS maxstep FROM f WHERE step IS NOT NULL AND ${mine} GROUP BY pid, name ORDER BY pid, name ${lim(50_000)}`,
+			// The furthest step per player and funnel, and when they first logged it.
+			players:
+				`WITH ${base}, g AS (SELECT pid, name, step, MIN(t) AS t FROM f WHERE step IS NOT NULL AND ${mine} GROUP BY pid, name, step), ` +
+				`m AS (SELECT pid, name, MAX(step) AS maxstep FROM g GROUP BY pid, name) ` +
+				`SELECT m.pid AS pid, m.name AS name, m.maxstep AS maxstep, g.t AS t FROM m JOIN g ON g.pid = m.pid AND g.name = m.name AND g.step = m.maxstep ` +
+				`ORDER BY pid, name ${lim(50_000)}`,
 		};
 	},
 	shape(rows) {
@@ -258,7 +265,16 @@ export const funnelProgress = defineQuery<FunnelProgressOptions, FunnelProgressR
 			const step = num(r.maxstep);
 			const at = steps.findIndex((s) => s.step === step);
 			const reached = at + 1;
-			progress.push({ pid: str(r.pid), funnel: str(r.name), step, label: steps[at]?.label ?? null, reached, of: steps.length, share: ratio(reached, steps.length) });
+			progress.push({
+				pid: str(r.pid),
+				funnel: str(r.name),
+				step,
+				label: steps[at]?.label ?? null,
+				reached,
+				of: steps.length,
+				share: ratio(reached, steps.length),
+				...(r.t === null || r.t === undefined ? {} : { reachedAt: iso(num(r.t)) }),
+			});
 		}
 		return { funnels: [...ordered].map(([name, steps]) => ({ name, steps })), progress };
 	},
