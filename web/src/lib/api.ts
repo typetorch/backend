@@ -12,6 +12,7 @@ import type {
 	ErrorDetail,
 	ErrorList,
 	ErrorPlayers,
+	PlayerErrors,
 	ExperimentOverrides,
 	ExperimentPlayers,
 	Filters,
@@ -178,6 +179,8 @@ export function createApi(options: ApiOptions = {}) {
 		errorKind: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorDetail>(`/v1/errors/${encodeURIComponent(fp)}${qs({ ...params })}`, signal),
 		/** The players who hit one kind (at most 200), under the same window and filters. */
 		errorPlayers: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorPlayers>(`/v1/errors/${encodeURIComponent(fp)}/players${qs({ ...params })}`, signal),
+		/** The error kinds one player hit (most occurrences first, at most 200). */
+		playerErrors: (pid: string, params: ErrorParams = {}, signal?: AbortSignal) => get<PlayerErrors>(`/v1/players/${encodeURIComponent(pid)}/errors${qs({ ...params })}`, signal),
 		/** The experiment overrides the server knows (weights, active, forced variant; read-only). */
 		experimentOverrides: (signal?: AbortSignal) => get<ExperimentOverrides>("/v1/experiments", signal),
 		/** The players in one experiment (at most 200; one variant or all), under the filter bar's range and filters. */

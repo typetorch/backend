@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
-import type { GraphData, PlayerProfile, PlayerStatsResult, PlayersResult, TimelineResult } from "@/lib/types";
+import type { GraphData, PlayerErrors, PlayerProfile, PlayerStatsResult, PlayersResult, TimelineResult } from "@/lib/types";
 import Players from "@/pages/Players";
 import { bucketLabel } from "./SeriesView";
 
@@ -270,5 +270,63 @@ describe("bucketLabel", () => {
 		expect(bucketLabel("2026-10-08T00:00:00.000Z", "day")).toBe("2026-10-08");
 		expect(bucketLabel("2026-10-08T14:00:00.000Z", "hour")).toBe("2026-10-08 14:00");
 		expect(bucketLabel("2026-10-08T14:05:00.000Z", "5 minutes")).toBe("2026-10-08 14:05");
+	});
+});
+
+describe("Players page: the Errors view (player -> errors)", () => {
+	const kinds: PlayerErrors = {
+		pid: ALPHA,
+		window: { from: "2026-10-03T00:00:00.000Z", to: "2026-10-09T12:00:00.000Z" },
+		errors: [
+			{ fp: "fp-boom", template: "Script <player.name> failed: attempt to index nil", topFrame: "Workspace.Game.Round:42", realms: ["server"], count: 10, days: 1, firstAt: "2026-10-08T10:00:00.000Z", lastAt: "2026-10-08T10:05:00.000Z", total: 120 },
+			{ fp: "fp-two", template: "HTTP 429 from <url>", topFrame: null, realms: ["client", "server"], count: 2, days: 1, firstAt: "2026-10-07T10:00:00.000Z", lastAt: "2026-10-07T10:00:00.000Z", total: 6 },
+		],
+		total: 2,
+		more: 0,
+	};
+
+	it("lists the player's errors under the shared filters, each linking to the Errors page's side sheet", async () => {
+		const spy = vi.spyOn(api, "playerErrors").mockResolvedValue(kinds);
+		mount(`?pid=${ALPHA}&branch=prod&art=a1b2c3d-000042&range=7d`);
+		const region = await detail();
+		fireEvent.click(viewButton(region, "Errors"));
+		await waitFor(() => expect(location).toContain("view=errors"));
+		expect(viewButton(region, "Errors").getAttribute("aria-pressed")).toBe("true");
+		const table = await within(region).findByRole("table", { name: "Errors this player hit" });
+		const link = within(table).getByRole("link", { name: "Script <player.name> failed: attempt to index nil" });
+		const href = new URL(link.getAttribute("href") as string, "http://x");
+		expect(href.pathname).toBe("/errors");
+		expect(href.searchParams.get("fp")).toBe("fp-boom");
+		expect(href.searchParams.get("window")).toBe("7d");
+		expect(href.searchParams.get("branch")).toBe("prod");
+		expect(href.searchParams.get("build")).toBe("a1b2c3d-000042");
+		expect(href.searchParams.get("art")).toBe("a1b2c3d-000042");
+		expect(href.searchParams.get("pid")).toBeNull();
+		expect(within(table).getByText("Workspace.Game.Round:42")).toBeTruthy();
+		expect(within(table).getByRole("link", { name: "HTTP 429 from <url>" }).getAttribute("href")).toContain("fp=fp-two");
+		expect(within(region).getByText(/share that report/)).toBeTruthy();
+		// The read: this pid, the range as from (unix ms), branch and artifact.
+		const [pid, params] = spy.mock.calls.at(-1) as [string, Record<string, unknown>];
+		expect(pid).toBe(ALPHA);
+		expect(params).toMatchObject({ branch: "prod", build: "a1b2c3d-000042" });
+		expect(typeof params.from).toBe("number");
+	});
+
+	it("takes the side from the URL (realm=) for the read and the links", async () => {
+		const spy = vi.spyOn(api, "playerErrors").mockResolvedValue(kinds);
+		mount(`?pid=${ALPHA}&view=errors&realm=client`);
+		const region = await detail();
+		const table = await within(region).findByRole("table", { name: "Errors this player hit" });
+		expect(spy.mock.calls.at(-1)?.[1]).toMatchObject({ realm: "client" });
+		expect(within(table).getByRole("link", { name: "HTTP 429 from <url>" }).getAttribute("href")).toContain("realm=client");
+		expect(within(region).getByRole("combobox", { name: "Server or client" }).textContent).toContain("Client");
+	});
+
+	it("says so when the player hit no errors", async () => {
+		vi.spyOn(api, "playerErrors").mockResolvedValue({ ...kinds, errors: [], total: 0 });
+		mount(`?pid=${ALPHA}&view=errors`);
+		const region = await detail();
+		expect(await within(region).findByText("No errors from this player in this range.")).toBeTruthy();
+		expect(within(region).queryByRole("table", { name: "Errors this player hit" })).toBeNull();
 	});
 });

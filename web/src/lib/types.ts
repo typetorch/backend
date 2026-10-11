@@ -1093,6 +1093,30 @@ export interface ErrorPlayers {
 	withoutPlayer: { realm: string; count: number; firstAt: string; lastAt: string }[];
 }
 
+/** One error kind a player hit (GET /v1/players/<pid>/errors). */
+export interface PlayerErrorKind {
+	fp: string;
+	template: string;
+	topFrame: string | null;
+	/** "server" and/or "client": where the reports naming the player came from. */
+	realms: string[];
+	/** Occurrences in the reports (one minute of one server) that named the player: an upper bound when several players share a minute. */
+	count: number;
+	days: number;
+	firstAt: string;
+	lastAt: string;
+	/** All-time occurrences of the kind, every player. */
+	total: number;
+}
+
+export interface PlayerErrors {
+	pid: string;
+	window: { from: string; to: string };
+	errors: PlayerErrorKind[];
+	total: number;
+	more: number;
+}
+
 export interface ErrorDetail {
 	kind: { fp: string; template: string; stack: string | null; realm: string; firstAt: string; lastAt: string; total: number };
 	window: ErrorWindow;
