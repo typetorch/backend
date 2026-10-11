@@ -441,6 +441,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
+| `GET /v1/players/<pid>/errors` | admin, web | the error kinds one player hit |
 | `GET /v1/experiments/<key>/players` | admin, web | the players in one experiment: variant, random or forced, assigned / first / last seen |
 | `GET /v1/experiments` | admin, web | the experiment overrides from `data/settings.json` (`active`, `weights`, `variant` per experiment; nothing else from the file): `{ source: "settings-file" \| "none" \| "unreadable", experiments }` |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
@@ -638,6 +639,13 @@ names from the profile cache (a few uncached ones are looked up in the backgroun
 left out, and erasure deletes their error rows. The explorer's **Errors** page shows all three: a row (click, or Enter /
 Space) opens the kind in a side sheet (`?fp=` in the URL) with its players, each linking to their Players page.
 
+The other way round, `GET /v1/players/<pid>/errors` (same window and filters, `limit` 1-200, default 200; same reader
+gate) answers `{ pid, window, errors: [{ fp, template, topFrame, realms, count, days, firstAt, lastAt, total }], total,
+more }`: the kinds that player hit, most occurrences first, then the most recently seen. `count` is the same per-report upper
+bound as above, `total` on a kind is its all-time count over every player. A bad pid is a 400, an erased one a 404, a pid
+nobody reported an empty list. The player detail's **Errors** view (`view=errors`, side in `realm=`) lists them under the
+page's range, branch and artifact; each kind links to the Errors page with `?fp=` (its side sheet), keeping the filters.
+
 The **Experiments** page does the same for experiments: a row of the experiments list or of the variants table (click, or
 Enter / Space) opens the players in a side sheet (`?assigned=<experiment>&assignedVariant=<variant>`, under the page's
 range and filters), each linking to their Players page. The experiments list also shows each experiment's state (running, settled on a variant,
@@ -651,7 +659,7 @@ record is the game's signed settings in its DataStore, which this server does no
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
 Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
-Sessions and Timeline views), Flow, Experiments, First session, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
+Sessions, Timeline and Errors views), Flow, Experiments, First session, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)). The header shows who is signed in (Roblox name and avatar, or
 "admin token") and a Sign out button. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
