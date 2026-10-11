@@ -1029,6 +1029,13 @@ export class FleetService {
 		};
 	}
 
+	/** The PlaceId of the server heard from last (open or not), or null while no heartbeat carried one. */
+	async latestPlaceId(): Promise<number | null> {
+		const rows = await this.db.all<{ place_id: number | null }>("SELECT place_id FROM servers WHERE place_id IS NOT NULL AND place_id > 0 ORDER BY last_seen DESC LIMIT 1");
+		const id = rows[0]?.place_id;
+		return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+	}
+
 	/**
 	 * Kernel 0.4.2: a server's metrics history (one point per heartbeat, the last KEEP_METRICS_MS, at most
 	 * METRICS_MAX_POINTS), oldest first; `since` (unix ms) keeps only later points. An unknown JobId has no points.

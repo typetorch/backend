@@ -19,6 +19,7 @@
  *   GET  /v1/settings               live dials from data/settings.json
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
  *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
+ *   GET  /v1/place                  the game's name, live players and icon (TYPETORCH_UNIVERSE_ID, else the fleet's PlaceId; cached 60 s)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
@@ -86,6 +87,7 @@ import { CentralLogin } from "./central-login.ts";
 import { CentralReporter, type ReportResult } from "./central-report.ts";
 import { BlessKeys, DEVICE_COOKIE, DEVICE_LIFE_MS, DeviceStore, agentLabel } from "./devices.ts";
 import { InstanceKey } from "./instance-key.ts";
+import { RobloxPlace } from "./roblox-place.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
@@ -366,6 +368,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const profileLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Roblox names and avatars for the player detail: fixed Roblox hosts, cached in memory, capped (server/roblox-profiles.ts).
 	const robloxProfiles = new RobloxProfiles({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
+	// The sidebar's place card: name, live players and icon (server/roblox-place.ts: fixed hosts, no credentials, 60 s cache).
+	const robloxPlace = new RobloxPlace({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
+	const placeLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Plans/25 remote debug: the kernel's polls and result posts per JobId, the explorer's commands and watches.
 	const debugLimiters = {
 		poll: new RateLimiter(90, clock),
@@ -598,6 +603,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			out.set(pid, { uid, ...(profile?.name ? { name: profile.name } : {}), ...(profile?.displayName ? { displayName: profile.displayName } : {}) });
 		}
 		return out;
+	}
+
+	/**
+	 * GET /v1/place (every signed-in role): the game's name, live players and icon for the sidebar card. The game is
+	 * TYPETORCH_UNIVERSE_ID, else the PlaceId of the server heard from last; neither: `{ configured: false }`.
+	 */
+	async function placeCard(ip: string): Promise<Response> {
+		if (!placeLimiter.take(ip)) return tooMany(placeLimiter.retryAfter(ip));
+		const fleetPlace = fleet ? await fleet.latestPlaceId() : null;
+		if (!config.universeId && !fleetPlace) return json(200, { configured: false });
+		const { place, status, cached } = await robloxPlace.get(config.universeId ? { universeId: config.universeId } : { placeId: fleetPlace as number });
+		const placeId = place.placeId ?? fleetPlace;
+		return json(200, { configured: true, roblox: status, cached, ...place, placeId, url: placeId ? `https://www.roblox.com/games/${placeId}` : null });
 	}
 
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
@@ -1488,6 +1506,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			}
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
+			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: errorPlayerIdentities });
 			if (path === "/v1/admin/settings") {
 				if (method !== "GET" && method !== "PATCH") return json(405, { error: "GET or PATCH only" });

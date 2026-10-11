@@ -216,7 +216,7 @@ function readHeadshot(body: unknown, userId: number): { state: string; url: stri
 	return { state, url: state === "Completed" ? cdnUrl(item.imageUrl) : null };
 }
 
-function cdnUrl(value: unknown): string | null {
+export function cdnUrl(value: unknown): string | null {
 	if (typeof value !== "string" || value.length > 512) return null;
 	try {
 		const u = new URL(value);
@@ -227,7 +227,7 @@ function cdnUrl(value: unknown): string | null {
 }
 
 /** The body as text, or null past `max` bytes (stops reading there). */
-async function readCapped(response: Response, max: number): Promise<string | null> {
+export async function readCapped(response: Response, max: number): Promise<string | null> {
 	const declared = Number(response.headers.get("content-length") ?? "0");
 	if (declared > max) {
 		await response.body?.cancel().catch(() => {});
