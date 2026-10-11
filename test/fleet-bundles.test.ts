@@ -125,6 +125,21 @@ describe("debug bundles over HTTP", () => {
 		expect((await send(bundle({ id: hex(3), serverLog: [{ i: 1, t: 1, kind: "output", text: "y".repeat(400 * 1024) }] }))).status).toBe(202);
 	});
 
+	test("Content-Encoding: gzip (the kernel compresses bodies over 1 KB): inflated, and the 512 KB cap holds inflated too", async () => {
+		const gz = (value: unknown) => Bun.gzipSync(new TextEncoder().encode(JSON.stringify(value)));
+		const sendGz = (body: Uint8Array) => (h.setNow(h.now() + 10_000), h.call("/v1/fleet/bundle", { method: "POST", body, headers: { "content-type": "application/json", "content-encoding": "gzip", ...bearer(API) } }));
+		// b, a, s and g are left out when unknown: stored as null.
+		const { b: _b, a: _a, s: _s, g: _g, ...lean } = bundle({ id: hex(5) });
+		expect((await sendGz(gz(lean))).status).toBe(202);
+		const list = await asJson(await h.call(`/v1/fleet/servers/${JOB}/bundles`, { headers: admin }));
+		expect(list.bundles.find((b: { id: string }) => b.id === hex(5))).toMatchObject({ branch: null, artifact: null, seq: null, generation: null });
+		// Small on the wire, over the cap inflated.
+		const bomb = gz(bundle({ id: hex(6), serverLog: [{ i: 1, t: 1, kind: "output", text: "z".repeat(600 * 1024) }] }));
+		expect(bomb.length).toBeLessThan(10_000);
+		expect((await sendGz(bomb)).status).toBe(413);
+		expect((await sendGz(new Uint8Array([0x1f, 0x8b, 1, 2, 3]))).status).toBe(400);
+	});
+
 	test("owners read the body; the read-only web role reads it without playerLogs; 404 when gone", async () => {
 		const owner = await asJson(await h.call(`/v1/fleet/bundles/${hex(1)}`, { headers: admin }));
 		expect(owner.bundle.body.playerLogs).toEqual({ "101": [{ t: Math.floor(T0 / 1000), kind: "warning", text: "client line" }] });

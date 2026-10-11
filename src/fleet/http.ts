@@ -3,7 +3,8 @@
  * and the rate limiters.
  *
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | mark     API key (game role)
- *   POST /v1/fleet/bundle                                           API key; kernel 0.5.3 debug bundle (<= 512 KB) -> 202 { ok, id }
+ *   POST /v1/fleet/bundle                                           API key; kernel 0.5.3 debug bundle (<= 512 KB, also inflated;
+ *                                                                   Content-Encoding: gzip like /v1/errors) -> 202 { ok, id }
  *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token
  *   GET  /v1/fleet/servers?gone=1&branch=&limit=                    closed and lost servers, the most recently gone first
  *   GET  /v1/fleet/servers/<jobId>/metrics?since=<unix ms>         kernel 0.4.2: { points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] };
@@ -156,6 +157,37 @@ async function readText(req: Request, limit: number): Promise<{ text: string; by
 			throw new BodyTooLarge();
 		}
 		chunks.push(value);
+	}
+	const all = new Uint8Array(bytes);
+	let at = 0;
+	for (const chunk of chunks) {
+		all.set(chunk, at);
+		at += chunk.byteLength;
+	}
+	// Kernel 0.5.3 gzips a bundle over 1 KB (RequestAsync Compress): inflated here, and the cap holds for the inflated size too.
+	if (req.headers.get("content-encoding") === "gzip" || (all[0] === 0x1f && all[1] === 0x8b)) return inflate(all, limit);
+	return { text: new TextDecoder().decode(all), bytes };
+}
+
+/** gunzip through the web's DecompressionStream (portable), stopping as soon as the output passes `limit` bytes. */
+async function inflate(gz: Uint8Array, limit: number): Promise<{ text: string; bytes: number }> {
+	const reader = new Blob([gz as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
+	const chunks: Uint8Array[] = [];
+	let bytes = 0;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			bytes += value.byteLength;
+			if (bytes > limit) {
+				await reader.cancel().catch(() => {});
+				throw new BodyTooLarge();
+			}
+			chunks.push(value);
+		}
+	} catch (error) {
+		if (error instanceof BodyTooLarge) throw error;
+		throw new FleetInputError("body is not valid gzip");
 	}
 	const all = new Uint8Array(bytes);
 	let at = 0;
