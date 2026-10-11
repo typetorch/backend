@@ -19,7 +19,8 @@
  *   GET  /v1/settings               live dials from data/settings.json
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
  *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
- *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind
+ *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
+ *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
  *   GET  /v1/fleet/servers/<job>;  POST .../watch | .../commands;  GET .../commands/<id>;  GET /v1/fleet/debug/audit
@@ -53,7 +54,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { EventBus } from "../bus.ts";
 import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
-import { handleErrorReads } from "../errors/http.ts";
+import { handleErrorReads, type PlayerIdentity } from "../errors/http.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { rollupDays } from "../sql/filters.ts";
@@ -179,6 +180,8 @@ const GAME_KEY_MAX_FAILURES = 30;
 const TEST_ALERTS_PER_MINUTE = 3;
 /** GET /v1/identity/<pid>/profile per address per minute (the Roblox lookups behind it have their own global cap). */
 const PROFILE_PER_MINUTE = 120;
+/** Uncached Roblox names one error -> players read looks up in the background (the profile cache's caps still apply). */
+const ERROR_PLAYER_NAME_WARM = 8;
 /** Handover: DuckDB is tried again this often, a warning is logged this often while waiting. */
 const HANDOVER_RETRY_MS = 1000;
 const HANDOVER_WARN_MS = 60_000;
@@ -573,6 +576,30 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return json(200, { pid, linked: true, uid: found.uid, roblox: status, cached, name: profile.name, displayName: profile.displayName, avatar: profile.avatar });
 	}
 
+	/**
+	 * The error -> players list's identities: UserIds from the identity table, Roblox names from the profile cache only (a
+	 * few uncached ones are looked up in the background, bounded by RobloxProfiles' own caps, so the next refresh has
+	 * them), and erased pids as null (left out).
+	 */
+	async function errorPlayerIdentities(pids: string[]): Promise<Map<string, PlayerIdentity | null>> {
+		const out = new Map<string, PlayerIdentity | null>();
+		const uids = await identities.uids(pids);
+		let warm = ERROR_PLAYER_NAME_WARM;
+		for (const pid of pids) {
+			if (warehouse?.isErased(pid)) {
+				out.set(pid, null);
+				continue;
+			}
+			const uid = uids.get(pid);
+			if (uid === undefined) continue;
+			const cached = robloxProfiles.peek(uid);
+			if (!cached?.fresh && warm-- > 0) void robloxProfiles.get(uid).catch(() => undefined);
+			const profile = cached?.profile;
+			out.set(pid, { uid, ...(profile?.name ? { name: profile.name } : {}), ...(profile?.displayName ? { displayName: profile.displayName } : {}) });
+		}
+		return out;
+	}
+
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
 	async function backfill(req: Request): Promise<Response> {
 		if (!config.openCloudKey || !config.universeId) {
@@ -780,6 +807,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (!pids.length) return json(400, { error: "give pid or pids" });
 			const { liveRows } = await w.erase(pids);
 			await identities.deletePids(pids);
+			await errors.erasePids(pids);
 			void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 			logErasure(w.layout.erasure, { source: "admin", pids: pids.length, liveRows });
 			return json(200, { erased: pids.length, liveRows, files: "rewriting in the background" });
@@ -822,6 +850,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		// The rows first, then the link between the UserId and its pids.
 		await identities.deleteUid(request.userId);
 		await identities.deletePids(pids);
+		await errors.erasePids(pids);
 		void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 		logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pids: pids.length, liveRows });
 		return json(200, { ok: true, erased: pids.length });
@@ -1459,7 +1488,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			}
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
-			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
+			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: errorPlayerIdentities });
 			if (path === "/v1/admin/settings") {
 				if (method !== "GET" && method !== "PATCH") return json(405, { error: "GET or PATCH only" });
 				const admin = manage();

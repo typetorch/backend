@@ -82,6 +82,38 @@ export interface ErrorDetail {
 	byRealm: { realm: string; n: number }[];
 }
 
+/** Players listed for one kind at most (GET /v1/errors/<fp>/players). */
+export const ERROR_PLAYERS_MAX = 200;
+
+export interface ErrorPlayer {
+	/** The pseudonymous analytics id. */
+	pid: string;
+	/**
+	 * Occurrences in the reports that named this player. A report is one minute of one kind on one server, so when several
+	 * players hit a kind in the same minute each of them is counted with the whole report (an upper bound).
+	 */
+	count: number;
+	/** Days (UTC) the player hit it in the window. */
+	days: number;
+	firstAt: string;
+	lastAt: string;
+	/** "server" and/or "client": where the reports naming them came from. */
+	realms: string[];
+}
+
+export interface ErrorPlayers {
+	fp: string;
+	window: { from: string; to: string };
+	/** Most occurrences first, then the most recently seen; at most `limit`. */
+	players: ErrorPlayer[];
+	/** Players in the window (the same day-based count as the kind's `players`). */
+	total: number;
+	/** Players past the limit. */
+	more: number;
+	/** Occurrences in reports that named no player, per side (server errors about nobody, clients without an analytics id). */
+	withoutPlayer: { realm: string; count: number; firstAt: string; lastAt: string }[];
+}
+
 export interface ErrorStats {
 	kinds: number;
 	batches: number;
@@ -242,6 +274,13 @@ export class ErrorStore {
 		// sample_at: when the sample (template, stack) was last replaced (added after the first release).
 		const columns = await db.all<{ name: string }>("PRAGMA table_info(error_kinds)");
 		if (!columns.some((c) => c.name === "sample_at")) await db.exec("ALTER TABLE error_kinds ADD COLUMN sample_at INTEGER");
+		// Per player (added for the error -> players list): occurrences in the reports that named them, and when (unix ms).
+		// Rows written before have NULLs: they count as one occurrence somewhere in their day.
+		const pidColumns = new Set((await db.all<{ name: string }>("PRAGMA table_info(error_pids)")).map((c) => c.name));
+		for (const column of ["n", "first_at", "last_at"]) if (!pidColumns.has(column)) await db.exec(`ALTER TABLE error_pids ADD COLUMN ${column} INTEGER`);
+		// Occurrences in reports that named no player (server errors about nobody, clients without an analytics id yet).
+		const countColumns = await db.all<{ name: string }>("PRAGMA table_info(error_counts)");
+		if (!countColumns.some((c) => c.name === "anon")) await db.exec("ALTER TABLE error_counts ADD COLUMN anon INTEGER NOT NULL DEFAULT 0");
 		const store = new ErrorStore(db, {
 			clock: options.clock ?? Date.now,
 			keepDays: options.keepDays ?? 30,
@@ -352,14 +391,16 @@ export class ErrorStore {
 		}
 		this.counters.occurrences += item.count;
 		// New rows count against the day's budget; adding to a row that exists is free.
+		const anonymous = item.pids.length === 0;
 		for (const { minute, n } of spreadCount(item.count, item.firstAt, item.lastAt)) {
 			const key: SqlValue[] = [item.fp, minute, branch, build, item.realm];
-			if (tx.run("UPDATE error_counts SET n = n + ? WHERE fp = ? AND minute = ? AND branch = ? AND build = ? AND realm = ?", [n, ...key]).changes) continue;
+			const anon = anonymous ? n : 0;
+			if (tx.run("UPDATE error_counts SET n = n + ?, anon = anon + ? WHERE fp = ? AND minute = ? AND branch = ? AND build = ? AND realm = ?", [n, anon, ...key]).changes) continue;
 			if (this.rowRoom() <= 0) {
 				this.counters.droppedRows++;
 				continue;
 			}
-			tx.run("INSERT INTO error_counts (fp, minute, branch, build, realm, n) VALUES (?, ?, ?, ?, ?, ?)", [...key, n]);
+			tx.run("INSERT INTO error_counts (fp, minute, branch, build, realm, n, anon) VALUES (?, ?, ?, ?, ?, ?, ?)", [...key, n, anon]);
 			this.counters.rowsToday++;
 		}
 		if (item.pids.length) {
@@ -367,14 +408,22 @@ export class ErrorStore {
 			const held = Number(tx.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_pids WHERE fp = ? AND day = ?", [item.fp, day])?.n ?? 0);
 			let room = PIDS_PER_KIND_DAY - held;
 			for (const pid of item.pids) {
-				if (room <= 0) break;
+				// A player's row that exists counts up (free); a new one needs room for the kind's day and the row budget.
+				const key: SqlValue[] = [item.fp, day, item.realm, branch, build, pid];
+				const added = tx.run(
+					"UPDATE error_pids SET n = COALESCE(n, 1) + ?, first_at = MIN(COALESCE(first_at, ?), ?), last_at = MAX(COALESCE(last_at, ?), ?) " +
+						"WHERE fp = ? AND day = ? AND realm = ? AND branch = ? AND build = ? AND pid = ?",
+					[item.count, item.firstAt, item.firstAt, item.lastAt, item.lastAt, ...key],
+				).changes;
+				if (added) continue;
+				if (room <= 0) continue;
 				if (this.rowRoom() <= 0) {
 					this.counters.droppedRows++;
 					break;
 				}
-				const { changes } = tx.run("INSERT OR IGNORE INTO error_pids (fp, day, realm, branch, build, pid) VALUES (?, ?, ?, ?, ?, ?)", [item.fp, day, item.realm, branch, build, pid]);
-				room -= changes;
-				this.counters.rowsToday += changes;
+				tx.run("INSERT INTO error_pids (fp, day, realm, branch, build, pid, n, first_at, last_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [...key, item.count, item.firstAt, item.lastAt]);
+				room--;
+				this.counters.rowsToday++;
 			}
 		}
 		return true;
@@ -482,6 +531,60 @@ export class ErrorStore {
 			more: Math.max(0, rows.length - limit),
 			builds: builds.map((b) => ({ build: b.build || "(unknown)", n: Number(b.n), lastAt: iso(Number(b.last) * MINUTE) })),
 		};
+	}
+
+	/**
+	 * One kind's players inside the window (by the days their rows cover, like the kind's `players` count), under the same
+	 * branch / build / realm filter: most occurrences first, then the most recently seen, at most `limit` (1-200).
+	 * Rows written before per-player counts existed count as one occurrence in their day. Undefined: no such kind.
+	 */
+	async players(fp: string, w: ErrorWindow, filter: ErrorFilter = {}, limit: number = ERROR_PLAYERS_MAX): Promise<ErrorPlayers | undefined> {
+		const kind = await this.db.first<{ fp: string }>("SELECT fp FROM error_kinds WHERE fp = ?", [fp]);
+		if (!kind) return undefined;
+		const cap = Math.min(Math.max(1, Math.floor(limit)), ERROR_PLAYERS_MAX);
+		const pf = this.where(filter, "p");
+		const days = [Math.floor(w.from / DAY), Math.floor((w.to - 1) / DAY)];
+		const rows = await this.db.all<{ pid: string; n: number; days: number; first_at: number; last_at: number; realms: string }>(
+			"SELECT p.pid, SUM(COALESCE(p.n, 1)) AS n, COUNT(DISTINCT p.day) AS days, " +
+				`MIN(COALESCE(p.first_at, p.day * ${DAY})) AS first_at, MAX(COALESCE(p.last_at, p.day * ${DAY} + ${DAY - 1})) AS last_at, GROUP_CONCAT(DISTINCT p.realm) AS realms ` +
+				`FROM error_pids p WHERE p.fp = ? AND p.day BETWEEN ? AND ?${pf.sql} GROUP BY p.pid ORDER BY n DESC, last_at DESC, p.pid LIMIT ?`,
+			[fp, ...days, ...pf.params, cap],
+		);
+		const total = Number((await this.db.first<{ n: number }>(`SELECT COUNT(DISTINCT p.pid) AS n FROM error_pids p WHERE p.fp = ? AND p.day BETWEEN ? AND ?${pf.sql}`, [fp, ...days, ...pf.params]))?.n ?? 0);
+		const idx = this.bucketIndex(w);
+		const f = this.where(filter, "c");
+		const anon = await this.db.all<{ realm: string; n: number; first: number; last: number }>(
+			`SELECT c.realm, SUM(c.anon) AS n, MIN(c.minute) AS first, MAX(c.minute) AS last FROM error_counts c WHERE c.fp = ? AND c.anon > 0 AND c.minute BETWEEN ? AND ?${f.sql} GROUP BY c.realm ORDER BY n DESC`,
+			[fp, idx.fromMinute, idx.toMinute, ...f.params],
+		);
+		return {
+			fp,
+			window: { from: iso(w.from), to: iso(w.to) },
+			players: rows.map((r) => ({
+				pid: r.pid,
+				count: Number(r.n),
+				days: Number(r.days),
+				firstAt: iso(Number(r.first_at)),
+				lastAt: iso(Number(r.last_at)),
+				realms: String(r.realms ?? "")
+					.split(",")
+					.filter(Boolean)
+					.sort(),
+			})),
+			total,
+			more: Math.max(0, total - rows.length),
+			withoutPlayer: anon.map((r) => ({ realm: r.realm, count: Number(r.n), firstAt: iso(Number(r.first) * MINUTE), lastAt: iso((Number(r.last) + 1) * MINUTE - 1) })),
+		};
+	}
+
+	/** Right to erasure: the players' rows go (their counts stay, without them). */
+	async erasePids(pids: string[]): Promise<number> {
+		let removed = 0;
+		for (let i = 0; i < pids.length; i += 200) {
+			const chunk = pids.slice(i, i + 200);
+			removed += (await this.db.run(`DELETE FROM error_pids WHERE pid IN (${chunk.map(() => "?").join(", ")})`, chunk)).changes;
+		}
+		return removed;
 	}
 
 	/** One kind: its sample stack, the window's count, players and series, and where it happens. */

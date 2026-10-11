@@ -160,8 +160,17 @@ describe("POST /v1/errors", () => {
 describe("error kinds, counts and the admin reads", () => {
 	let h: Harness;
 	const get = async (path: string) => asJson(await h.call(path, { headers: bearer(ADMIN) }));
+	// Roblox's user API, faked: names for the error -> players list (looked up in the background, cached).
+	const robloxCalls: string[] = [];
+	const fakeRoblox = (async (input: string | URL | Request) => {
+		const url = String(input instanceof Request ? input.url : input);
+		robloxCalls.push(url);
+		const user = /users\.roblox\.com\/v1\/users\/(\d+)/.exec(url);
+		if (user) return new Response(JSON.stringify({ id: Number(user[1]), name: `Tester${user[1]}`, displayName: "Test Player" }), { headers: { "content-type": "application/json" } });
+		return new Response(JSON.stringify({ data: [] }), { headers: { "content-type": "application/json" } });
+	}) as typeof fetch;
 	beforeAll(async () => {
-		h = await harness({ TYPETORCH_ERROR_MAX_KINDS: "10" });
+		h = await harness({ TYPETORCH_ERROR_MAX_KINDS: "10" }, { fetch: fakeRoblox });
 		const send = async (...items: Record<string, unknown>[]) => expect((await h.call("/v1/errors", post(API, { j: "job-a", errors: items }))).status).toBe(202);
 		// Three minutes of one server error on prod build A, two players...
 		await send(item({ count: 4, firstAt: T0 - 3 * MIN, lastAt: T0 - 3 * MIN, pids: ["p1", "p2"] }));
@@ -253,6 +262,57 @@ describe("error kinds, counts and the admin reads", () => {
 		expect((await h.call("/v1/errors/bad%20fp", { headers: bearer(ADMIN) })).status).toBe(400);
 	});
 
+	test("the players who hit a kind: counts, first and last seen, filters, the cap, UserIds and names, erased left out", async () => {
+		const r = await get("/v1/errors/fp-boom/players?window=1h");
+		// p2 was in both server reports (4 + 6), p3 in the second (6), p1 in the first (4), p4 sent the client one (2).
+		expect(r.players.map((p: { pid: string; count: number }) => [p.pid, p.count])).toEqual([
+			["p2", 10],
+			["p3", 6],
+			["p1", 4],
+			["p4", 2],
+		]);
+		expect(r).toMatchObject({ fp: "fp-boom", total: 4, more: 0, withoutPlayer: [] });
+		expect(r.players[0]).toMatchObject({ days: 1, realms: ["server"], firstAt: new Date(T0 - 3 * MIN).toISOString(), lastAt: new Date(T0 - 2 * MIN).toISOString() });
+		expect(r.players[3]).toMatchObject({ pid: "p4", realms: ["client"] });
+		// The page's filters: side, branch, artifact.
+		expect((await get("/v1/errors/fp-boom/players?window=1h&realm=client")).players.map((p: { pid: string }) => p.pid)).toEqual(["p4"]);
+		expect((await get("/v1/errors/fp-boom/players?window=1h&branch=prod")).players.map((p: { pid: string }) => p.pid)).toEqual(["p2", "p3", "p1"]);
+		expect((await get("/v1/errors/fp-boom/players?window=1h&build=b2-000043")).players.map((p: { pid: string }) => p.pid)).toEqual(["p4"]);
+		expect((await get("/v1/errors/fp-boom/players?window=1h&branch=nowhere")).players).toEqual([]);
+		// The cap: limit=2 shows the top two and says how many more.
+		const capped = await get("/v1/errors/fp-boom/players?window=1h&limit=2");
+		expect(capped.players.map((p: { pid: string }) => p.pid)).toEqual(["p2", "p3"]);
+		expect(capped).toMatchObject({ total: 4, more: 2 });
+		for (const q of ["limit=0", "limit=201", "limit=x", "realm=moon", "window=5x"]) {
+			expect([q, (await h.call(`/v1/errors/fp-boom/players?${q}`, { headers: bearer(ADMIN) })).status]).toEqual([q, 400]);
+		}
+		expect((await h.call("/v1/errors/nope/players", { headers: bearer(ADMIN) })).status).toBe(404);
+		expect((await h.call("/v1/errors/bad%20fp/players", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/errors/fp-boom/other", { headers: bearer(ADMIN) })).status).toBe(404);
+		// Reads need a signed-in reader: the API key and nobody are refused.
+		expect((await h.call("/v1/errors/fp-boom/players", { headers: bearer(API) })).status).toBe(401);
+		expect((await h.call("/v1/errors/fp-boom/players")).status).toBe(401);
+		// A report that named nobody: shown per side, without a player.
+		const two = await get("/v1/errors/fp-two/players?window=24h");
+		expect(two.players).toEqual([]);
+		expect(two.withoutPlayer).toEqual([{ realm: "server", count: 1, firstAt: new Date(Math.floor((T0 - 2 * 3_600_000) / MIN) * MIN).toISOString(), lastAt: new Date(Math.floor((T0 - 2 * 3_600_000) / MIN) * MIN + MIN - 1).toISOString() }]);
+		// A linked pid gets its UserId; the Roblox name is looked up in the background and shows on the next read.
+		expect((await h.call("/v1/identity", post(API, { identities: [{ pid: "p1", uid: 4242, t: T0 }] }))).status).toBe(202);
+		const linked = (await get("/v1/errors/fp-boom/players?window=1h")).players.find((p: { pid: string }) => p.pid === "p1");
+		expect(linked.uid).toBe(4242);
+		await new Promise((done) => setTimeout(done, 20));
+		expect(robloxCalls.some((u) => u.includes("/v1/users/4242"))).toBe(true);
+		const named = (await get("/v1/errors/fp-boom/players?window=1h")).players.find((p: { pid: string }) => p.pid === "p1");
+		expect(named).toMatchObject({ uid: 4242, name: "Tester4242", displayName: "Test Player" });
+		expect(JSON.stringify(named)).not.toContain(API);
+		// Erasure removes the player's error rows (the counts stay).
+		expect((await h.call("/v1/erasure", post(ADMIN, { pid: "p3" }))).status).toBe(200);
+		const after = await get("/v1/errors/fp-boom/players?window=1h");
+		expect(after.players.map((p: { pid: string }) => p.pid)).toEqual(["p2", "p1", "p4"]);
+		expect(after.total).toBe(3);
+		expect((await get("/v1/errors/fp-boom?window=1h")).count).toBe(12);
+	});
+
 	test("bad parameters are 400", async () => {
 		for (const q of ["window=5x", "window=0m", "from=yesterday", "bucket=10", "bucket=999999", "limit=0", "limit=501", "realm=moon", "from=2026-10-09T13:00:00Z&to=2026-10-09T12:00:00Z"]) {
 			expect([q, (await h.call(`/v1/errors?${q}`, { headers: bearer(ADMIN) })).status]).toEqual([q, 400]);
@@ -284,6 +344,53 @@ describe("error kinds, counts and the admin reads", () => {
 		expect((await get("/v1/errors?window=30d")).kinds).toEqual([]);
 		expect(h.app.errors.stats.kinds).toBe(0);
 		h.setNow(T0);
+	});
+});
+
+describe("error -> players in the store", () => {
+	test("rows written before per-player counts count once in their day; new reports add to them", async () => {
+		const db = await openSqlite(":memory:");
+		const DAY = 86_400_000;
+		const day = Math.floor((T0 - MIN) / DAY);
+		// The schema of the first release (no n / first_at / last_at, no anon).
+		await db.exec(`CREATE TABLE error_kinds (fp TEXT PRIMARY KEY, template TEXT NOT NULL, stack TEXT, realm TEXT NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, total INTEGER NOT NULL DEFAULT 0, last_branch TEXT, last_build TEXT);
+			CREATE TABLE error_counts (fp TEXT NOT NULL, minute INTEGER NOT NULL, branch TEXT NOT NULL, build TEXT NOT NULL, realm TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (fp, minute, branch, build, realm)) WITHOUT ROWID;
+			CREATE TABLE error_pids (fp TEXT NOT NULL, day INTEGER NOT NULL, realm TEXT NOT NULL, branch TEXT NOT NULL, build TEXT NOT NULL, pid TEXT NOT NULL, PRIMARY KEY (fp, day, realm, branch, build, pid)) WITHOUT ROWID;`);
+		await db.run("INSERT INTO error_kinds (fp, template, realm, first_at, last_at, total) VALUES ('fp-old', 't', 'server', ?, ?, 5)", [T0 - MIN, T0 - MIN]);
+		await db.run("INSERT INTO error_counts VALUES ('fp-old', ?, 'prod', 'b1', 'server', 5)", [Math.floor((T0 - MIN) / MIN)]);
+		await db.run("INSERT INTO error_pids VALUES ('fp-old', ?, 'server', 'prod', 'b1', 'old-pid')", [day]);
+		const store = await ErrorStore.open(db, { clock: () => T0 });
+		const w = { from: T0 - 3_600_000, to: T0, bucketSeconds: 60 };
+		const before = await store.players("fp-old", w);
+		expect(before?.players).toEqual([{ pid: "old-pid", count: 1, days: 1, firstAt: new Date(day * DAY).toISOString(), lastAt: new Date(day * DAY + DAY - 1).toISOString(), realms: ["server"] }]);
+		expect(before?.withoutPlayer).toEqual([]);
+		await store.record(parseErrorBatch({ j: "job-1", errors: [item({ fp: "fp-old", count: 3, firstAt: T0 - MIN, lastAt: T0 - MIN, branch: "prod", build: "b1", pids: ["old-pid"] })] }, T0));
+		expect((await store.players("fp-old", w))?.players[0]).toMatchObject({ pid: "old-pid", count: 4, lastAt: new Date(T0 - MIN).toISOString() });
+		expect(await store.players("nope", w)).toBeUndefined();
+		await db.close();
+	});
+
+	test("at most 200 players, sorted by count then last seen", async () => {
+		const db = await openSqlite(":memory:");
+		const store = await ErrorStore.open(db, { clock: () => T0 });
+		// 25 batches of 10 items, one pid each: 250 players; player i hits it (i % 7) + 1 times, at minute i % 50.
+		for (let b = 0; b < 25; b++) {
+			const errors = Array.from({ length: 10 }, (_, k) => {
+				const i = b * 10 + k;
+				return item({ fp: "fp-many", count: (i % 7) + 1, firstAt: T0 - (50 - (i % 50)) * MIN, lastAt: T0 - (50 - (i % 50)) * MIN, pids: [`pl${i}`] });
+			});
+			await store.record(parseErrorBatch({ j: `job-${b}`, errors }, T0));
+		}
+		const r = await store.players("fp-many", { from: T0 - 3_600_000, to: T0, bucketSeconds: 60 }, {}, 500);
+		expect(r?.players.length).toBe(200);
+		expect(r).toMatchObject({ total: 250, more: 50 });
+		const list = r?.players ?? [];
+		for (let i = 1; i < list.length; i++) {
+			const [a, b] = [list[i - 1] as (typeof list)[number], list[i] as (typeof list)[number]];
+			expect(a.count > b.count || (a.count === b.count && a.lastAt >= b.lastAt)).toBe(true);
+		}
+		expect(list[0]?.count).toBe(7);
+		await db.close();
 	});
 });
 

@@ -89,6 +89,12 @@ export class RobloxProfiles {
 		return this.cache.size;
 	}
 
+	/** A UserId's profile from memory only (no lookup, no rate limit used), and whether it is still fresh; undefined when not cached. */
+	peek(userId: number): { profile: RobloxProfile; fresh: boolean } | undefined {
+		const hit = this.cache.get(userId);
+		return hit ? { profile: hit.answer.profile, fresh: hit.expires > this.clock() } : undefined;
+	}
+
 	async get(userId: number): Promise<ProfileAnswer> {
 		if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("userId must be a positive integer");
 		const now = this.clock();

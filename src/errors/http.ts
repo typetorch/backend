@@ -3,10 +3,25 @@
  *   GET /v1/errors?window=24h|from=&to=&branch=&build=&realm=&q=&limit=&bucket=   -> kinds with counts, players, sparkline,
  *     and the builds (artifact ids) with errors in the window, most recent first (for the build filter)
  *   GET /v1/errors/<fp>?window=|from=&to=&branch=&build=&realm=&bucket=             -> one kind: sample stack, series, where
+ *   GET /v1/errors/<fp>/players?window=|from=&to=&branch=&build=&realm=&limit=       -> the players who hit it (at most 200),
+ *     most occurrences first, with their UserId and Roblox name when known, and the occurrences that named no player
  * `window` is a number and a unit (30m, 6h, 7d); without `from` the window ends now. Times are unix ms or ISO.
  */
 import { ErrorInputError, FP_PATTERN } from "./parse.ts";
-import { chooseBucket, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
+import { chooseBucket, ERROR_PLAYERS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
+
+/** What the server knows about a pid: its UserId and Roblox names (when linked), or that it was erased (left out). */
+export interface PlayerIdentity {
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+export interface ErrorReadOptions {
+	now: number;
+	keepDays: number;
+	/** pid -> identity for the players list; a pid missing from the map is unknown, `null` means erased (left out). */
+	identify?: (pids: string[]) => Promise<Map<string, PlayerIdentity | null>>;
+}
 
 /** Control characters: a branch or build filter with one is refused (stored labels never need them). */
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -65,12 +80,12 @@ function json(status: number, body: unknown): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
-export async function handleErrorReads(store: ErrorStore, url: URL, o: { now: number; keepDays: number }): Promise<Response> {
+export async function handleErrorReads(store: ErrorStore, url: URL, o: ErrorReadOptions): Promise<Response> {
 	const q = url.searchParams;
 	try {
 		const window = parseWindow(q, o.now, o.keepDays);
 		const filter = parseFilter(q);
-		const one = /^\/v1\/errors\/([^/]+)$/.exec(url.pathname);
+		const one = /^\/v1\/errors\/([^/]+)(\/players)?$/.exec(url.pathname);
 		if (one) {
 			let fp: string;
 			try {
@@ -79,9 +94,11 @@ export async function handleErrorReads(store: ErrorStore, url: URL, o: { now: nu
 				return json(400, { error: "bad fingerprint" });
 			}
 			if (!FP_PATTERN.test(fp)) return json(400, { error: "bad fingerprint" });
+			if (one[2]) return await players(store, fp, window, filter, q, o);
 			const detail = await store.detail(fp, window, filter);
 			return detail ? json(200, detail) : json(404, { error: "no such error kind" });
 		}
+		if (url.pathname !== "/v1/errors") return json(404, { error: "not found" });
 		const limitText = q.get("limit");
 		const limit = limitText ? Number(limitText) : 100;
 		if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new ErrorInputError("limit is a whole number from 1 to 500");
@@ -92,4 +109,24 @@ export async function handleErrorReads(store: ErrorStore, url: URL, o: { now: nu
 		if (error instanceof ErrorInputError) return json(400, { error: error.message });
 		throw error;
 	}
+}
+
+/** GET /v1/errors/<fp>/players: the store's list, with UserIds and names joined in and erased players left out. */
+async function players(store: ErrorStore, fp: string, window: ErrorWindow, filter: ErrorFilter, q: URLSearchParams, o: ErrorReadOptions): Promise<Response> {
+	const limitText = q.get("limit");
+	const limit = limitText ? Number(limitText) : ERROR_PLAYERS_MAX;
+	if (!Number.isInteger(limit) || limit < 1 || limit > ERROR_PLAYERS_MAX) throw new ErrorInputError(`limit is a whole number from 1 to ${ERROR_PLAYERS_MAX}`);
+	const found = await store.players(fp, window, filter, limit);
+	if (!found) return json(404, { error: "no such error kind" });
+	const who = o.identify ? await o.identify(found.players.map((p) => p.pid)) : new Map<string, PlayerIdentity | null>();
+	const shown = found.players.filter((p) => who.get(p.pid) !== null);
+	const erased = found.players.length - shown.length;
+	return json(200, {
+		...found,
+		total: found.total - erased,
+		players: shown.map((p) => {
+			const id = who.get(p.pid);
+			return { ...p, ...(id?.uid !== undefined ? { uid: id.uid } : {}), ...(id?.name ? { name: id.name } : {}), ...(id?.displayName ? { displayName: id.displayName } : {}) };
+		}),
+	});
 }
