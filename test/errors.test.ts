@@ -313,6 +313,53 @@ describe("error kinds, counts and the admin reads", () => {
 		expect((await get("/v1/errors/fp-boom?window=1h")).count).toBe(12);
 	});
 
+	test("player -> errors: the kinds one player hit, sorted, filtered, capped, behind the read gate", async () => {
+		// p2 and p1 also hit the second kind (it exists already, so the kind cap test below is unchanged).
+		const send = async (...items: Record<string, unknown>[]) => expect((await h.call("/v1/errors", post(API, { j: "job-a", errors: items }))).status).toBe(202);
+		const two = { fp: "fp-two", template: "HTTP 429 from <url>", branch: "prod", build: "a1b2c3d-000042", realm: "server" };
+		await send({ ...two, count: 1, firstAt: T0 - 30 * MIN, lastAt: T0 - 30 * MIN, pids: ["p2"] });
+		await send({ ...two, count: 4, firstAt: T0 - 10 * MIN, lastAt: T0 - 10 * MIN, pids: ["p1"] });
+		await h.app.bus.idle();
+		const p2 = await get("/v1/players/p2/errors?window=1h");
+		expect(p2).toMatchObject({ pid: "p2", total: 2, more: 0 });
+		expect(p2.errors.map((e: { fp: string; count: number }) => [e.fp, e.count])).toEqual([
+			["fp-boom", 10],
+			["fp-two", 1],
+		]);
+		expect(p2.errors[0]).toMatchObject({ template: expect.any(String), topFrame: "Workspace.Game.Round:42", realms: ["server"], days: 1, firstAt: new Date(T0 - 3 * MIN).toISOString(), lastAt: new Date(T0 - 2 * MIN).toISOString() });
+		expect(p2.errors[0].total).toBeGreaterThanOrEqual(12);
+		expect(p2.errors[1]).toMatchObject({ template: "HTTP 429 from <url>", total: 6 });
+		// Same count: the most recently seen first.
+		expect((await get("/v1/players/p1/errors?window=1h")).errors.map((e: { fp: string; count: number }) => [e.fp, e.count])).toEqual([
+			["fp-boom", 4],
+			["fp-two", 4],
+		]);
+		// Filters: side, branch, build.
+		expect((await get("/v1/players/p4/errors?window=1h&realm=client")).errors.map((e: { fp: string }) => e.fp)).toEqual(["fp-boom"]);
+		expect((await get("/v1/players/p4/errors?window=1h&realm=server")).errors).toEqual([]);
+		expect((await get("/v1/players/p4/errors?window=1h&branch=dev&build=b2-000043")).errors.map((e: { realms: string[] }) => e.realms)).toEqual([["client"]]);
+		expect((await get("/v1/players/p2/errors?window=1h&branch=dev")).total).toBe(0);
+		expect((await get("/v1/players/p2/errors?window=1h&build=a1b2c3d-000042")).total).toBe(2);
+		// The cap.
+		const capped = await get("/v1/players/p2/errors?window=1h&limit=1");
+		expect(capped).toMatchObject({ total: 2, more: 1 });
+		expect(capped.errors.map((e: { fp: string }) => e.fp)).toEqual(["fp-boom"]);
+		// A pid nobody reported: empty.
+		expect(await get("/v1/players/nobody-here/errors?window=1h")).toMatchObject({ errors: [], total: 0, more: 0 });
+		// Bad input.
+		for (const q of ["limit=0", "limit=201", "limit=1.5", "window=5x", "realm=moon"]) {
+			expect([q, (await h.call(`/v1/players/p2/errors?${q}`, { headers: bearer(ADMIN) })).status]).toEqual([q, 400]);
+		}
+		expect((await h.call("/v1/players/bad%20pid/errors", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call(`/v1/players/${"x".repeat(65)}/errors`, { headers: bearer(ADMIN) })).status).toBe(400);
+		// Erased (p3, by the test above): not found.
+		expect((await h.call("/v1/players/p3/errors?window=1h", { headers: bearer(ADMIN) })).status).toBe(404);
+		// Gates: the API key writes only; no credentials; GET only.
+		expect((await h.call("/v1/players/p2/errors", { headers: bearer(API) })).status).toBe(401);
+		expect((await h.call("/v1/players/p2/errors")).status).toBe(401);
+		expect((await h.call("/v1/players/p2/errors", post(ADMIN, {}))).status).toBe(405);
+	});
+
 	test("bad parameters are 400", async () => {
 		for (const q of ["window=5x", "window=0m", "from=yesterday", "bucket=10", "bucket=999999", "limit=0", "limit=501", "realm=moon", "from=2026-10-09T13:00:00Z&to=2026-10-09T12:00:00Z"]) {
 			expect([q, (await h.call(`/v1/errors?${q}`, { headers: bearer(ADMIN) })).status]).toEqual([q, 400]);
@@ -390,6 +437,29 @@ describe("error -> players in the store", () => {
 			expect(a.count > b.count || (a.count === b.count && a.lastAt >= b.lastAt)).toBe(true);
 		}
 		expect(list[0]?.count).toBe(7);
+		await db.close();
+	});
+
+	test("player -> errors: at most 200 kinds, sorted by count then last seen", async () => {
+		const db = await openSqlite(":memory:");
+		const store = await ErrorStore.open(db, { clock: () => T0, maxKinds: 1000, newKindsPerJobHour: 1000, newKindsPerIpHour: 1000 });
+		// 25 batches of 10 kinds, all naming one player: kind i is hit (i % 7) + 1 times, at minute i % 50.
+		for (let b = 0; b < 25; b++) {
+			const errors = Array.from({ length: 10 }, (_, k) => {
+				const i = b * 10 + k;
+				return item({ fp: `fp-k${i}`, count: (i % 7) + 1, firstAt: T0 - (50 - (i % 50)) * MIN, lastAt: T0 - (50 - (i % 50)) * MIN, pids: ["one-player"] });
+			});
+			await store.record(parseErrorBatch({ j: `job-${b}`, errors }, T0));
+		}
+		const r = await store.playerErrors("one-player", { from: T0 - 3_600_000, to: T0, bucketSeconds: 60 }, {}, 500);
+		expect(r.errors.length).toBe(200);
+		expect(r).toMatchObject({ total: 250, more: 50 });
+		for (let i = 1; i < r.errors.length; i++) {
+			const [a, b] = [r.errors[i - 1] as (typeof r.errors)[number], r.errors[i] as (typeof r.errors)[number]];
+			expect(a.count > b.count || (a.count === b.count && a.lastAt >= b.lastAt)).toBe(true);
+		}
+		expect(r.errors[0]?.count).toBe(7);
+		expect((await store.playerErrors("someone-else", { from: T0 - 3_600_000, to: T0, bucketSeconds: 60 })).errors).toEqual([]);
 		await db.close();
 	});
 });

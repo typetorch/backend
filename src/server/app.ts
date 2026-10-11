@@ -23,6 +23,7 @@
  *   GET  /v1/roblox/products        game pass / developer product names, prices and icons (?gamepass=1,2&product=3; <= 50 ids; cached 1 h)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
+ *   GET  /v1/players/<pid>/errors?window=..  the error kinds one player hit (at most 200), most occurrences first
  *   GET  /v1/experiments/<key>/players?variant=&from=&to=|window=&limit=..  the players in one experiment (at most 200):
  *        variant, random or forced, assigned / first / last seen, UserId and Roblox name (experiment-players.ts)
  *   GET  /v1/experiments            the experiment overrides this server knows (data/settings.json: active, weights,
@@ -60,7 +61,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { EventBus } from "../bus.ts";
 import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
-import { handleErrorReads, type PlayerIdentity } from "../errors/http.ts";
+import { handleErrorReads, handlePlayerErrors, type PlayerIdentity } from "../errors/http.ts";
 import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
@@ -1603,6 +1604,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
 			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
+			const playerErrors = /^\/v1\/players\/([^/]+)\/errors$/.exec(path);
+			if (playerErrors) {
+				if (method !== "GET") return json(405, { error: "GET only" });
+				const pid = playerErrors[1] as string;
+				if (!PID_PATTERN.test(pid)) return json(400, { error: "bad pid" });
+				if (warehouse?.isErased(pid)) return json(404, { error: "no such player" });
+				return handlePlayerErrors(errors, pid, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
+			}
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
 			if (path === "/v1/admin/settings") {
 				if (method !== "GET" && method !== "PATCH") return json(405, { error: "GET or PATCH only" });

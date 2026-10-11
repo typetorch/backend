@@ -5,10 +5,12 @@
  *   GET /v1/errors/<fp>?window=|from=&to=&branch=&build=&realm=&bucket=             -> one kind: sample stack, series, where
  *   GET /v1/errors/<fp>/players?window=|from=&to=&branch=&build=&realm=&limit=       -> the players who hit it (at most 200),
  *     most occurrences first, with their UserId and Roblox name when known, and the occurrences that named no player
+ *   GET /v1/players/<pid>/errors?window=|from=&to=&branch=&build=&realm=&limit=      -> the kinds one player hit (at most 200),
+ *     most occurrences first, with the kind's message, side, first/last seen and all-time count
  * `window` is a number and a unit (30m, 6h, 7d); without `from` the window ends now. Times are unix ms or ISO.
  */
 import { ErrorInputError, FP_PATTERN } from "./parse.ts";
-import { chooseBucket, ERROR_PLAYERS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
+import { chooseBucket, ERROR_PLAYERS_MAX, PLAYER_ERRORS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
 
 /** What the server knows about a pid: its UserId and Roblox names (when linked), or that it was erased (left out). */
 export interface PlayerIdentity {
@@ -129,4 +131,23 @@ async function players(store: ErrorStore, fp: string, window: ErrorWindow, filte
 			return { ...p, ...(id?.uid !== undefined ? { uid: id.uid } : {}), ...(id?.name ? { name: id.name } : {}), ...(id?.displayName ? { displayName: id.displayName } : {}) };
 		}),
 	});
+}
+
+/**
+ * GET /v1/players/<pid>/errors: the error kinds one player hit in the window, under the error filters. The caller checks
+ * the pid's shape and that it isn't erased (erasure deletes the rows too, so an erased pid has none either way).
+ */
+export async function handlePlayerErrors(store: ErrorStore, pid: string, url: URL, o: { now: number; keepDays: number }): Promise<Response> {
+	const q = url.searchParams;
+	try {
+		const window = parseWindow(q, o.now, o.keepDays);
+		const filter = parseFilter(q);
+		const limitText = q.get("limit");
+		const limit = limitText ? Number(limitText) : PLAYER_ERRORS_MAX;
+		if (!Number.isInteger(limit) || limit < 1 || limit > PLAYER_ERRORS_MAX) throw new ErrorInputError(`limit is a whole number from 1 to ${PLAYER_ERRORS_MAX}`);
+		return json(200, await store.playerErrors(pid, window, filter, limit));
+	} catch (error) {
+		if (error instanceof ErrorInputError) return json(400, { error: error.message });
+		throw error;
+	}
 }

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS error_pids (
 	fp TEXT NOT NULL, day INTEGER NOT NULL, realm TEXT NOT NULL, branch TEXT NOT NULL, build TEXT NOT NULL, pid TEXT NOT NULL,
 	PRIMARY KEY (fp, day, realm, branch, build, pid)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS error_pids_day ON error_pids (day);
+CREATE INDEX IF NOT EXISTS error_pids_pid ON error_pids (pid, day);
 `;
 
 export interface ErrorWindow {
@@ -112,6 +113,38 @@ export interface ErrorPlayers {
 	more: number;
 	/** Occurrences in reports that named no player, per side (server errors about nobody, clients without an analytics id). */
 	withoutPlayer: { realm: string; count: number; firstAt: string; lastAt: string }[];
+}
+
+/** Error kinds listed for one player at most (GET /v1/players/<pid>/errors). */
+export const PLAYER_ERRORS_MAX = 200;
+
+export interface PlayerError {
+	fp: string;
+	/** The kind's message (names and ids replaced by the game), as the Errors page lists it. */
+	template: string;
+	/** First line of the kind's sample stack. */
+	topFrame: string | null;
+	/** "server" and/or "client": where the reports naming this player came from. */
+	realms: string[];
+	/** Occurrences in the reports that named the player (an upper bound: see ErrorPlayer.count). */
+	count: number;
+	/** Days (UTC) the player hit it in the window. */
+	days: number;
+	firstAt: string;
+	lastAt: string;
+	/** All-time occurrences of the kind, every player. */
+	total: number;
+}
+
+export interface PlayerErrors {
+	pid: string;
+	window: { from: string; to: string };
+	/** Most occurrences first, then the most recently seen; at most `limit`. */
+	errors: PlayerError[];
+	/** Kinds the player hit in the window. */
+	total: number;
+	/** Kinds past the limit. */
+	more: number;
 }
 
 export interface ErrorStats {
@@ -574,6 +607,46 @@ export class ErrorStore {
 			total,
 			more: Math.max(0, total - rows.length),
 			withoutPlayer: anon.map((r) => ({ realm: r.realm, count: Number(r.n), firstAt: iso(Number(r.first) * MINUTE), lastAt: iso((Number(r.last) + 1) * MINUTE - 1) })),
+		};
+	}
+
+	/**
+	 * The error kinds one player hit inside the window (by the days their rows cover, like `players`), under the
+	 * branch / build / realm filter: most occurrences first, then the most recently seen, at most `limit` (1-200).
+	 */
+	async playerErrors(pid: string, w: ErrorWindow, filter: ErrorFilter = {}, limit: number = PLAYER_ERRORS_MAX): Promise<PlayerErrors> {
+		const cap = Math.min(Math.max(1, Math.floor(limit)), PLAYER_ERRORS_MAX);
+		const pf = this.where(filter, "p");
+		const days = [Math.floor(w.from / DAY), Math.floor((w.to - 1) / DAY)];
+		const rows = await this.db.all<{ fp: string; n: number; days: number; first_at: number; last_at: number; realms: string; template: string; stack: string | null; total: number }>(
+			"SELECT p.fp, SUM(COALESCE(p.n, 1)) AS n, COUNT(DISTINCT p.day) AS days, " +
+				`MIN(COALESCE(p.first_at, p.day * ${DAY})) AS first_at, MAX(COALESCE(p.last_at, p.day * ${DAY} + ${DAY - 1})) AS last_at, GROUP_CONCAT(DISTINCT p.realm) AS realms, ` +
+				"MAX(k.template) AS template, MAX(k.stack) AS stack, MAX(k.total) AS total " +
+				`FROM error_pids p JOIN error_kinds k ON k.fp = p.fp WHERE p.pid = ? AND p.day BETWEEN ? AND ?${pf.sql} GROUP BY p.fp ORDER BY n DESC, last_at DESC, p.fp LIMIT ?`,
+			[pid, ...days, ...pf.params, cap],
+		);
+		const total = Number(
+			(await this.db.first<{ n: number }>(`SELECT COUNT(DISTINCT p.fp) AS n FROM error_pids p JOIN error_kinds k ON k.fp = p.fp WHERE p.pid = ? AND p.day BETWEEN ? AND ?${pf.sql}`, [pid, ...days, ...pf.params]))?.n ?? 0,
+		);
+		return {
+			pid,
+			window: { from: iso(w.from), to: iso(w.to) },
+			errors: rows.map((r) => ({
+				fp: r.fp,
+				template: r.template,
+				topFrame: r.stack ? (r.stack.split("\n")[0] ?? "").slice(0, 300) || null : null,
+				realms: String(r.realms ?? "")
+					.split(",")
+					.filter(Boolean)
+					.sort(),
+				count: Number(r.n),
+				days: Number(r.days),
+				firstAt: iso(Number(r.first_at)),
+				lastAt: iso(Number(r.last_at)),
+				total: Number(r.total),
+			})),
+			total,
+			more: Math.max(0, total - rows.length),
 		};
 	}
 
