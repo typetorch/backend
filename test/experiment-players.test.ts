@@ -4,6 +4,8 @@
  * Roblox answers names; every token, pid and UserId is made up.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { parseExperimentPlayers } from "../src/server/experiment-players.ts";
 import { ADMIN, API, T0, asJson, bearer, harness, json, post, type Harness } from "./harness.ts";
@@ -174,5 +176,47 @@ describe("parseExperimentPlayers", () => {
 		});
 		// `from` wins over `window`.
 		expect(parseExperimentPlayers("/v1/experiments/a/players", new URLSearchParams("from=2026-10-01&window=1h"), T0).filters).toEqual({ from: "2026-10-01" });
+	});
+});
+
+describe("experiment weights and state for the Experiments page", () => {
+	let h: Harness;
+	const t = T0 - 3 * 3_600_000;
+	beforeAll(async () => {
+		h = await harness({ TYPETORCH_WEB_VIEWERS: "9001" });
+		const events = [...assigned("w-a", t, "short"), ...assigned("w-b", t + MIN, "long", { forced: true }), ...assigned("w-c", t + 2 * MIN, "long")];
+		const r = await h.call("/v1/ingest", { method: "POST", body: gzipSync(Buffer.from(JSON.stringify({ events }))), headers: { ...bearer(API), "content-encoding": "gzip" } });
+		expect(r.status).toBe(202);
+		await h.app.load();
+	});
+	afterAll(() => h.close());
+
+	test("the experiments list counts forced players and the variants the game declares", async () => {
+		const r = await asJson(await h.call("/v1/query/experiment", post(ADMIN, { filters: { from: new Date(t - MIN).toISOString() } })));
+		expect(r.result.experiments).toEqual([
+			{ experiment: "onboarding", variant: "long", players: 2, forced: 1, variantCount: 2 },
+			{ experiment: "onboarding", variant: "short", players: 1, forced: 0, variantCount: 2 },
+		]);
+	});
+
+	test("GET /v1/experiments: the overrides from the settings file only, for every reader; none without a file", async () => {
+		const read = async (headers: Record<string, string> = bearer(ADMIN)) => h.call("/v1/experiments", { headers });
+		expect(await asJson(await read())).toEqual({ source: "none", experiments: {} });
+		writeFileSync(
+			join(h.dir, "settings.json"),
+			JSON.stringify({ flushSeconds: 20, token: "fake-ingest-token-0123456789", events: "https://example.invalid/v1/ingest", experiments: { onboarding: { weights: [3, 1], players: { "123": "long" } }, shop: { active: false }, colors: { variant: "red" } } }),
+		);
+		const r = await asJson(await read());
+		expect(r).toEqual({ source: "settings-file", experiments: { onboarding: { weights: [3, 1] }, shop: { active: false }, colors: { variant: "red" } } });
+		const text = JSON.stringify(r);
+		expect(text).not.toContain("fake-ingest-token");
+		expect(text).not.toContain("123");
+		const web = { cookie: `tt_session=${h.app.sessions.create({ kind: "roblox", userId: 9001, name: "Viewer" }, "web")}` };
+		expect((await read(web)).status).toBe(200);
+		expect((await read(bearer(API))).status).toBe(401);
+		expect((await read({})).status).toBe(401);
+		expect((await h.call("/v1/experiments", post(ADMIN, {}))).status).toBe(405);
+		writeFileSync(join(h.dir, "settings.json"), "{ not json");
+		expect(await asJson(await read())).toEqual({ source: "unreadable", experiments: {} });
 	});
 });

@@ -24,6 +24,8 @@
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/experiments/<key>/players?variant=&from=&to=|window=&limit=..  the players in one experiment (at most 200):
  *        variant, random or forced, assigned / first / last seen, UserId and Roblox name (experiment-players.ts)
+ *   GET  /v1/experiments            the experiment overrides this server knows (data/settings.json: active, weights,
+ *        variant per experiment; nothing else from the file), or none
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
  *   GET  /v1/fleet/servers/<job>;  POST .../watch | .../commands;  GET .../commands/<id>;  GET /v1/fleet/debug/audit
@@ -726,6 +728,29 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				return { ...p, ...(id?.uid !== undefined ? { uid: id.uid } : {}), ...(id?.name ? { name: id.name } : {}), ...(id?.displayName ? { displayName: id.displayName } : {}) };
 			}),
 		};
+	}
+
+	/**
+	 * GET /v1/experiments (every signed-in reader, like the Experiments page): only the `experiments` overrides of the
+	 * settings file (active, weights, variant), never the file's other fields. The live record is the game's signed
+	 * settings in its DataStore; this server only knows the copy in data/settings.json, so `source` says which.
+	 */
+	function experimentOverrides(): Response {
+		let dials: Record<string, unknown>;
+		try {
+			dials = liveDials();
+		} catch {
+			return json(200, { source: "unreadable", experiments: {} });
+		}
+		const found = dials.experiments as Record<string, { active?: boolean; weights?: number[]; variant?: string }> | undefined;
+		if (!found) return json(200, { source: "none", experiments: {} });
+		const experiments = Object.fromEntries(
+			Object.entries(found).map(([name, e]) => [
+				name,
+				{ ...(e.active !== undefined ? { active: e.active } : {}), ...(e.weights ? { weights: e.weights } : {}), ...(e.variant !== undefined ? { variant: e.variant } : {}) },
+			]),
+		);
+		return json(200, { source: "settings-file", experiments });
 	}
 
 	/** GET /v1/experiments/<key>/players (every signed-in reader, like the Experiments page's queries). */
@@ -1550,6 +1575,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
+			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
 			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
 			if (path === "/v1/admin/settings") {

@@ -54,7 +54,14 @@ export interface Comparison {
 }
 
 export type ExperimentResult =
-	| { experiment: null; experiments: { experiment: string; variant: string; players: number }[] }
+	| {
+			experiment: null;
+			/**
+			 * Per experiment and variant, from the `experiment` rows: players, how many of them were forced, and the number of
+			 * variants the game declares (the rows' `variants` prop; null on rows without it).
+			 */
+			experiments: { experiment: string; variant: string; players: number; forced: number; variantCount: number | null }[];
+	  }
 	| {
 			experiment: string;
 			scope: "player" | "server";
@@ -89,7 +96,8 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 		if (!o.experiment && o.scope === "player") {
 			return {
 				list:
-					`SELECT experiment, variant, COUNT(DISTINCT pid) AS players FROM (SELECT e.name AS experiment, ${d.jsonText("e.props", o.variantKey)} AS variant, e.pid AS pid ` +
+					`SELECT experiment, variant, COUNT(DISTINCT pid) AS players, COUNT(DISTINCT CASE WHEN forced = 'true' THEN pid END) AS forced, MAX(nvar) AS nvar FROM (SELECT e.name AS experiment, ${d.jsonText("e.props", o.variantKey)} AS variant, e.pid AS pid, ` +
+					`${d.jsonText("e.props", "forced")} AS forced, ${d.jsonNumber("e.props", "variants")} AS nvar ` +
 					`FROM ${table} e WHERE ${where(f, ctx)} AND e.kind = 'experiment') x GROUP BY experiment, variant ORDER BY experiment, variant ${lim(1000)}`,
 			};
 		}
@@ -119,7 +127,13 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 	},
 	shape(rows, _ctx, _f, o) {
 		if (rows.list) {
-			return { experiment: null, experiments: rows.list.map((r) => ({ experiment: str(r.experiment), variant: str(r.variant), players: num(r.players) })) };
+			return { experiment: null, experiments: rows.list.map((r) => ({
+					experiment: str(r.experiment),
+					variant: str(r.variant),
+					players: num(r.players),
+					forced: num(r.forced),
+					variantCount: r.nvar === null || r.nvar === undefined ? null : num(r.nvar),
+				})) };
 		}
 		const variants = rows.variants.map((r) => ({
 			row: r,
