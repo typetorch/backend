@@ -62,6 +62,8 @@ export interface DataColumn<T> {
 	title?: string;
 	/** A small muted word after the header label (a unit, or a SQL type). */
 	hint?: string;
+	/** Something after the header label that isn't part of the sort button (e.g. a details popover's trigger). */
+	headerExtra?: ReactNode;
 	/** The value in the CSV and in "Copy cell" (default: the accessor value; dates as ISO). */
 	exportValue?: (row: T) => unknown;
 }

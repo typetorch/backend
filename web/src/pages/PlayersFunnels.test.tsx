@@ -17,9 +17,19 @@ afterEach(() => {
 const base = { firstSeen: "2026-10-03T10:00:00.000Z", lastSeen: "2026-10-08T10:00:00.000Z", sessions: 1, events: 3, playtimeMinutes: 5, newInRange: false, robux: 0 };
 const players: PlayersResult = { players: [{ ...base, pid: "pid-alpha-0001" }, { ...base, pid: "pid-bravo-0002" }] };
 const progress: FunnelProgressResult = {
-	funnels: [],
+	funnels: [
+		{
+			name: "v1_tutorial",
+			steps: [
+				{ step: 1, label: "joined" },
+				{ step: 2, label: "moved" },
+				{ step: 3, label: "first_fight" },
+				{ step: 4, label: "done" },
+			],
+		},
+	],
 	progress: [
-		{ pid: "pid-alpha-0001", funnel: "v1_tutorial", step: 3, label: "first_fight", reached: 3, of: 4, share: 0.75 },
+		{ pid: "pid-alpha-0001", funnel: "v1_tutorial", step: 3, label: "first_fight", reached: 3, of: 4, share: 0.75, reachedAt: new Date(Date.now() - 3 * 3_600_000).toISOString() },
 		{ pid: "pid-alpha-0001", funnel: "v3_tutorial", step: 4, label: "done", reached: 4, of: 4, share: 1 },
 		{ pid: "pid-bravo-0002", funnel: "v1_tutorial", step: 1, label: "joined", reached: 1, of: 4, share: 0.25 },
 	],
@@ -92,5 +102,66 @@ describe("Players list: funnel columns", () => {
 		mount("?funnels=v1_tutorial");
 		await screen.findByRole("table", { name: "Players" });
 		await waitFor(() => expect(progressCalls.at(-1)).toEqual({ funnel: "v1_tutorial", pids: ["pid-alpha-0001", "pid-bravo-0002"] }));
+	});
+});
+
+describe("Players list: a funnel's step names", () => {
+	const stepsIn = (list: HTMLElement) => within(list).getAllByRole("listitem").map((li) => li.textContent);
+
+	it("hovering a progress cell lists the steps, the reached ones checked and the furthest one highlighted with when", async () => {
+		mount("?funnels=v1_tutorial");
+		await waitFor(() => expect(within(rowOf("pid-alpha-0001")).getByRole("progressbar", { name: /v1_tutorial/ }).textContent).toBe("75%"));
+		const cell = within(rowOf("pid-alpha-0001")).getByRole("progressbar", { name: /v1_tutorial/ }).closest("button") as HTMLElement;
+		fireEvent.mouseEnter(cell);
+		const dialog = await screen.findByRole("dialog");
+		const list = within(dialog).getByRole("list", { name: "Steps of v1_tutorial" });
+		expect(stepsIn(list)).toEqual(["1.joined", "2.moved", "3.first_fight3 h ago", "4.done"]);
+		expect(within(list).getAllByLabelText("reached")).toHaveLength(3);
+		expect(within(list).getAllByLabelText("not reached")).toHaveLength(1);
+		const current = within(list).getAllByRole("listitem")[2];
+		expect(current.getAttribute("aria-current")).toBe("step");
+		fireEvent.mouseLeave(cell);
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+		// The row still opens the player only from outside the cell: a tap on the cell opens the steps, not the player.
+		fireEvent.click(cell);
+		expect(await screen.findByRole("dialog")).toBeTruthy();
+		expect(search).not.toContain("pid=");
+	});
+
+	it("focus opens it too; a player who never started it is told so; a funnel without known steps says that", async () => {
+		mount("?funnels=v1_tutorial,v3_tutorial");
+		const cell = (await within(await screen.findByRole("table", { name: "Players" })).findByText("not started")).closest("button") as HTMLElement;
+		fireEvent.focus(cell);
+		const dialog = await screen.findByRole("dialog");
+		expect(within(dialog).getByText("v3_tutorial")).toBeTruthy();
+		expect(within(dialog).getByText("Not started in this range.")).toBeTruthy();
+		expect(within(dialog).getByText(/No step of it logged/)).toBeTruthy();
+		fireEvent.blur(cell);
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	});
+
+	it("a player who never started a funnel with known steps gets them all unchecked", async () => {
+		vi.mocked(api.query).mockImplementation((async (name: string) => {
+			if (name === "players") return players;
+			if (name === "funnel-progress") return { ...progress, progress: progress.progress.filter((p) => p.pid !== "pid-bravo-0002") };
+			return { funnel: null, funnels: [] };
+		}) as typeof api.query);
+		mount("?funnels=v1_tutorial");
+		await waitFor(() => expect(within(rowOf("pid-bravo-0002")).getByText("not started")).toBeTruthy());
+		fireEvent.mouseEnter(within(rowOf("pid-bravo-0002")).getByText("not started").closest("button") as HTMLElement);
+		const dialog = await screen.findByRole("dialog");
+		expect(within(dialog).getAllByLabelText("not reached")).toHaveLength(4);
+		expect(within(dialog).queryByLabelText("reached")).toBeNull();
+	});
+
+	it("the column header lists the step names", async () => {
+		mount("?funnels=v1_tutorial");
+		const t = await screen.findByRole("table", { name: "Players" });
+		const tip = await within(t).findByRole("button", { name: "Steps of v1_tutorial" });
+		expect(within(t).getByRole("columnheader", { name: /v1_tutorial/ }).getAttribute("title")).toContain("Steps: 1. joined, 2. moved, 3. first_fight, 4. done");
+		fireEvent.mouseEnter(tip);
+		const list = within(await screen.findByRole("dialog")).getByRole("list", { name: "Steps of v1_tutorial" });
+		expect(stepsIn(list)).toEqual(["1.joined", "2.moved", "3.first_fight", "4.done"]);
+		expect(within(list).queryByLabelText("reached")).toBeNull();
 	});
 });

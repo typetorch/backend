@@ -156,6 +156,8 @@ export interface FunnelProgress {
 	of: number;
 	/** reached / of, 0-1. */
 	share: number;
+	/** When they first logged that furthest step (ISO). */
+	reachedAt?: string;
 }
 
 export interface FunnelProgressResult {

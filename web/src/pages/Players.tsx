@@ -6,6 +6,7 @@ import { IdentityStatus } from "@/components/Identity";
 import { PlayerDetail } from "@/components/player-detail/PlayerDetail";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { FunnelProgressBar } from "@/components/FunnelProgressBar";
+import { FunnelStepList, FunnelStepsHeaderTip, HoverPopover, type FunnelStepName } from "@/components/FunnelSteps";
 import { ToggleChip } from "@/components/ToggleChip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -143,13 +144,15 @@ function useFunnelProgressColumns(players: readonly PlayerSummary[] | undefined,
 	const loading = progress.isPending;
 	const failed = progress.isError;
 	const byKey = useMemo(() => new Map((progress.data?.progress ?? []).map((p) => [`${p.pid}\n${p.funnel}`, p])), [progress.data]);
+	// Each funnel's step names come with the same answer (no query per cell).
+	const stepsOf = useMemo(() => new Map((progress.data?.funnels ?? []).map((f) => [f.name, f.steps])), [progress.data]);
 	return useMemo(() => {
 		if (!funnels.length) return PLAYER_COLUMNS;
-		return [...PLAYER_COLUMNS, ...funnels.map((name) => funnelColumn(name, (pid) => byKey.get(`${pid}\n${name}`), loading, failed))];
-	}, [funnels, byKey, loading, failed]);
+		return [...PLAYER_COLUMNS, ...funnels.map((name) => funnelColumn(name, (pid) => byKey.get(`${pid}\n${name}`), loading, failed, stepsOf.get(name)))];
+	}, [funnels, byKey, stepsOf, loading, failed]);
 }
 
-function funnelColumn(name: string, find: (pid: string) => FunnelProgress | undefined, loading: boolean, failed: boolean): DataColumn<PlayerSummary> {
+function funnelColumn(name: string, find: (pid: string) => FunnelProgress | undefined, loading: boolean, failed: boolean, steps: FunnelStepName[] | undefined): DataColumn<PlayerSummary> {
 	const percent = (p: PlayerSummary) => {
 		const f = find(p.pid);
 		return f ? Math.round(f.share * 1000) / 10 : null;
@@ -158,12 +161,22 @@ function funnelColumn(name: string, find: (pid: string) => FunnelProgress | unde
 		id: `funnel:${name}`,
 		header: name,
 		hint: "funnel",
-		title: `Progress in the ${name} funnel: the furthest step each player logged, as a share of the funnel's steps in this range`,
+		title: `Progress in the ${name} funnel: the furthest step each player logged, as a share of the funnel's steps in this range${steps?.length ? `. Steps: ${steps.map((s) => `${s.step}. ${s.label ?? "(no name)"}`).join(", ")}` : ""}`,
+		headerExtra: loading || failed ? undefined : <FunnelStepsHeaderTip funnel={name} steps={steps} />,
 		type: "number",
 		accessor: percent,
 		format: (v) => (v === null || v === undefined ? "not started" : `${String(v)}%`),
 		exportValue: percent,
-		cell: (p) => (loading ? <Skeleton className="h-5 w-full min-w-24" /> : failed ? <span className="text-muted-foreground">–</span> : <FunnelProgressBar progress={find(p.pid)} />),
+		cell: (p) =>
+			loading ? (
+				<Skeleton className="h-5 w-full min-w-24" />
+			) : failed ? (
+				<span className="text-muted-foreground">–</span>
+			) : (
+				<HoverPopover className="block w-full" trigger={<FunnelProgressBar progress={find(p.pid)} />}>
+					<FunnelStepList funnel={name} steps={steps} progress={find(p.pid) ?? null} />
+				</HoverPopover>
+			),
 		hideable: false,
 		searchable: false,
 		minWidth: 140,

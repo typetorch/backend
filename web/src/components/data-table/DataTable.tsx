@@ -643,6 +643,7 @@ function HeaderCell<T>({
 				) : (
 					<span>{col.header}</span>
 				)}
+				{col.spec.headerExtra ?? null}
 				{col.filterKind ? <FilterPopover col={col} rows={rows} value={filter} onChange={onFilter} /> : null}
 			</div>
 			<ResizeHandle label={col.header} width={width} onResize={onResize} />
