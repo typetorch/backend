@@ -335,6 +335,24 @@ export interface PlayerStatsResult {
 	purchasesTruncated: boolean;
 }
 
+/** GET /v1/place: the game's name, live players and icon (asked from Roblox by the backend, cached 60 s). */
+export type PlaceCardInfo =
+	| { configured: false }
+	| {
+			configured: true;
+			/** ok, partial (one of the two Roblox APIs answered), unavailable (Roblox didn't answer). */
+			roblox: "ok" | "partial" | "unavailable";
+			cached?: boolean;
+			placeId: number | null;
+			universeId: number | null;
+			name: string | null;
+			playing: number | null;
+			/** An https icon on *.rbxcdn.com. */
+			icon: string | null;
+			/** https://www.roblox.com/games/<placeId>, or null while the PlaceId isn't known. */
+			url: string | null;
+	  };
+
 /** GET /v1/identity/<pid>/profile: the UserId and its Roblox names and headshot (looked up by the backend). */
 export interface PlayerProfile {
 	pid: string;

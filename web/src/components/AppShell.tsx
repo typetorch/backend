@@ -3,12 +3,13 @@
  * (page title, server status, theme) and the shared filter bar on top.
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LayoutDashboard, LogOut, Menu, Monitor, Moon, Sun } from "lucide-react";
+import { ExternalLink, LayoutDashboard, LogOut, Menu, Monitor, Moon, Sun } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router";
 import { cn } from "cn";
 import { FilterBar } from "@/components/FilterBar";
 import { FindPlayer } from "@/components/Identity";
+import { PlaceCard, PlaceIconLink, usePageTitle } from "@/components/PlaceCard";
 import { SidebarNav } from "@/components/SidebarNav";
 import { UntrustedBrowserBanner } from "@/components/UntrustedBrowserBanner";
 import { LoadingBlock } from "@/components/common";
@@ -102,16 +103,27 @@ function UserMenu() {
 	);
 }
 
-/** The TypeTorch Dashboard (typetorch.dev), when the backend has Sign in with typetorch.dev on: an icon in the header. */
-function DashboardLink() {
+/**
+ * The TypeTorch Dashboard (typetorch.dev), when the backend has Sign in with typetorch.dev on: the last sidebar item, below
+ * Settings, in a new tab.
+ */
+function DashboardLink({ onNavigate }: { onNavigate?: () => void }) {
 	const href = dashboardUrl(useAuth()?.dashboard);
 	if (!href) return null;
 	return (
-		<Button asChild variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground">
-			<a href={href} rel="noopener" aria-label="TypeTorch Dashboard" title="TypeTorch Dashboard">
-				<LayoutDashboard />
+		<div className="mt-2 border-t border-sidebar-border pt-2">
+			<a
+				href={href}
+				target="_blank"
+				rel="noopener noreferrer"
+				onClick={onNavigate}
+				className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-sidebar-foreground/75 outline-none transition-colors hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring/60"
+			>
+				<LayoutDashboard className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+				<span className="min-w-0 flex-1 truncate">TypeTorch Dashboard</span>
+				<ExternalLink className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
 			</a>
-		</Button>
+		</div>
 	);
 }
 
@@ -145,7 +157,11 @@ function SidebarPanel({ search, onNavigate }: { search: string; onNavigate?: () 
 				<div className="text-xs text-muted-foreground">Backend explorer</div>
 			</div>
 			<div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+				<div className="mb-3">
+					<PlaceCard />
+				</div>
 				<SidebarNav search={search} onNavigate={onNavigate} />
+				<DashboardLink onNavigate={onNavigate} />
 			</div>
 			<div className="border-t border-sidebar-border px-4 py-3">
 				<UserMenu />
@@ -186,6 +202,7 @@ export function AppShell() {
 	const search = useFilterSearch();
 	const { pathname } = useLocation();
 	const current = findNavItem(pathname);
+	usePageTitle(current?.label);
 	return (
 		<div className="flex min-h-svh">
 			<aside className="sticky top-0 hidden h-svh w-60 shrink-0 border-r bg-sidebar md:block">
@@ -196,12 +213,12 @@ export function AppShell() {
 					<div className="flex items-center justify-between gap-3 px-4 py-2">
 						<div className="flex min-w-0 items-center gap-2">
 							<MobileMenu search={search} />
+							<PlaceIconLink className="md:hidden" />
 							<div className="truncate text-sm font-medium">{current?.label}</div>
 						</div>
 						<div className="flex min-w-0 shrink items-center gap-3">
 							<FindPlayer />
 							<ServerStatus />
-							<DashboardLink />
 							<ThemeToggle />
 						</div>
 					</div>

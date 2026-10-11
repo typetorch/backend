@@ -17,6 +17,7 @@ beforeEach(() => {
 	localStorage.clear();
 	reloadCollapsed();
 	vi.spyOn(api, "health").mockResolvedValue({ ok: true } as Awaited<ReturnType<typeof api.health>>);
+	vi.spyOn(api, "place").mockResolvedValue({ configured: false });
 });
 
 afterEach(() => {
@@ -43,11 +44,16 @@ function mount(auth: AuthInfo) {
 }
 
 describe("TypeTorch Dashboard link", () => {
-	it("shows in the header when the backend names the dashboard, as a plain noopener link", () => {
+	it("shows in the sidebar below Settings when the backend names the dashboard, in a new tab without referrer", () => {
 		mount({ ok: true, role: "admin", via: "cookie", dashboard: DASH });
-		const link = screen.getByRole("link", { name: "TypeTorch Dashboard" });
+		const links = screen.getAllByRole("link", { name: "TypeTorch Dashboard" });
+		expect(links).toHaveLength(1);
+		const link = links[0];
 		expect(link.getAttribute("href")).toBe(DASH);
-		expect(link.getAttribute("rel")).toBe("noopener");
+		expect(link.getAttribute("target")).toBe("_blank");
+		expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+		const settings = screen.getByRole("link", { name: "Settings" });
+		expect(settings.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
 	it("is hidden while Sign in with typetorch.dev is off (no dashboard in the auth check)", () => {
