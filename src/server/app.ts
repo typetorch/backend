@@ -20,6 +20,7 @@
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
  *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
  *   GET  /v1/place                  the game's name, live players and icon (TYPETORCH_UNIVERSE_ID, else the fleet's PlaceId; cached 60 s)
+ *   GET  /v1/roblox/products        game pass / developer product names, prices and icons (?gamepass=1,2&product=3; <= 50 ids; cached 1 h)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/experiments/<key>/players?variant=&from=&to=|window=&limit=..  the players in one experiment (at most 200):
@@ -94,6 +95,7 @@ import { CentralReporter, type ReportResult } from "./central-report.ts";
 import { BlessKeys, DEVICE_COOKIE, DEVICE_LIFE_MS, DeviceStore, agentLabel } from "./devices.ts";
 import { InstanceKey } from "./instance-key.ts";
 import { RobloxPlace } from "./roblox-place.ts";
+import { MAX_PRODUCT_IDS, parseIdList, RobloxProducts } from "./roblox-products.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
@@ -377,6 +379,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// The sidebar's place card: name, live players and icon (server/roblox-place.ts: fixed hosts, no credentials, 60 s cache).
 	const robloxPlace = new RobloxPlace({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const placeLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	// Product tooltips: names, prices and icons of game passes and developer products (server/roblox-products.ts: fixed
+	// hosts, no credentials, 1 h cache, a cap on Roblox calls), and a per-IP cap on the requests.
+	const robloxProducts = new RobloxProducts({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
+	const productsLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Plans/25 remote debug: the kernel's polls and result posts per JobId, the explorer's commands and watches.
 	const debugLimiters = {
 		poll: new RateLimiter(90, clock),
@@ -622,6 +628,25 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const { place, status, cached } = await robloxPlace.get(config.universeId ? { universeId: config.universeId } : { placeId: fleetPlace as number });
 		const placeId = place.placeId ?? fleetPlace;
 		return json(200, { configured: true, roblox: status, cached, ...place, placeId, url: placeId ? `https://www.roblox.com/games/${placeId}` : null });
+	}
+
+	/**
+	 * GET /v1/roblox/products?gamepass=1,2&product=3 (every signed-in role): each game pass and developer product's name,
+	 * Robux price and icon, for the explorer's product tooltips. Ids are positive integers, at most MAX_PRODUCT_IDS in all.
+	 * An item Roblox doesn't know or doesn't answer for comes back with its id, its status and no name.
+	 */
+	async function productInfo(url: URL, ip: string): Promise<Response> {
+		for (const key of url.searchParams.keys()) {
+			if (key !== "gamepass" && key !== "product") return json(400, { error: "only gamepass and product ids" });
+		}
+		if (url.searchParams.getAll("gamepass").length > 1 || url.searchParams.getAll("product").length > 1) return json(400, { error: "one gamepass and one product list" });
+		const gamepass = parseIdList(url.searchParams.get("gamepass"));
+		const product = parseIdList(url.searchParams.get("product"));
+		if (!gamepass || !product) return json(400, { error: "ids must be comma-separated positive integers" });
+		if (!gamepass.length && !product.length) return json(400, { error: "no ids: ?gamepass=1,2&product=3" });
+		if (gamepass.length + product.length > MAX_PRODUCT_IDS) return json(400, { error: `at most ${MAX_PRODUCT_IDS} ids` });
+		if (!productsLimiter.take(ip)) return tooMany(productsLimiter.retryAfter(ip));
+		return json(200, { items: await robloxProducts.get({ gamepass, product }) });
 	}
 
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
@@ -1575,6 +1600,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
+			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
 			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
