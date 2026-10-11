@@ -109,6 +109,15 @@ export type FunnelResult =
 	| { funnel: null; funnels: { name: string; players: number; events: number }[] }
 	| { funnel: string; players: number; steps: FunnelStep[]; biggestDrop: { step: number; lost: number; share: number } | null };
 
+/** The `playtime-funnel` query: players whose playtime reached each threshold (total in the range, or first session). */
+export interface PlaytimeFunnelResult {
+	measure: "total" | "first";
+	players: number;
+	sessionCapHours: number;
+	steps: { seconds: number; label: string; reached: number; ofTotal: number; fromPrevious: number }[];
+	biggestDrop: { seconds: number; lost: number; share: number } | null;
+}
+
 /** The `funnel-progress` query: how far given players got in each funnel. */
 export interface FunnelProgress {
 	pid: string;
@@ -499,6 +508,7 @@ export interface QueryResults {
 	retention: RetentionResult;
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;
+	"playtime-funnel": PlaytimeFunnelResult;
 	timeline: TimelineResult;
 	"player-graph": GraphData;
 	"player-stats": PlayerStatsResult;
