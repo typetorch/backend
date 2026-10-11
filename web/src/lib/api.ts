@@ -9,6 +9,7 @@ import type {
 	BackfillResult,
 	BlessedDevice,
 	DebugAuditEntry,
+	DebugBundle,
 	ErrorDetail,
 	ErrorList,
 	ErrorPlayers,
@@ -19,6 +20,7 @@ import type {
 	FleetReports,
 	FleetServerDetail,
 	FleetServers,
+	GoneServer,
 	Health,
 	Identity,
 	PlaceCardInfo,
@@ -230,6 +232,10 @@ export function createApi(options: ApiOptions = {}) {
 		/** Live servers with the heartbeat-metrics fields when the backend has them (tps, memMb...). */
 		perfServers: (branch?: string, signal?: AbortSignal) => get<{ servers: PerfServer[]; players: number }>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		/** One server's TPS / memory history (the heartbeat-metrics contract; 404 on backends before it). */
+		/** Closed and lost servers, the most recently gone first (the Fleet page's Recently gone). */
+		fleetGoneServers: (branch?: string, signal?: AbortSignal) => get<{ servers: GoneServer[] }>(`/v1/fleet/servers${qs({ gone: 1, branch, limit: 200 })}`, signal).then((r) => r.servers),
+		/** Kernel 0.5.3: one debug bundle with its body (no playerLogs for the read-only role). */
+		debugBundle: (id: string, signal?: AbortSignal) => get<{ bundle: DebugBundle }>(`/v1/fleet/bundles/${encodeURIComponent(id)}`, signal).then((r) => r.bundle),
 		serverMetrics: (job: string, since?: number, signal?: AbortSignal) =>
 			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
 		/** Plans/25: one server by JobId (any age), its state and its remote debug session. */

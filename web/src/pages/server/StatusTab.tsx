@@ -36,8 +36,8 @@ export function timeTicks(first: number, last: number, count = 4): number[] {
 	return Array.from({ length: count }, (_, i) => Math.round(first + ((last - first) * i) / (count - 1)));
 }
 
-/** "10:32", or "10:32:05" when the window is under five minutes (so ticks don't repeat). */
-const timeLabel = (span: number) => (t: number) => fmtTime(t).slice(11, span < 5 * 60_000 ? 19 : 16);
+/** "10:32", or "10:32:05" when the window is under five minutes (so ticks don't repeat), "10-08 10:32" over most of a day. */
+const timeLabel = (span: number) => (t: number) => (span > 20 * 3_600_000 ? fmtTime(t).slice(5, 16) : fmtTime(t).slice(11, span < 5 * 60_000 ? 19 : 16));
 
 interface SeriesSpec {
 	key: keyof ServerMetricPoint;
@@ -46,7 +46,24 @@ interface SeriesSpec {
 }
 
 /** One small line chart: one axis, one unit; a legend when it has two series (one series: the title names it). */
-function MetricChart({ title, unit, points, series, digits, minMax }: { title: string; unit: string; points: ServerMetricPoint[]; series: SeriesSpec[]; digits: number; minMax?: number }) {
+function MetricChart({
+	title,
+	unit,
+	points,
+	series,
+	digits,
+	minMax,
+	windowText,
+}: {
+	title: string;
+	unit: string;
+	points: ServerMetricPoint[];
+	series: SeriesSpec[];
+	digits: number;
+	minMax?: number;
+	/** The chart's window in words ("the last 60 minutes", "its whole life"). */
+	windowText: string;
+}) {
 	const config: ChartConfig = Object.fromEntries(series.map((s) => [s.key, { label: s.label, color: s.color }]));
 	const values = points.flatMap((p) => series.map((s) => p[s.key])).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
 	const last = points.length ? points[points.length - 1] : undefined;
@@ -54,7 +71,7 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 	const xTicks = timeTicks(first, last?.t ?? first);
 	const yTicks = valueTicks(values.length ? Math.max(...values) : 0, minMax);
 	return (
-		<figure className="min-w-0 space-y-1" aria-label={`${title} over the last ${CHART_MINUTES} minutes`}>
+		<figure className="min-w-0 space-y-1" aria-label={`${title} over ${windowText}`}>
 			<figcaption className="flex items-baseline justify-between gap-2 text-sm">
 				<span className="font-medium">{title}</span>
 				<span className="text-xs text-muted-foreground tabular-nums">
@@ -81,7 +98,7 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 						<ChartTooltip
 							content={
 								<ChartTooltipContent
-									labelFormatter={(_, p) => `${fmtTime(Number(p?.[0]?.payload?.t)).slice(11, 19)} UTC`}
+									labelFormatter={(_, p) => `${fmtTime(Number(p?.[0]?.payload?.t)).slice((last?.t ?? first) - first > 20 * 3_600_000 ? 5 : 11, 19)} UTC`}
 									formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${typeof v === "number" ? `${fmtNum(v, digits)} ${unit}` : "–"}`}
 								/>
 							}
@@ -100,13 +117,17 @@ function MetricChart({ title, unit, points, series, digits, minMax }: { title: s
 	);
 }
 
-/** TPS, memory and players over the last hour, from the fleet metrics (also for a closed or lost server: its last hour). */
-export function ServerCharts({ job, live }: { job: string; live: boolean }) {
+/**
+ * TPS, memory and players over the last hour, from the fleet metrics; with `since` (a server that isn't live: where its
+ * metrics start) over its whole life, older parts from the backend's 5-minute rollups (kept 30 days).
+ */
+export function ServerCharts({ job, live, since }: { job: string; live: boolean; since?: number }) {
 	const metrics = useQuery({
-		queryKey: ["fleet", "server-metrics", job, "last-hour"],
-		queryFn: ({ signal }) => api.serverMetrics(job, Date.now() - CHART_MINUTES * 60_000, signal),
+		queryKey: ["fleet", "server-metrics", job, since ?? "last-hour"],
+		queryFn: ({ signal }) => api.serverMetrics(job, since ?? Date.now() - CHART_MINUTES * 60_000, signal),
 		refetchInterval: live ? 30_000 : false,
 	});
+	const windowText = since !== undefined ? "its whole life" : `the last ${CHART_MINUTES} minutes`;
 	if (metrics.isPending) return <LoadingBlock rows={3} />;
 	if (metrics.isError) {
 		if (metrics.error instanceof ApiError && metrics.error.notFound)
@@ -114,10 +135,12 @@ export function ServerCharts({ job, live }: { job: string; live: boolean }) {
 		return <ErrorState error={metrics.error} title="Could not load the TPS and memory history" />;
 	}
 	const points = metrics.data;
-	if (!points.length) return <EmptyState>No TPS or memory readings in the last hour (kernel 0.4.2+ sends them with every heartbeat).</EmptyState>;
+	if (!points.length)
+		return <EmptyState>{since !== undefined ? "No TPS or memory readings kept for this server (rollups are kept 30 days)." : "No TPS or memory readings in the last hour (kernel 0.4.2+ sends them with every heartbeat)."}</EmptyState>;
 	return (
 		<div className="grid gap-4 md:grid-cols-3">
 			<MetricChart
+				windowText={windowText}
 				title="Server TPS"
 				unit="TPS"
 				digits={1}
@@ -129,6 +152,7 @@ export function ServerCharts({ job, live }: { job: string; live: boolean }) {
 				]}
 			/>
 			<MetricChart
+				windowText={windowText}
 				title="Memory"
 				unit="MB"
 				digits={0}
@@ -138,7 +162,7 @@ export function ServerCharts({ job, live }: { job: string; live: boolean }) {
 					{ key: "luaMb", label: "Lua heap", color: "var(--chart-2)" },
 				]}
 			/>
-			<MetricChart title="Players" unit="players" digits={0} minMax={4} points={points} series={[{ key: "players", label: "Players", color: "var(--chart-1)" }]} />
+			<MetricChart windowText={windowText} title="Players" unit="players" digits={0} minMax={4} points={points} series={[{ key: "players", label: "Players", color: "var(--chart-1)" }]} />
 		</div>
 	);
 }
