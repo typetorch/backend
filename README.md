@@ -654,6 +654,12 @@ this server's `data/settings.json` copy (`GET /v1/experiments`); without an over
 (an even split over the variants its rows declare) applies, and says so when it doesn't know the variants. The live
 record is the game's signed settings in its DataStore, which this server does not read.
 
+The **Funnels** page does it for funnel steps: a step (click, or Enter / Space) of a logged funnel or of the built-in
+playtime funnels, in one funnel or either side of the compare view, opens a side sheet
+(`?stepFunnel=<funnel>&step=<step>&stepMode=dropped`, under the page's range and filters) with the players who reached it
+or, toggled, dropped off there (the `funnel-players` query): Roblox names linking to their Players page, UserId, when they
+reached it (drop-offs: their last step and when; playtime funnels: their playtime) and last seen.
+
 ## The explorer
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
@@ -790,7 +796,8 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `roblox` | first-play bounce (first session < 60 s), qualified plays (sessions >= 5 min), D1/D7, playtime and play days per user, payer conversion, Robux per user and per payer | 30 days |
 | `retention` | retention by join-day cohort (day 1, 3, 7, 14, 30; days not over are `null`) | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
-| `funnel-progress` | how far given players got in each funnel (`pids`, 1 to 500; `funnel` for one): furthest step, its place among the funnel's steps in the range and the share (the Players table's funnel columns and the player detail) | 30 days |
+| `funnel-progress` | how far given players got in each funnel (`pids`, 1 to 500; `funnel` for one): furthest step, its place among the funnel's steps in the range, the share and `reachedAt` (when they first logged that step); `funnels` lists each funnel's step names (the Players table's funnel columns, whose cells and header list the steps on hover, focus or tap, and the player detail) | 30 days |
+| `funnel-players` | the players at one funnel step (at most 200, `limit`): `funnel` + `step` (the step's `i`) for a logged funnel, or `measure` (`total` / `first`) + `step` (a threshold in seconds: 30 ... 7200) for a playtime funnel; `mode: "reached"` (default; the same membership as the funnel's "reached": furthest step, or playtime, at least this one) or `"dropped"` (reached the step before but not this one: for logged funnels the previous step anyone logged in the range, none before the first; for playtime the threshold before, 0 before the first). Per player: `at` (logged: when they first logged this step or a later one, or for drop-offs their last step), `lastStep` / `lastStepAt`, `playtimeSeconds` (playtime funnels), `lastAt` (their latest row in the range); `total`, `more`. Logged funnels most recent `at` first, playtime most recently seen first. One SQL statement. Over `POST /v1/query/funnel-players` with `uid` / `name` / `displayName` joined in and erased players left out (every signed-in reader, as the Funnels page) | 30 days |
 | `playtime-funnel` | players whose playtime reached 30s, 1m, 3m, 5m, 10m, 30m, 1h and 2h (edges inclusive): count, share of the base and of the step before, biggest drop. `measure: "total"` (default): each player's sessions in the range added up; the base is every player with a session row, zero playtime included. `measure: "first"`: each new player's first-ever session (rows flagged `newp`) in the range; the base is those new players (a player whose first session was before the range isn't in it). A session lasts from its first to its last event (one still running counts up to its latest event), at most 12 hours (stuck or AFK servers). One SQL statement; all the usual filters apply. The Funnels page shows it as the built-in **Playtime: total** and **Playtime: first session** funnels (comparable with Compare with) | 30 days |
 | `timeline` | one player's sessions and events (by `pid`) | 90 days |
 | `player-graph` | one player's node graph (all sessions, or one with `sid`): states as nodes with what happened in them, moves as edges with counts and time | 90 days |
