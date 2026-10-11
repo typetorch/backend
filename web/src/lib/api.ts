@@ -12,6 +12,8 @@ import type {
 	ErrorDetail,
 	ErrorList,
 	ErrorPlayers,
+	ExperimentOverrides,
+	ExperimentPlayers,
 	Filters,
 	FleetAlert,
 	FleetReports,
@@ -64,6 +66,24 @@ export interface ApiOptions {
 	/** Base path or URL (default "/api"). */
 	base?: string;
 	fetch?: typeof fetch;
+}
+
+/** The filters and options of GET /v1/experiments/<key>/players as URL parameters (lists repeat; the variant filter as inExperiment + inVariant). */
+export function experimentPlayerQuery(filters: Filters, options: { variant?: string; limit?: number } = {}): string {
+	const params = new URLSearchParams();
+	const f = cleanFilters(filters);
+	for (const [key, value] of Object.entries(f)) {
+		if (key === "variant") {
+			const v = value as NonNullable<Filters["variant"]>;
+			params.set("inExperiment", v.experiment);
+			for (const one of Array.isArray(v.variant) ? v.variant : [v.variant]) params.append("inVariant", one);
+		} else if (Array.isArray(value)) for (const one of value) params.append(key, String(one));
+		else params.set(key, String(value));
+	}
+	if (options.variant) params.set("variant", options.variant);
+	if (options.limit !== undefined) params.set("limit", String(options.limit));
+	const text = params.toString();
+	return text ? `?${text}` : "";
 }
 
 /** Drops empty values so the server sees only the filters that are set (and cache keys stay stable). */
@@ -157,6 +177,11 @@ export function createApi(options: ApiOptions = {}) {
 		errorKind: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorDetail>(`/v1/errors/${encodeURIComponent(fp)}${qs({ ...params })}`, signal),
 		/** The players who hit one kind (at most 200), under the same window and filters. */
 		errorPlayers: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorPlayers>(`/v1/errors/${encodeURIComponent(fp)}/players${qs({ ...params })}`, signal),
+		/** The experiment overrides the server knows (weights, active, forced variant; read-only). */
+		experimentOverrides: (signal?: AbortSignal) => get<ExperimentOverrides>("/v1/experiments", signal),
+		/** The players in one experiment (at most 200; one variant or all), under the filter bar's range and filters. */
+		experimentPlayers: (experiment: string, filters: Filters = {}, options: { variant?: string; limit?: number } = {}, signal?: AbortSignal) =>
+			get<ExperimentPlayers>(`/v1/experiments/${encodeURIComponent(experiment)}/players${experimentPlayerQuery(filters, options)}`, signal),
 		/** The live SSE stream's URL (EventSource sends the session cookie; the dev proxy adds the token). */
 		liveUrl: (topics: string[] = []) => `${base}/v1/live${qs({ topics: topics.join(",") })}`,
 		/** What the server keeps on disk (measured at most every 30 s). */

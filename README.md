@@ -639,7 +639,11 @@ Space) opens the kind in a side sheet (`?fp=` in the URL) with its players, each
 
 The **Experiments** page does the same for experiments: a row of the experiments list or of the variants table (click, or
 Enter / Space) opens the players in a side sheet (`?assigned=<experiment>&assignedVariant=<variant>`, under the page's
-range and filters), each linking to their Players page.
+range and filters), each linking to their Players page. The experiments list also shows each experiment's state (running, settled on a variant,
+stopped), its weights per variant (a share and a bar; read-only) and its forced players in the range. The weights come from
+this server's `data/settings.json` copy (`GET /v1/experiments`); without an override the page says the game's default
+(an even split over the variants its rows declare) applies, and says so when it doesn't know the variants. The live
+record is the game's signed settings in its DataStore, which this server does not read.
 
 ## The explorer
 

@@ -230,7 +230,7 @@ export interface Comparison {
 }
 
 export type ExperimentResult =
-	| { experiment: null; experiments: { experiment: string; variant: string; players: number }[] }
+	| { experiment: null; experiments: { experiment: string; variant: string; players: number; forced?: number; variantCount?: number | null }[] }
 	| {
 			experiment: string;
 			scope: "player" | "server";
@@ -239,6 +239,47 @@ export type ExperimentResult =
 			comparisons: Comparison[];
 			mixedPlayers: number;
 	  };
+
+/** One experiment's override, as the server's settings file has it (GET /v1/experiments). */
+export interface ExperimentOverride {
+	active?: boolean;
+	/** A weight per variant, in the game's order (the first is the control). */
+	weights?: number[];
+	/** Forced for everyone. */
+	variant?: string;
+}
+
+export interface ExperimentOverrides {
+	/** settings-file: from data/settings.json; none: no file or no experiments in it; unreadable: the file does not parse. */
+	source: "settings-file" | "none" | "unreadable";
+	experiments: Record<string, ExperimentOverride>;
+}
+
+/** One player in one variant of an experiment (GET /v1/experiments/<key>/players). */
+export interface ExperimentPlayer {
+	pid: string;
+	variant: string;
+	/** From the window's experiment rows: random (hash of the pid), forced (by the settings), or unknown (assigned before the window). */
+	how: "random" | "forced" | "unknown";
+	assignedAt: string | null;
+	firstAt: string;
+	lastAt: string;
+	events: number;
+	/** Seen in more than one variant in the window (one row per variant). */
+	mixed: boolean;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+export interface ExperimentPlayers {
+	experiment: string;
+	variant: string | null;
+	variants: { variant: string; players: number; forced: number }[];
+	total: number;
+	more: number;
+	players: ExperimentPlayer[];
+}
 
 export interface ConfusionResult {
 	firstSessions: number;
@@ -463,6 +504,7 @@ export interface QueryResults {
 	"player-stats": PlayerStatsResult;
 	flow: GraphData;
 	experiment: ExperimentResult;
+	"experiment-players": ExperimentPlayers;
 	confusion: ConfusionResult;
 	"top-events": TopEventsResult;
 	servers: unknown;
