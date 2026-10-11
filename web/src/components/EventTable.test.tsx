@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "@/lib/api";
 import { EventTable, type ListedEvent } from "./EventTable";
 
 beforeAll(() => {
@@ -24,6 +26,24 @@ const events: ListedEvent[] = [
 const names = () => Array.from(document.querySelectorAll("tbody tr")).map((tr) => tr.querySelectorAll("td")[2]?.textContent);
 
 describe("EventTable", () => {
+	it("a purchase row's product id opens what it is (game pass name, price); other rows' props stay plain", async () => {
+		const spy = vi.spyOn(api, "robloxProducts").mockResolvedValue([{ type: "gamepass", id: 555, status: "ok", name: "Double Jump", price: 75, forSale: true, icon: null }]);
+		render(
+			<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+				<MemoryRouter>
+					<EventTable id="t" events={[event({ kind: "purchase", name: "gamepass", props: { product: 555, robux: 75 } }), event({ kind: "custom", name: "x", props: { product: 9 } })]} />
+				</MemoryRouter>
+			</QueryClientProvider>,
+		);
+		const button = await screen.findByRole("button", { name: "Game pass 555: Double Jump" });
+		expect(button.textContent).toContain("555");
+		act(() => button.focus());
+		expect((await screen.findByTestId("product-card")).textContent).toContain("75 Robux");
+		expect(spy).toHaveBeenCalledWith({ gamepass: [555], product: [] });
+		expect(screen.queryByRole("button", { name: /9/ })).toBeNull();
+		vi.restoreAllMocks();
+	});
+
 	it("shows time, kind, name, side, state and compact props, with '–' for empty props", () => {
 		render(
 			<MemoryRouter>

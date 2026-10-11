@@ -1168,3 +1168,17 @@ export interface TestAlertResult {
 	status?: number;
 	error?: string;
 }
+
+/** GET /v1/roblox/products: a game pass or developer product, asked from Roblox by the backend (cached 1 h). */
+export interface RobloxProductInfo {
+	type: "gamepass" | "product";
+	id: number;
+	/** ok: Roblox answered; not_found: Roblox has no such item; unavailable: Roblox didn't answer. */
+	status: "ok" | "not_found" | "unavailable";
+	name: string | null;
+	/** Robux; null when Roblox gives none (e.g. off sale). */
+	price: number | null;
+	forSale: boolean | null;
+	/** An https icon on Roblox's CDN (*.rbxcdn.com). */
+	icon: string | null;
+}

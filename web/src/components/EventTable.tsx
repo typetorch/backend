@@ -1,8 +1,10 @@
 /** Event rows as a table: time, kind, name, side, state and props, plus the extra columns a page adds. Sort, filter, export like any table. */
 import { useMemo } from "react";
 import { DataTable, type DataColumn, type DataTableProps } from "@/components/data-table";
+import { ProductId } from "@/components/ProductId";
 import { Badge } from "@/components/ui/badge";
 import { compactJson, fmtTime } from "@/lib/format";
+import { productTypeOf } from "@/lib/products";
 
 export interface ListedEvent {
 	time: string;
@@ -38,12 +40,30 @@ export function eventColumns<E extends ListedEvent>(dateToo: boolean): DataColum
 			format: (v) => compactJson(v, 400),
 			cell: (e) => {
 				const props = compactJson(e.props, 400);
-				return props && props !== "{}" ? <span title={props}>{props}</span> : <span className="text-muted-foreground">–</span>;
+				if (!props || props === "{}") return <span className="text-muted-foreground">–</span>;
+				const product = purchaseProduct(e);
+				return product !== undefined ? (
+					<span className="flex min-w-0 items-baseline gap-2">
+						<ProductId id={product} kind={e.name} className="shrink-0 text-foreground" />
+						<span className="min-w-0 truncate" title={props}>
+							{props}
+						</span>
+					</span>
+				) : (
+					<span title={props}>{props}</span>
+				);
 			},
 			filter: "text",
 			className: "max-w-[28rem] truncate font-mono text-[11px] text-muted-foreground",
 		},
 	];
+}
+
+/** A purchase row's product id (`props.product`; the row's name is the purchase kind: product, gamepass, ...). */
+function purchaseProduct(e: ListedEvent): unknown {
+	if (e.kind !== "purchase" || !productTypeOf(e.name) || typeof e.props !== "object" || e.props === null) return undefined;
+	const product = (e.props as Record<string, unknown>).product;
+	return typeof product === "number" || typeof product === "string" ? product : undefined;
 }
 
 type Props<E extends ListedEvent> = {

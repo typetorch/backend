@@ -94,6 +94,9 @@ beforeEach(() => {
 	queried = [];
 	vi.spyOn(api, "identitySummary").mockResolvedValue({ count: 1, backfill: false });
 	vi.spyOn(api, "identity").mockResolvedValue([]);
+	vi.spyOn(api, "robloxProducts").mockImplementation(async (ids) =>
+		(ids.product ?? []).map((id) => ({ type: "product" as const, id, status: "ok" as const, name: `Coins pack ${id}`, price: 99, forSale: true, icon: null })),
+	);
 	vi.spyOn(api, "playerProfile").mockImplementation(async (pid: string) => {
 		const p = profiles[pid];
 		if (p instanceof Error) throw p;
@@ -160,6 +163,9 @@ describe("Players page: the player detail container", () => {
 		expect(await within(region).findByRole("img", { name: "Robux per day, line chart" })).toBeTruthy();
 		const purchases = within(region).getByRole("table", { name: "Purchases" });
 		expect(within(purchases).getByText("1234")).toBeTruthy();
+		// The product id says what it is: its name beside it, and a card on focus.
+		expect(await within(purchases).findByText("Coins pack 1234")).toBeTruthy();
+		expect(within(purchases).getByRole("button", { name: "Developer product 1234: Coins pack 1234" })).toBeTruthy();
 		expect(within(purchases).getByText("shop")).toBeTruthy();
 		expect(queried).not.toContain("timeline");
 

@@ -22,6 +22,7 @@ import type {
 	Health,
 	Identity,
 	PlaceCardInfo,
+	RobloxProductInfo,
 	PlayerProfile,
 	QueryInfo,
 	QueryName,
@@ -196,6 +197,9 @@ export function createApi(options: ApiOptions = {}) {
 		playerProfile: (pid: string, signal?: AbortSignal) => get<PlayerProfile>(`/v1/identity/${encodeURIComponent(pid)}/profile`, signal),
 		/** The game's name, live players and icon for the sidebar card. */
 		place: (signal?: AbortSignal) => get<PlaceCardInfo>("/v1/place", signal),
+		/** Game pass and developer product names, prices and icons (at most 50 ids in all; the backend asks Roblox). */
+		robloxProducts: (ids: { gamepass?: number[]; product?: number[] }, signal?: AbortSignal) =>
+			get<{ items: RobloxProductInfo[] }>(`/v1/roblox/products${qs({ gamepass: ids.gamepass?.join(","), product: ids.product?.join(",") })}`, signal).then((r) => r.items),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		fleetAlerts: (params: { since?: number; level?: string; unacked?: boolean; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ alerts: FleetAlert[] }>(`/v1/fleet/alerts${qs(params)}`, signal).then((r) => r.alerts),
