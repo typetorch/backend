@@ -13,6 +13,7 @@
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
  *   server's own configuration: the settings file, storage, the runtime settings, the access list, the debug audit
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
+ *        (experiment-players and funnel-players get UserIds and cached Roblox names joined in, erased players left out)
  *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
  *   GET  /v1/storage                bytes and files per part of the data folder
@@ -64,6 +65,7 @@ import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
 import { handleErrorReads, handlePlayerErrors, type PlayerIdentity } from "../errors/http.ts";
 import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
+import type { FunnelPlayersResult } from "../queries/funnel.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { rollupDays } from "../sql/filters.ts";
@@ -191,7 +193,7 @@ const GAME_KEY_MAX_FAILURES = 30;
 const TEST_ALERTS_PER_MINUTE = 3;
 /** GET /v1/identity/<pid>/profile per address per minute (the Roblox lookups behind it have their own global cap). */
 const PROFILE_PER_MINUTE = 120;
-/** Uncached Roblox names one error/experiment -> players read looks up in the background (the profile cache's caps still apply). */
+/** Uncached Roblox names one error/experiment/funnel -> players read looks up in the background (the profile cache's caps still apply). */
 const PLAYER_NAME_WARM = 8;
 /** Handover: DuckDB is tried again this often, a warning is logged this often while waiting. */
 const HANDOVER_RETRY_MS = 1000;
@@ -726,7 +728,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 					if (uid !== undefined) p.uid = uid;
 				}
 			}
-			if (name === "experiment-players") result = await withPlayerIdentities(result as ExperimentPlayersResult);
+			if (name === "experiment-players" || name === "funnel-players") result = await withPlayerIdentities(result as ExperimentPlayersResult | FunnelPlayersResult);
 			if (name === "timeline" || name === "player-graph" || name === "player-stats") {
 				const r = result as { pid?: string; uid?: number };
 				const found = r.pid ? await identities.byPid(r.pid) : undefined;
@@ -741,8 +743,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
-	/** An experiment -> players list with UserIds and Roblox names joined in and erased players left out (as the error list). */
-	async function withPlayerIdentities(found: ExperimentPlayersResult): Promise<ExperimentPlayersResult> {
+	/** An experiment / funnel -> players list with UserIds and Roblox names joined in and erased players left out (as the error list). */
+	async function withPlayerIdentities<R extends { total: number; players: { pid: string }[] }>(found: R): Promise<R> {
 		const who = await playerIdentities([...new Set(found.players.map((p) => p.pid))]);
 		const shown = found.players.filter((p) => who.get(p.pid) !== null);
 		const erased = found.players.length - shown.length;

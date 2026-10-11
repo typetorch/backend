@@ -21,6 +21,7 @@ const OPTIONS: Partial<Record<QueryName, object>> = {
 	flow: { facet: "zone" },
 	funnel: { funnel: "onboarding" },
 	"funnel-progress": { pids: ["p0003", "p0015"] },
+	"funnel-players": { funnel: "onboarding", step: 2 },
 	experiment: { experiment: "onboarding" },
 	"experiment-players": { experiment: "onboarding" },
 	servers: { maxAgeSeconds: 150 },
@@ -102,6 +103,26 @@ describe("Basin results equal DuckDB results (Basin SQL run on DuckDB through sh
 		const expected = await duck.query("playtime-funnel", {}, { measure: "first" });
 		expect(expected.players).toBeGreaterThan(0);
 		expect(await basinStore().query("playtime-funnel", {}, { measure: "first" })).toEqual(expected);
+	});
+
+	test("funnel-players: drop-offs and the playtime funnels", async () => {
+		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
+		for (const options of [
+			{ funnel: "onboarding", step: 2, mode: "dropped" },
+			{ funnel: "onboarding", step: 3, mode: "reached", limit: 5 },
+			{ measure: "total", step: 60 },
+			{ measure: "total", step: 60, mode: "dropped" },
+			{ measure: "first", step: 180, mode: "dropped" },
+		]) {
+			const expected = await duck.query("funnel-players", {}, options as never);
+			expect([options, expected.players.length > 0]).toEqual([options, true]);
+			// The same membership as the funnel's own counts (reached; the step before minus this one).
+			const counts = options.funnel ? (await duck.query("funnel", {}, { funnel: options.funnel }) as { steps: { step: number; reached: number }[] }).steps : (await duck.query("playtime-funnel", {}, { measure: options.measure as "total" })).steps.map((s: { seconds: number; reached: number }) => ({ step: s.seconds, reached: s.reached }));
+			const at = counts.findIndex((s: { step: number }) => s.step === options.step);
+			expect(expected.total).toBe(options.mode === "dropped" ? counts[at - 1].reached - counts[at].reached : counts[at].reached);
+			const got = await basinStore().query("funnel-players", {}, options as never);
+			expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(expected)));
+		}
 	});
 
 	test("one-session graph with moments and node details", async () => {

@@ -355,3 +355,145 @@ export const playtimeFunnel = defineQuery<PlaytimeFunnelOptions, PlaytimeFunnelR
 		return { measure: o.measure, players, sessionCapHours: PLAYTIME_SESSION_CAP_MS / 3_600_000, steps, biggestDrop };
 	},
 });
+
+// funnel-players ----------------------------------------------------------------------------------------------------------
+
+/** Most players one funnel -> players read lists (the cap). */
+export const FUNNEL_PLAYERS_MAX = 200;
+
+export type FunnelPlayersMode = "reached" | "dropped";
+
+export interface FunnelPlayersOptions {
+	/** A logged funnel (the `name` of its funnel rows); or `measure` for a playtime funnel (one of the two). */
+	funnel?: string;
+	measure?: PlaytimeMeasure;
+	/** Logged funnels: the step (its index value, `props.i`). Playtime funnels: the threshold in seconds. */
+	step: number;
+	/** reached: got at least this far. dropped: reached the step before (the start, for the first) but not this one. */
+	mode: FunnelPlayersMode;
+	/** Most rows listed (1-200, default 200). */
+	limit: number;
+	stepKey: string;
+}
+
+/** One player at a funnel step. */
+export interface FunnelPlayer {
+	pid: string;
+	/**
+	 * Logged funnels: reached, when they first logged this step or a later one; dropped, when they first logged their
+	 * last step. Playtime funnels: null (playtime is a sum, not a moment).
+	 */
+	at: string | null;
+	/** Logged funnels: their furthest step in the range and when they first logged it. Null for playtime funnels. */
+	lastStep: number | null;
+	lastStepAt: string | null;
+	/** Playtime funnels: their playtime (total in the range, or the first session), seconds. */
+	playtimeSeconds?: number;
+	/** Their latest row in the range under the filters (ISO). */
+	lastAt: string | null;
+	/** Joined in by the server route: the UserId (identity table) and Roblox names (profile cache), when known. */
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+export interface FunnelPlayersResult {
+	funnel: string | null;
+	measure: PlaytimeMeasure | null;
+	step: number;
+	mode: FunnelPlayersMode;
+	/** Players matching; `more` of them are not listed. */
+	total: number;
+	more: number;
+	players: FunnelPlayer[];
+}
+
+/**
+ * The players at one funnel step (Funnels page side panel), the same membership as the `funnel` and `playtime-funnel`
+ * counts. Logged funnel: a player reached step S when their furthest step in the range is >= S (`funnel`'s "reached");
+ * dropped at S when their furthest step is >= the step before S (the previous step anyone logged in the range) and < S.
+ * Playtime funnel: reached when their playtime (capped sessions, summed or the first one) is >= the threshold, dropped
+ * when it is >= the threshold before (0 for the first) and below this one. One statement; the total rides along as a
+ * window count. Logged funnels: most recent `at` first; playtime funnels: most recently seen first.
+ */
+export const funnelPlayers = defineQuery<FunnelPlayersOptions, FunnelPlayersResult>({
+	name: "funnel-players",
+	summary: "the players who reached (or dropped off at) one funnel step, a logged funnel or (measure) a playtime one (at most 200)",
+	defaultDays: 30,
+	options: (input = {}) => {
+		const hasFunnel = input.funnel !== undefined && input.funnel !== "";
+		const hasMeasure = input.measure !== undefined && (input.measure as unknown) !== "";
+		if (hasFunnel === hasMeasure) throw new Error("give funnel (a logged funnel) or measure (a playtime funnel), one of the two");
+		const mode = input.mode ?? "reached";
+		if (mode !== "reached" && mode !== "dropped") throw new Error('mode must be "reached" or "dropped"');
+		const raw: unknown = input.step;
+		const step = typeof raw === "string" && /^-?\d{1,10}$/.test(raw) ? Number(raw) : raw;
+		if (typeof step !== "number" || !Number.isInteger(step) || Math.abs(step) > 1e9) throw new Error("step must be a whole number");
+		const out: FunnelPlayersOptions = {
+			step,
+			mode,
+			limit: intOption(input.limit, "limit", FUNNEL_PLAYERS_MAX, 1, FUNNEL_PLAYERS_MAX),
+			stepKey: assertSafeKey(input.stepKey ?? PROP_KEYS.funnelStep, "stepKey"),
+		};
+		if (hasFunnel) out.funnel = assertSafeKey(String(input.funnel), "funnel");
+		else {
+			if (input.measure !== "total" && input.measure !== "first") throw new Error('measure must be "total" or "first"');
+			out.measure = input.measure;
+			if (!(PLAYTIME_STEPS_SECONDS as readonly number[]).includes(step)) throw new Error(`step must be one of the playtime thresholds (${PLAYTIME_STEPS_SECONDS.join(", ")} s)`);
+		}
+		return out;
+	},
+	statements(ctx, f, o) {
+		const d = ctx.dialect;
+		const table = eventsTable(ctx, f);
+		// Their latest row in the range, for the selected players only.
+		const seen = `ls AS (SELECT e.pid AS pid, MAX(e.t) AS last_t FROM ${table} e WHERE ${where(f, ctx)} AND e.pid IN (SELECT pid FROM sel) GROUP BY e.pid)`;
+		if (o.measure) {
+			const cap = int(PLAYTIME_SESSION_CAP_MS);
+			const first = o.measure === "first";
+			const at = (PLAYTIME_STEPS_SECONDS as readonly number[]).indexOf(o.step);
+			const lo = at > 0 ? (PLAYTIME_STEPS_SECONDS[at - 1] as number) : 0;
+			const cond = o.mode === "reached" ? `len >= ${int(o.step * 1000)}` : `len >= ${int(lo * 1000)} AND len < ${int(o.step * 1000)}`;
+			return {
+				players:
+					`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t FROM ${table} e WHERE ${playerRows(f, ctx, first ? "e.newp" : "")}), ` +
+					`s0 AS (SELECT sid, MIN(pid) AS pid, MAX(t) - MIN(t) AS len FROM ev GROUP BY sid), ` +
+					`s AS (SELECT sid, pid, CASE WHEN len > ${cap} THEN ${cap} ELSE len END AS len FROM s0), ` +
+					`u AS (SELECT pid, ${first ? "MAX(len)" : "SUM(len)"} AS len FROM s GROUP BY pid), ` +
+					`sel AS (SELECT pid, len FROM u WHERE ${cond}), ${seen} ` +
+					`SELECT sel.pid AS pid, sel.len AS len, ls.last_t AS last_t, COUNT(*) OVER () AS total FROM sel LEFT JOIN ls ON ls.pid = sel.pid ` +
+					`ORDER BY last_t DESC, pid ${d.limit(o.limit)}`,
+			};
+		}
+		const s = int(o.step);
+		const base =
+			`f AS (SELECT e.pid AS pid, e.t AS t, CAST(${d.jsonNumber("e.props", o.stepKey)} AS BIGINT) AS step ` +
+			`FROM ${table} e WHERE ${where(f, ctx)} AND e.kind = 'funnel' AND e.name = ${lit(o.funnel as string)} AND e.pid IS NOT NULL AND e.pid <> ''), ` +
+			`f2 AS (SELECT pid, step, MIN(t) AS t FROM f WHERE step IS NOT NULL GROUP BY pid, step), ` +
+			`pm AS (SELECT pid, MAX(step) AS maxstep FROM f2 GROUP BY pid), ` +
+			`pl AS (SELECT f2.pid AS pid, f2.step AS maxstep, f2.t AS maxt FROM f2 JOIN pm ON pm.pid = f2.pid AND f2.step = pm.maxstep), `;
+		const sel =
+			o.mode === "reached"
+				? `r AS (SELECT pid, MIN(t) AS rt FROM f2 WHERE step >= ${s} GROUP BY pid), ` +
+					`sel AS (SELECT r.pid AS pid, r.rt AS rt, pl.maxstep AS maxstep, pl.maxt AS maxt FROM r JOIN pl ON pl.pid = r.pid)`
+				: // The step before S among the steps anyone logged in the range (none for the first step: nobody drops there).
+					`pv AS (SELECT MAX(step) AS ps FROM f2 WHERE step < ${s}), ` +
+					`sel AS (SELECT pl.pid AS pid, pl.maxt AS rt, pl.maxstep AS maxstep, pl.maxt AS maxt FROM pl JOIN pv ON pl.maxstep >= pv.ps WHERE pl.maxstep < ${s})`;
+		return {
+			players:
+				`WITH ${base}${sel}, ${seen} ` +
+				`SELECT sel.pid AS pid, sel.rt AS rt, sel.maxstep AS maxstep, sel.maxt AS maxt, ls.last_t AS last_t, COUNT(*) OVER () AS total ` +
+				`FROM sel LEFT JOIN ls ON ls.pid = sel.pid ORDER BY rt DESC, pid ${d.limit(o.limit)}`,
+		};
+	},
+	shape(rows, _ctx, _f, o) {
+		const when = (v: unknown) => (v === null || v === undefined ? null : iso(num(v)));
+		const players = rows.players.map((r): FunnelPlayer => {
+			const lastAt = when(r.last_t);
+			if (o.measure) return { pid: str(r.pid), at: null, lastStep: null, lastStepAt: null, playtimeSeconds: round(num(r.len) / 1000, 0), lastAt };
+			return { pid: str(r.pid), at: when(r.rt), lastStep: num(r.maxstep), lastStepAt: when(r.maxt), lastAt };
+		});
+		const total = num(rows.players[0]?.total);
+		return { funnel: o.funnel ?? null, measure: o.measure ?? null, step: o.step, mode: o.mode, total, more: Math.max(0, total - players.length), players };
+	},
+});

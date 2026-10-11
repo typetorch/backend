@@ -6,7 +6,7 @@ import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment, experimentPlayers } from "./experiment.ts";
 import { events, players, values } from "./explore.ts";
 import { deployReport, servers } from "./fleet.ts";
-import { funnel, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
+import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
@@ -19,6 +19,7 @@ export const QUERIES = {
 	funnel,
 	"funnel-progress": funnelProgress,
 	"playtime-funnel": playtimeFunnel,
+	"funnel-players": funnelPlayers,
 	timeline,
 	"player-graph": playerGraph,
 	"player-stats": playerStats,
