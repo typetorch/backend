@@ -118,6 +118,33 @@ export interface PlaytimeFunnelResult {
 	biggestDrop: { seconds: number; lost: number; share: number } | null;
 }
 
+/** One player at a funnel step (the `funnel-players` query). */
+export interface FunnelPlayer {
+	pid: string;
+	/** Logged funnels: when they reached the step (reached) or their last step (dropped). Null for playtime funnels. */
+	at: string | null;
+	/** Logged funnels: their furthest step and when they first logged it. */
+	lastStep: number | null;
+	lastStepAt: string | null;
+	/** Playtime funnels: their playtime, seconds. */
+	playtimeSeconds?: number;
+	lastAt: string | null;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+/** The `funnel-players` query: the players who reached (or dropped off at) one step; at most 200. */
+export interface FunnelPlayers {
+	funnel: string | null;
+	measure: "total" | "first" | null;
+	step: number;
+	mode: "reached" | "dropped";
+	total: number;
+	more: number;
+	players: FunnelPlayer[];
+}
+
 /** The `funnel-progress` query: how far given players got in each funnel. */
 export interface FunnelProgress {
 	pid: string;
@@ -509,6 +536,7 @@ export interface QueryResults {
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;
 	"playtime-funnel": PlaytimeFunnelResult;
+	"funnel-players": FunnelPlayers;
 	timeline: TimelineResult;
 	"player-graph": GraphData;
 	"player-stats": PlayerStatsResult;
