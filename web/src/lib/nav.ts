@@ -71,6 +71,7 @@ export const NAV_GROUPS: NavGroup[] = [
 			{ label: "Retention", path: "/retention", icon: CalendarRange },
 			{ label: "First session", path: "/first-session", icon: Compass },
 			{ label: "Experiments", path: "/experiments", icon: FlaskConical },
+			{ label: "Roblox", path: "/roblox", icon: Gamepad2 },
 		],
 	},
 	{
@@ -80,7 +81,6 @@ export const NAV_GROUPS: NavGroup[] = [
 			{ label: "Fleet", path: "/fleet", icon: Server, noFilters: true, also: ["/servers"] },
 			{ label: "Errors", path: "/errors", icon: Bug, noFilters: true },
 			{ label: "Performance", path: "/performance", icon: Gauge },
-			{ label: "Roblox", path: "/roblox", icon: Gamepad2 },
 		],
 	},
 	{

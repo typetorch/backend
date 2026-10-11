@@ -61,6 +61,14 @@ describe("the nav config", () => {
 		expect(NAV_GROUPS.slice(1).every((g) => g.label)).toBe(true);
 	});
 
+	it("lists Roblox last under Players & gameplay, not under Observe & troubleshoot", () => {
+		const labels = (id: string) => NAV_GROUPS.find((g) => g.id === id)?.items.map((i) => i.label) ?? [];
+		expect(labels("players").at(-1)).toBe("Roblox");
+		expect(labels("players").at(-2)).toBe("Experiments");
+		expect(labels("observe")).not.toContain("Roblox");
+		expect(findNavItem("/roblox")?.path).toBe("/roblox");
+	});
+
 	it("uses short labels and no emojis", () => {
 		for (const text of [...NAV.map((i) => i.label), ...NAV_GROUPS.flatMap((g) => (g.label ? [g.label] : []))]) {
 			expect(text.length).toBeLessThanOrEqual(26);
