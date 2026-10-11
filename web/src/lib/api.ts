@@ -11,6 +11,7 @@ import type {
 	DebugAuditEntry,
 	ErrorDetail,
 	ErrorList,
+	ErrorPlayers,
 	Filters,
 	FleetAlert,
 	FleetReports,
@@ -153,6 +154,8 @@ export function createApi(options: ApiOptions = {}) {
 		/** Error kinds seen in a window (see backend README "Error logs"). */
 		errors: (params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorList>(`/v1/errors${qs({ ...params })}`, signal),
 		errorKind: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorDetail>(`/v1/errors/${encodeURIComponent(fp)}${qs({ ...params })}`, signal),
+		/** The players who hit one kind (at most 200), under the same window and filters. */
+		errorPlayers: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorPlayers>(`/v1/errors/${encodeURIComponent(fp)}/players${qs({ ...params })}`, signal),
 		/** The live SSE stream's URL (EventSource sends the session cookie; the dev proxy adds the token). */
 		liveUrl: (topics: string[] = []) => `${base}/v1/live${qs({ topics: topics.join(",") })}`,
 		/** What the server keeps on disk (measured at most every 30 s). */

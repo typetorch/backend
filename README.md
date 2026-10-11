@@ -440,7 +440,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
-| `GET /v1/errors`, `GET /v1/errors/<fp>` | admin, web | error kinds with counts; one kind |
+| `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
@@ -612,7 +612,8 @@ What is stored, and what is dropped (counted in `/healthz` -> `errors`, the requ
   hour per JobId and 200 per address** (`droppedQuota`), so one sender can't fill the table;
 - counts per minute by branch, build and side: an item that spans up to 10 minutes is spread evenly over them, a longer one
   is counted in its last minute (so one item is at most 11 rows);
-- the pids per kind and day (2,000 at most per kind and day);
+- the pids per kind and day (2,000 at most per kind and day), each with the occurrences of the reports that named it and
+  when (first and last); occurrences in reports that named nobody are kept per count row (`anon`);
 - at most 2,000,000 **new** count and pid rows per UTC day (`TYPETORCH_ERROR_ROWS_PER_DAY`; `rowsToday`, `droppedRows`);
   adding to a row that exists is always free.
 
@@ -624,7 +625,14 @@ realm, count, players, firstAt, lastAt, total, spark: [..] }], totals: { count, 
 lastAt }] }` (`builds`: the artifact ids with errors in the window under the other filters, most recently seen first, at most
 50; the Errors page's artifact filter, URL param `build`; a branch or build with control characters is a 400); `GET /v1/errors/<fp>`
 adds the sample `stack`, the dense `series` and `byBuild`, `byBranch`, `byRealm`. `players` counts distinct ids over the days the
-window touches. The explorer's **Errors** page shows both.
+window touches. `GET /v1/errors/<fp>/players` (same window and filters, `limit` 1-200, default 200) answers `{ fp, window,
+players: [{ pid, uid?, name?, displayName?, count, days, firstAt, lastAt, realms }], total, more, withoutPlayer: [{ realm,
+count, firstAt, lastAt }] }`: most occurrences first, then the most recently seen. `count` is the occurrences in the reports
+(one minute of one kind on one server) that named the player, so players who hit it in the same minute share that report
+(an upper bound); rows from before this existed count once in their day. `uid` comes from the identity table, the Roblox
+names from the profile cache (a few uncached ones are looked up in the background, so a refresh shows them); erased pids are
+left out, and erasure deletes their error rows. The explorer's **Errors** page shows all three: a row (click, or Enter /
+Space) opens the kind in a side sheet (`?fp=` in the URL) with its players, each linking to their Players page.
 
 ## The explorer
 

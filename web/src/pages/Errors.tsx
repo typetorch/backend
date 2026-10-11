@@ -1,19 +1,27 @@
-/** Error logs from game servers and clients: kinds with counts, a trend line, players affected, and a sample stack. */
+/**
+ * Error logs from game servers and clients: kinds with counts, a trend line, players affected, and a sample stack. A row
+ * opens the kind in a side sheet (`?fp=` in the URL, so the link is shareable): where it happens, its stack, and the
+ * players who hit it, each linking to their page.
+ */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { cn } from "cn";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
+import { UserIdLink } from "@/components/Identity";
 import { Sparkline } from "@/components/Sparkline";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { api, type ErrorParams } from "@/lib/api";
-import { fmtAgo, fmtInt, fmtTime, plural } from "@/lib/format";
+import { FILTER_KEYS } from "@/lib/filters";
+import { fmtAgo, fmtInt, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
-import type { ErrorDetail, ErrorKind, ErrorList } from "@/lib/types";
+import type { ErrorDetail, ErrorKind, ErrorList, ErrorPlayer, ErrorPlayers } from "@/lib/types";
 
 const WINDOWS = [
 	{ value: "1h", label: "Last hour" },
@@ -141,6 +149,7 @@ function Kinds({ data, selected, onSelect }: { data: ErrorList; selected: string
 			// The server already sends the most frequent first; clearing the sort brings that order back.
 			defaultSort={[{ id: "count", desc: true }]}
 			onRowClick={(k) => onSelect(selected === k.fp ? "" : k.fp)}
+			rowActionLabel={(k) => `Open error: ${k.template.slice(0, 120)}`}
 			isRowSelected={(k) => selected === k.fp}
 		/>
 	);
@@ -185,6 +194,92 @@ function SeriesBars({ detail }: { detail: ErrorDetail }) {
 	);
 }
 
+/** A row of the players list: a player, or the occurrences on one side that named nobody. */
+export type PlayerRow = ({ kind: "player" } & ErrorPlayer) | { kind: "none"; realm: string; count: number; firstAt: string; lastAt: string };
+
+export function playerRows(data: ErrorPlayers): PlayerRow[] {
+	return [...data.players.map((p): PlayerRow => ({ kind: "player", ...p })), ...data.withoutPlayer.map((w): PlayerRow => ({ kind: "none", ...w }))];
+}
+
+/** "Display (@name)", "@name", or the short pid when the server knows no name. */
+export function playerLabel(p: ErrorPlayer): string {
+	if (!p.name) return shortId(p.pid, 10);
+	return p.displayName && p.displayName !== p.name ? `${p.displayName} (@${p.name})` : `@${p.name}`;
+}
+
+/** The Players page for one pid, keeping the explorer's shared filters that are in the URL. */
+function PlayerPageLink({ row }: { row: ErrorPlayer }) {
+	const { search } = useLocation();
+	const current = new URLSearchParams(search);
+	const params = new URLSearchParams();
+	for (const key of FILTER_KEYS) if (current.get(key)) params.set(key, current.get(key) as string);
+	params.set("pid", row.pid);
+	return (
+		<Link to={{ pathname: "/players", search: `?${params.toString()}` }} className="font-medium underline-offset-2 hover:underline" title={`Open player ${row.pid}`}>
+			{playerLabel(row)}
+		</Link>
+	);
+}
+
+const PLAYER_COLUMNS: DataColumn<PlayerRow>[] = [
+	{
+		id: "player",
+		header: "Player",
+		accessor: (r) => (r.kind === "player" ? (r.name ?? r.pid) : r.realm),
+		searchText: (r) => (r.kind === "player" ? `${r.pid} ${r.displayName ?? ""} ${r.uid ?? ""}` : ""),
+		cell: (r) =>
+			r.kind === "player" ? (
+				<div className="min-w-0">
+					<PlayerPageLink row={r} />
+					{r.name ? <div className="truncate font-mono text-[11px] text-muted-foreground">{shortId(r.pid, 10)}</div> : null}
+				</div>
+			) : (
+				<div>
+					<Badge variant="secondary">{r.realm}</Badge>
+					<div className="mt-0.5 text-[11px] text-muted-foreground">{r.realm === "server" ? "no player named" : "no analytics id yet"}</div>
+				</div>
+			),
+	},
+	{
+		id: "uid",
+		header: "UserId",
+		accessor: (r) => (r.kind === "player" ? (r.uid ?? null) : null),
+		cell: (r) => {
+			if (r.kind !== "player") return null;
+			if (r.uid === undefined) return <span className="text-xs text-muted-foreground">not linked</span>;
+			return <UserIdLink uid={r.uid} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline" />;
+		},
+		exportValue: (r) => (r.kind === "player" && r.uid !== undefined ? String(r.uid) : ""),
+	},
+	{ id: "count", header: "Times", title: "Occurrences in the reports that named the player (a report is one minute of one server)", accessor: (r) => r.count, cell: (r) => fmtInt(r.count) },
+	{ id: "days", header: "Days", title: "UTC days they hit it in the window", accessor: (r) => (r.kind === "player" ? r.days : null), cell: (r) => (r.kind === "player" ? fmtInt(r.days) : null), defaultHidden: true },
+	{ id: "firstAt", header: "First seen", type: "date", accessor: (r) => r.firstAt, cell: (r) => <span title={fmtTime(r.firstAt)}>{fmtAgo(r.firstAt)}</span>, format: (_v, r) => fmtAgo(r.firstAt), className: "text-xs" },
+	{ id: "lastAt", header: "Last seen", type: "date", accessor: (r) => r.lastAt, cell: (r) => <span title={fmtTime(r.lastAt)}>{fmtAgo(r.lastAt)}</span>, format: (_v, r) => fmtAgo(r.lastAt), className: "text-xs" },
+	{ id: "side", header: "Side", accessor: (r) => (r.kind === "player" ? r.realms.join(", ") : r.realm), className: "text-xs", defaultHidden: true },
+];
+
+/** The players who hit one kind in the window, under the page's filters: most occurrences first, at most 200. */
+function KindPlayers({ fp, params }: { fp: string; params: ErrorParams }) {
+	const query = useQuery({ queryKey: ["errors", "players", fp, params], queryFn: ({ signal }) => api.errorPlayers(fp, params, signal), refetchInterval: 30_000 });
+	return (
+		<QueryState query={query} loadingRows={3}>
+			{(d) => {
+				const rows = playerRows(d);
+				if (!rows.length) return <EmptyState>No players hit it in this window.</EmptyState>;
+				return (
+					<div className="space-y-2">
+						<DataTable id="errors-players" label="Players who hit this error" columns={PLAYER_COLUMNS} data={rows} rowId={(r) => (r.kind === "player" ? `p:${r.pid}` : `none:${r.realm}`)} defaultSort={[{ id: "count", desc: true }]} />
+						<p className="text-xs text-muted-foreground">
+							{d.more ? `The ${fmtInt(d.players.length)} who hit it most, of ${fmtInt(d.total)} players. ` : ""}
+							Times counts the occurrences in each minute's report that named the player, so players who hit it in the same minute on one server share that report.
+						</p>
+					</div>
+				);
+			}}
+		</QueryState>
+	);
+}
+
 function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
 	const query = useQuery({ queryKey: ["errors", "kind", fp, params], queryFn: ({ signal }) => api.errorKind(fp, params, signal), refetchInterval: 30_000 });
 	return (
@@ -203,6 +298,10 @@ function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
 						</KeyValue>
 					</div>
 					<SeriesBars detail={d} />
+					<div className="space-y-1">
+						<div className="text-xs font-medium text-muted-foreground">Players who hit it</div>
+						<KindPlayers fp={fp} params={params} />
+					</div>
 					<div className="grid gap-4 md:grid-cols-3">
 						<Breakdown title="By build" rows={d.byBuild.map((r) => ({ label: r.build, n: r.n }))} />
 						<Breakdown title="By branch" rows={d.byBranch.map((r) => ({ label: r.branch, n: r.n }))} />
@@ -227,6 +326,8 @@ export default function Errors() {
 	const [q, setQ] = useParam("q");
 	const [selected, setSelected] = useParam("fp");
 	const params: ErrorParams = { window, ...(realm ? { realm } : {}), ...(branch ? { branch } : {}), ...(build ? { build } : {}), ...(q ? { q } : {}) };
+	// The search only picks which kinds are listed; one kind's reads take the window and the other filters.
+	const { q: _search, ...kindParams } = params;
 	const list = useQuery({ queryKey: ["errors", "list", params], queryFn: ({ signal }) => api.errors({ ...params, limit: 200 }, signal), refetchInterval: 30_000 });
 	const artifacts = artifactOptions(list.data?.builds, build);
 	const stream = useErrorStream();
@@ -288,17 +389,21 @@ export default function Errors() {
 							<Metric label="Players affected" value={fmtInt(data.totals.players)} sub="by days touched" />
 							<Metric label="Trend step" value={bucketLabel(data.window.bucketSeconds)} sub={`${data.window.buckets} steps`} />
 						</div>
-						<Section title="Error kinds" description="Most frequent first. Click a row for its stack and where it happens.">
+						<Section title="Error kinds" description="Most frequent first. Open a row for its stack, where it happens and the players who hit it.">
 							<Kinds data={data} selected={selected} onSelect={setSelected} />
 						</Section>
 					</>
 				)}
 			</QueryState>
-			{selected ? (
-				<Section title="Selected error">
-					<KindDetail fp={selected} params={{ ...params }} />
-				</Section>
-			) : null}
+			<Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelected("")}>
+				<SheetContent side="right" className="w-full overflow-y-auto sm:max-w-3xl md:w-[48rem]">
+					<div className="space-y-1 border-b p-4 pr-10">
+						<SheetTitle>Selected error</SheetTitle>
+						<SheetDescription>{WINDOWS.find((w) => w.value === window)?.label ?? window}, under the page's filters.</SheetDescription>
+					</div>
+					<div className="p-4">{selected ? <KindDetail fp={selected} params={kindParams} /> : null}</div>
+				</SheetContent>
+			</Sheet>
 		</>
 	);
 }

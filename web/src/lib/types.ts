@@ -997,6 +997,32 @@ export interface ErrorList {
 	builds?: { build: string; n: number; lastAt: string }[];
 }
 
+/** GET /v1/errors/<fp>/players: who hit one kind in the window (at most 200), most occurrences first. */
+export interface ErrorPlayer {
+	pid: string;
+	/** The UserId and Roblox names when the server knows them. */
+	uid?: number;
+	name?: string;
+	displayName?: string;
+	/** Occurrences in the reports (one minute of one server) that named the player: an upper bound when several players share a minute. */
+	count: number;
+	/** UTC days they hit it in the window. */
+	days: number;
+	firstAt: string;
+	lastAt: string;
+	realms: string[];
+}
+
+export interface ErrorPlayers {
+	fp: string;
+	window: { from: string; to: string };
+	players: ErrorPlayer[];
+	total: number;
+	more: number;
+	/** Occurrences in reports that named no player, per side. */
+	withoutPlayer: { realm: string; count: number; firstAt: string; lastAt: string }[];
+}
+
 export interface ErrorDetail {
 	kind: { fp: string; template: string; stack: string | null; realm: string; firstAt: string; lastAt: string; total: number };
 	window: ErrorWindow;

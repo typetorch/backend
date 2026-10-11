@@ -91,6 +91,8 @@ export interface DataTableProps<T> {
 	columnsMenu?: ReactNode;
 	/** Makes rows clickable (and focusable: Enter or Space). Clicks on links and buttons inside a row don't count. */
 	onRowClick?: (row: T) => void;
+	/** A clickable row's accessible name (what Enter or Space does, e.g. "Open error: ..."); the selected row is aria-current. */
+	rowActionLabel?: (row: T) => string;
 	isRowSelected?: (row: T) => boolean;
 	rowClassName?: (row: T) => string | undefined;
 	/** Rows shown first, outside sorting, filtering, paging and export (a total or an average). */
@@ -160,6 +162,7 @@ function TableImpl<T>({
 	toolbar,
 	columnsMenu,
 	onRowClick,
+	rowActionLabel,
 	isRowSelected,
 	rowClassName,
 	pinnedRows,
@@ -494,6 +497,8 @@ function TableImpl<T>({
 											{...(onRowClick
 												? {
 														tabIndex: 0,
+														...(rowActionLabel ? { "aria-label": rowActionLabel(row) } : {}),
+														...(selected ? { "aria-current": true } : {}),
 														onClick: (e: React.MouseEvent) => {
 															if ((e.target as HTMLElement).closest("a,button,input,select,textarea,[role=menuitem],[data-no-row-click]")) return;
 															if (window.getSelection()?.toString()) return;

@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sparkPaths } from "@/components/Sparkline";
 import { api } from "@/lib/api";
-import type { ErrorDetail, ErrorList } from "@/lib/types";
-import Errors, { artifactOptions, bucketLabel } from "./Errors";
+import type { ErrorDetail, ErrorList, ErrorPlayers } from "@/lib/types";
+import Errors, { artifactOptions, bucketLabel, playerLabel } from "./Errors";
 
 beforeAll(() => {
 	// recharts measures its container.
@@ -59,12 +59,33 @@ const detail: ErrorDetail = {
 	byRealm: [{ realm: "server", n: 12 }],
 };
 
+const players: ErrorPlayers = {
+	fp: "fp-boom",
+	window: { from: window24.from, to: window24.to },
+	players: [
+		{ pid: "pid-aaaa", uid: 4242, name: "Tester", displayName: "Test Player", count: 10, days: 1, firstAt: "2026-10-09T11:57:00.000Z", lastAt: "2026-10-09T11:58:00.000Z", realms: ["server"] },
+		{ pid: "pid-bbbb", count: 2, days: 1, firstAt: "2026-10-09T11:59:00.000Z", lastAt: "2026-10-09T11:59:00.000Z", realms: ["client"] },
+	],
+	total: 2,
+	more: 0,
+	withoutPlayer: [{ realm: "server", count: 3, firstAt: "2026-10-09T11:00:00.000Z", lastAt: "2026-10-09T11:00:59.999Z" }],
+};
+
+/** Where the router is (the Players page stand-in shows its search). */
+function PlayersStandIn() {
+	const { search } = useLocation();
+	return <div>Players page {search}</div>;
+}
+
 function mount(path = "/errors") {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	return render(
 		<QueryClientProvider client={client}>
 			<MemoryRouter initialEntries={[path]}>
-				<Errors />
+				<Routes>
+					<Route path="/errors" element={<Errors />} />
+					<Route path="/players" element={<PlayersStandIn />} />
+				</Routes>
 			</MemoryRouter>
 		</QueryClientProvider>,
 	);
@@ -74,6 +95,7 @@ describe("Errors page", () => {
 	it("lists kinds with counts, players, side and when; a click shows the sample stack and where it happens", async () => {
 		const errors = vi.spyOn(api, "errors").mockResolvedValue(list);
 		const kind = vi.spyOn(api, "errorKind").mockResolvedValue(detail);
+		vi.spyOn(api, "errorPlayers").mockResolvedValue(players);
 		mount();
 		expect(await screen.findByText("Script <player.name> failed: attempt to index nil")).toBeTruthy();
 		expect(screen.getByText("Workspace.Game.Round:42")).toBeTruthy();
@@ -92,6 +114,53 @@ describe("Errors page", () => {
 		expect(screen.getByText("a1b2c3d-000042")).toBeTruthy();
 		expect(screen.getByText("By build")).toBeTruthy();
 		expect(kind).toHaveBeenCalledWith("fp-boom", expect.objectContaining({ window: "24h" }), expect.anything());
+	});
+
+	it("Enter or Space on a focused row opens the error and its players; a player links to their page", async () => {
+		vi.spyOn(api, "errors").mockResolvedValue(list);
+		vi.spyOn(api, "errorKind").mockResolvedValue(detail);
+		const who = vi.spyOn(api, "errorPlayers").mockResolvedValue(players);
+		mount("/errors?range=7d");
+		const row = (await screen.findByText("Script <player.name> failed: attempt to index nil")).closest("tr") as HTMLElement;
+		expect(row.getAttribute("tabindex")).toBe("0");
+		expect(row.getAttribute("aria-label")).toBe("Open error: Script <player.name> failed: attempt to index nil");
+		row.focus();
+		fireEvent.keyDown(row, { key: "Enter" });
+		const dialog = await screen.findByRole("dialog");
+		expect(within(dialog).getByText("Selected error")).toBeTruthy();
+		const table = await within(dialog).findByRole("table", { name: "Players who hit this error" });
+		// Named player first: the Roblox names, the UserId, the count; an unlinked one by pid; then the server row.
+		const link = within(table).getByRole("link", { name: "Test Player (@Tester)" });
+		expect(link.getAttribute("href")).toBe("/players?range=7d&pid=pid-aaaa");
+		expect(within(table).getByRole("link", { name: /UserId 4242/ }).getAttribute("href")).toBe("https://www.roblox.com/users/4242/profile");
+		expect(within(table).getByRole("link", { name: "pid-bbbb" }).getAttribute("href")).toBe("/players?range=7d&pid=pid-bbbb");
+		expect(within(table).getByText("not linked")).toBeTruthy();
+		expect(within(table).getByText("no player named")).toBeTruthy();
+		const serverRow = within(table).getByText("no player named").closest("tr") as HTMLElement;
+		expect(within(serverRow).queryByRole("link")).toBeNull();
+		expect(within(serverRow).getByText("3")).toBeTruthy();
+		expect(who).toHaveBeenCalledWith("fp-boom", expect.objectContaining({ window: "24h" }), expect.anything());
+		// Following the link opens the player's page.
+		fireEvent.click(link);
+		expect(await screen.findByText("Players page ?range=7d&pid=pid-aaaa")).toBeTruthy();
+	});
+
+	it("Space opens it too, and a shared link (?fp=) opens it with the page's filters (the search only picks kinds)", async () => {
+		vi.spyOn(api, "errors").mockResolvedValue(list);
+		const kind = vi.spyOn(api, "errorKind").mockResolvedValue(detail);
+		const who = vi.spyOn(api, "errorPlayers").mockResolvedValue({ ...players, players: [], withoutPlayer: [], total: 0 });
+		mount("/errors?window=7d&realm=client&branch=dev&build=b2-000043&q=boom&fp=fp-boom");
+		const dialog = await screen.findByRole("dialog");
+		expect(await within(dialog).findByText("No players hit it in this window.")).toBeTruthy();
+		const filters = { window: "7d", realm: "client", branch: "dev", build: "b2-000043" };
+		expect(who).toHaveBeenCalledWith("fp-boom", filters, expect.anything());
+		expect(kind).toHaveBeenCalledWith("fp-boom", filters, expect.anything());
+		cleanup();
+		mount();
+		const row = (await screen.findByText("HTTP 429 from <url>")).closest("tr") as HTMLElement;
+		fireEvent.keyDown(row, { key: " " });
+		expect(await screen.findByRole("dialog")).toBeTruthy();
+		await waitFor(() => expect(who).toHaveBeenLastCalledWith("fp-two", { window: "24h" }, expect.anything()));
 	});
 
 	it("filters by artifact from the URL, together with the other filters, and shows the choice", async () => {
@@ -120,6 +189,15 @@ describe("Errors page", () => {
 		vi.spyOn(api, "errors").mockRejectedValue(new Error("the backend is not answering"));
 		mount();
 		expect(await screen.findByText("the backend is not answering")).toBeTruthy();
+	});
+});
+
+describe("player labels", () => {
+	it("display name and username, the username alone, or the short pid", () => {
+		const base = players.players[0]!;
+		expect(playerLabel(base)).toBe("Test Player (@Tester)");
+		expect(playerLabel({ ...base, displayName: "Tester" })).toBe("@Tester");
+		expect(playerLabel({ ...base, name: undefined, pid: "abcdefghijklmnopqrstuvwxyz" })).toBe("abcdefghij…qrstuvwxyz");
 	});
 });
 
