@@ -5,20 +5,19 @@
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { cn } from "cn";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { UserIdLink } from "@/components/Identity";
+import { PlayerPageLink, playerLabel } from "@/components/PlayerLink";
 import { Sparkline } from "@/components/Sparkline";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { api, type ErrorParams } from "@/lib/api";
-import { FILTER_KEYS } from "@/lib/filters";
 import { fmtAgo, fmtInt, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
 import type { ErrorDetail, ErrorKind, ErrorList, ErrorPlayer, ErrorPlayers } from "@/lib/types";
@@ -199,26 +198,6 @@ export type PlayerRow = ({ kind: "player" } & ErrorPlayer) | { kind: "none"; rea
 
 export function playerRows(data: ErrorPlayers): PlayerRow[] {
 	return [...data.players.map((p): PlayerRow => ({ kind: "player", ...p })), ...data.withoutPlayer.map((w): PlayerRow => ({ kind: "none", ...w }))];
-}
-
-/** "Display (@name)", "@name", or the short pid when the server knows no name. */
-export function playerLabel(p: ErrorPlayer): string {
-	if (!p.name) return shortId(p.pid, 10);
-	return p.displayName && p.displayName !== p.name ? `${p.displayName} (@${p.name})` : `@${p.name}`;
-}
-
-/** The Players page for one pid, keeping the explorer's shared filters that are in the URL. */
-function PlayerPageLink({ row }: { row: ErrorPlayer }) {
-	const { search } = useLocation();
-	const current = new URLSearchParams(search);
-	const params = new URLSearchParams();
-	for (const key of FILTER_KEYS) if (current.get(key)) params.set(key, current.get(key) as string);
-	params.set("pid", row.pid);
-	return (
-		<Link to={{ pathname: "/players", search: `?${params.toString()}` }} className="font-medium underline-offset-2 hover:underline" title={`Open player ${row.pid}`}>
-			{playerLabel(row)}
-		</Link>
-	);
 }
 
 const PLAYER_COLUMNS: DataColumn<PlayerRow>[] = [
@@ -409,3 +388,4 @@ export default function Errors() {
 }
 
 export type { ErrorKind };
+export { playerLabel };
