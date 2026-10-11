@@ -441,6 +441,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
+| `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
@@ -941,6 +942,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `POST /v1/identity` | game | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
 | `GET /v1/identity?pid=` / `?uid=` | admin | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
 | `GET /v1/identity/<pid>/profile` | admin | `{ pid, linked: false }`, or `{ pid, linked: true, uid, roblox: "ok" \| "partial" \| "not-found" \| "unavailable", cached, name, displayName, avatar }` (null when Roblox didn't say). 120 a minute per address |
+| `GET /v1/place` | admin, web | `{ configured: false }` while neither `TYPETORCH_UNIVERSE_ID` is set nor a heartbeat carried a PlaceId; else `{ configured: true, roblox: "ok" \| "partial" \| "unavailable", cached, placeId, universeId, name, playing, icon, url }` (null when Roblox didn't say). The server asks Roblox's public games and thumbnails APIs without credentials (never the Open Cloud key), caches 60 s, keeps an older answer while Roblox is down; the icon is only an https URL on `*.rbxcdn.com`. 120 a minute per address |
 | `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
