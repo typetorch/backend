@@ -318,7 +318,7 @@ describe("new-JobId flood limit", () => {
 		const keys = new Set<string>();
 		const counting = { take: (key: string) => (keys.add(key), true), retryAfter: () => 1 };
 		const gate = new NewJobLimiter(10, () => T0);
-		const options = { service, isIngest: () => true, isAdmin: () => false, limiters: { heartbeat: counting, report: counting, alert: counting, closing: counting, deploy: counting, mark: counting }, newJobs: gate };
+		const options = { service, isIngest: () => true, isAdmin: () => false, limiters: { heartbeat: counting, report: counting, alert: counting, closing: counting, deploy: counting, mark: counting, bundle: counting }, newJobs: gate };
 		const statuses: number[] = [];
 		for (let i = 0; i < 100; i++) {
 			const req = new Request("http://fleet.test/v1/fleet/heartbeat", { method: "POST", body: JSON.stringify({ j: `random-${i}` }) });

@@ -163,13 +163,15 @@ describe("the server page", () => {
 		expect(screen.queryByText(WAKING_TEXT)).toBeNull();
 	});
 
-	it("a closed server: no watch, no debug tabs, its last hour and when it closed", async () => {
+	it("a closed server: no watch, no debug tabs, its whole life and when it closed", async () => {
 		const closedAt = "2026-10-09T10:00:00.000Z";
 		const { watchServer, remoteCommand } = mockApi(detail({ state: "closed", server: { ...row, closedAt }, debug: { watched: false, connected: false } }));
 		mount();
 		expect(await screen.findByText(/This server closed at 2026-10-09 10:00:00 UTC: nothing to debug/)).toBeTruthy();
 		expect(screen.queryByRole("tablist")).toBeNull();
-		expect(await screen.findByLabelText("Server TPS over the last 60 minutes")).toBeTruthy();
+		expect(await screen.findByLabelText("Server TPS over its whole life")).toBeTruthy();
+		expect(screen.getByText("Offline")).toBeTruthy();
+		expect(screen.getByText("closed at 2026-10-09 10:00:00 UTC")).toBeTruthy();
 		expect(watchServer).not.toHaveBeenCalled();
 		expect(remoteCommand).not.toHaveBeenCalled();
 	});

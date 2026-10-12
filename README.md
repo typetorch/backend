@@ -33,7 +33,7 @@ or Bun). Ships as one Docker image that works as a Coolify app.
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
 - [The analytics part (DuckDB)](#the-analytics-part-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite)
-- [Remote debug](#remote-debug) (read a live game server from the explorer)
+- [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history))
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -449,7 +449,8 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
-| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state) |
+| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state, its [offline history](#debug-bundles-and-offline-history)) |
+| `GET /v1/fleet/servers/<jobId>/bundles`, `GET /v1/fleet/bundles/<id>` | admin, web | [debug bundles](#debug-bundles-and-offline-history); the web role gets a bundle's body without `playerLogs` |
 | `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
@@ -1049,12 +1050,14 @@ Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the sig
 |---|---|---|
 | `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
 | `POST /v1/fleet/report` | ingest | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
-| `POST /v1/fleet/alert` | ingest | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`) |
+| `POST /v1/fleet/alert` | ingest | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k, d? }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`). `d` (kernel 0.5.2) is kept as the alert's `details` when it is a flat object (at most 16 keys; values strings of at most 1,000 bytes, numbers or booleans; at most 4 KB of JSON), else `details` is `null` (never a 400). `deploy_failed` carries `{ stage, error, attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }`; from 0.5.3 `d.bundle` names the [debug bundle](#debug-bundles-and-offline-history) that follows |
+| `POST /v1/fleet/bundle` | ingest | a kernel 0.5.3 [debug bundle](#debug-bundles-and-offline-history) (at most 512 KB, plain or `Content-Encoding: gzip`) -> `202 { ok: true, id }` |
 | `POST /v1/fleet/closing` | ingest | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
 | `POST /v1/fleet/deploy` | ingest | `{ s, b, a, ch, t, k?, fr?, m? }` from the CLI after a release (stuck detection's start time and a chart mark): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `t` unix ms or s (a clock a day off is replaced by the backend's) |
 | `POST /v1/fleet/mark` | ingest | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
 | `GET /v1/fleet/servers?branch=&maxAge=` | admin | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
-| `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }` |
+| `GET /v1/fleet/servers?gone=1&branch=&limit=` | admin | `{ servers: [...rows + closedAt, lostAt, state: closed\|lost, firstSeen] }`: servers that closed or were lost (kept 30 days), the most recently gone first (`limit` 200, at most 1,000) |
+| `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }`. A `since` older than the 2-hour raw window adds the 5-minute rollups before it (one point per bucket, `t` = the bucket's start) and `rolledUntil` (unix ms: where the raw points take over) |
 | `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
 | `GET /v1/fleet/alerts?since=<ms>&level=&unacked=1&limit=` | admin | `{ alerts: [...] }` (each with `at` in ms and `acked`) |
 | `GET /v1/fleet/marks?since=&until=&branch=&kinds=&limit=` | admin | `{ marks: [{ id, kind, at, time, branch, seq, artifact, channel, from, kernel, placeVersion, message, results?, inferred? }] }`, oldest first: every release in the deploys table (with its servers per report result; one known only from server reports has `inferred: true`) and the kernel / backup marks. Times unix ms or ISO; default the last 30 days; at most a 366-day window and the `limit` (500, at most 2,000) newest. `branch` keeps that branch's releases and every place-wide mark |
@@ -1073,7 +1076,11 @@ ISO strings, except `at` (unix ms).
 missing, non-numeric, negative or out-of-range one (rates over 1,000, memory over 1,000,000 MB) is `null`, and never a
 reason to refuse the heartbeat. Every heartbeat also adds one point to the server's history (`server_metrics`): at most
 720 points per server and 2 hours (older points are dropped by the sweep and never returned), and at most 1,000,000
-points in all (the sweep drops the oldest), which fits a 1,250-server fleet.
+points in all (the sweep drops the oldest), which fits a 1,250-server fleet. Before they go, the sweep **rolls them up**
+(`server_metrics_5m`): one row per server and finished 5-minute bucket (average TPS, physics FPS, memory and Lua heap;
+the slowest second; the most players), kept 30 days and at most 5,000,000 rows (the oldest go first), so a server's
+charts cover its whole life after it is gone. The rollup is an upsert per bucket (two servers sharing the file in a
+handover write the same rows); after a restart it goes on from the newest rollup.
 
 **SSE format:** `event: <type>` and `data: <JSON>` per message, a `: ping` comment every 15 s. Types:
 
@@ -1086,6 +1093,7 @@ points in all (the sweep drops the oldest), which fits a 1,250-server fleet.
 | `mark` | `{ type, mark: <marks row> }` (kernel publish, backup refresh) |
 | `alert` | `{ type, alert: <alerts row> }` |
 | `alert_ack` | `{ type, id }` |
+| `bundle` | `{ type, bundle: <bundle summary> }` (a new debug bundle) |
 
 **Server-side alerts** (swept every 10 s): `server_lost` when a server sends no heartbeat for 90 s without a closing
 message (one alert per branch and artifact per sweep, listing the JobIds; critical when 3 or more), and
@@ -1093,7 +1101,8 @@ message (one alert per branch and artifact per sweep, listing the JobIds; critic
 with no report for it (it lists those JobIds and says nothing about the build). **Notifications:**
 `TYPETORCH_ALERT_WEBHOOK_URL` (Discord, Slack or generic JSON, detected from the URL or `TYPETORCH_ALERT_WEBHOOK_FORMAT`), critical
 only by default (`TYPETORCH_ALERT_WEBHOOK_LEVELS`), the same (code, branch, artifact) at most once per 10 minutes, at most
-20 posts a minute. Reports are kept 30 days, alerts and releases 90 days, kernel / backup marks a year (at most 5,000, the newest). Per-JobId limits (40 a minute) sit above the kernel's
+20 posts a minute. Reports are kept 30 days, alerts and releases 90 days, kernel / backup marks a year (at most 5,000, the newest), closed
+and lost servers 30 days (at most 50,000, the most recently gone kept), debug bundles 30 days. Per-JobId limits (40 a minute) sit above the kernel's
 own 30.
 
 **New JobIds** (`TYPETORCH_NEW_JOBS_PER_MINUTE`, 2,000): JobIds without a `servers` row are let in at most 2,000 per
@@ -1101,7 +1110,7 @@ clock minute across all senders, enough for a 1,250-server fleet (50k CCU) resta
 ingest requests from never-seen JobIds get 429 (`retry-after`: the rest of the minute) and the first refusal of the
 minute raises one `fleet_flood` alert (critical, source `server`, `details: { limit, windowSeconds, example }`), which
 reaches the webhook (deduped like any alert) and the SSE stream. Known JobIds (a `servers` row: live, closed or lost
-in the last day) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the API key (any code in the
+in the last 30 days) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the API key (any code in the
 universe that reads the settings record) could otherwise grow the `servers` table and the per-JobId limiters with
 made-up JobIds. The limiter holds at most that many JobIds and forgets them each minute; a JobId over 64 characters
 gets 400 before any limiter sees it.
@@ -1131,8 +1140,8 @@ A Roblox server can't be called into, so it **pulls**:
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `GET /v1/fleet/servers/<jobId>` | admin | `{ server: <servers row of any age> \| null, state: live\|closed\|lost\|unknown, debug: { watched, watchedUntil?, connected, lastPollAt? } }` (`connected` = the server polled in the last 15 s) |
-| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt?, wake }` (`wake`: a wake message went out to this server in the last 30 s and didn't fail, and it isn't polling yet); `409` for a closed or unknown server (nothing to debug) |
+| `GET /v1/fleet/servers/<jobId>` | admin, web | `{ server: <servers row of any age, + closedAt, lostAt, firstSeen> \| null, state: live\|closed\|lost\|gone\|unknown, debug: { watched, watchedUntil?, connected, lastPollAt? }, history }` (`connected` = the server polled in the last 15 s; `history` and `gone`: see [Debug bundles and offline history](#debug-bundles-and-offline-history)) |
+| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt?, wake }` (`wake`: a wake message went out to this server in the last 30 s and didn't fail, and it isn't polling yet); `409` for a closed, gone or unknown server (nothing to debug) |
 | `POST /v1/fleet/servers/<jobId>/commands` | admin | `{ op, args? }` -> `202 { id, op, state, createdAt, expiresAt }`; `400` an op outside the allow-list or bad args; `409` not watched (watch first); `429` limits |
 | `GET /v1/fleet/servers/<jobId>/commands/<id>` | admin | `{ id, op, state: queued\|sent\|done\|failed\|expired, createdAt, sentAt?, doneAt?, ms?, result?, error?, redacted? }`; only for whoever queued it (`404` for anyone else, and once the answer is dropped) |
 | `GET /v1/fleet/debug/audit?limit=` | admin | `{ entries: [{ at, who, ip, op, job, args, id }] }`, newest first (the last 500, in memory) |
@@ -1166,6 +1175,61 @@ Unknown argument keys are refused; args are at most 16 KB.
 - `GET /healthz` (admin) shows the counters and what is held (`remoteDebug: { queued, sent, done, failed, expired,
   ignored, dropped, commands, resultBytes, watched, wake }`), never an answer. `wake` is `"off"` or
   `{ published, failed, recent, limited }`.
+
+### Debug bundles and offline history
+
+A game server is gone the moment it closes, and a lost one never says why. So the fleet keeps what happened to a server
+for **30 days** after it goes, and kernel 0.5.3 sends a **debug bundle** when something fails: the explorer's
+`/servers/<JobId>` page shows both after the server is gone.
+
+**Bundles** (`POST /v1/fleet/bundle`, the API key; the same per-JobId limiter scheme as the other fleet POSTs with its
+own entry, 6 a minute, and the same [new-JobId gate](#the-fleet-api-sqlite)):
+
+```
+{ v: 1, id: "<32 lowercase hex>", j: "<JobId>", t: <unix s>, k: "<kernel>", b?, a?, s?, g?,
+  code: "deploy_failed", level: critical|warning|info, message: "<= 2000", closing: true|false,
+  failure: { stage?, error?, report?, triggers? }, server: {...}, deploy: { appliedSeq, history, reports, failing,
+  failedHere, pending, wanted, busy, restoring, heads, refusals }, fallback: {...}, alerts: [...], players: [...],
+  serverLog: [...], playerLogs: { "<UserId>": [...] } }
+```
+
+- The kernel sends one for any critical alert (its `d.bundle` names it), a generation that fails to start, a health
+  rollback, Fallback moving players off, `/tt bundle` (dev), and on BindToClose only when something failed in the last
+  10 minutes; one per trigger code a minute, 10 in a server's life (plus the closing one), ~3 s after the trigger.
+  Triggers within those 3 s join one bundle (`failure.triggers`), so a bundle's `code` can be `start_failed` while the
+  alert that names it says `deploy_failed`.
+- **Checks**: `v` = 1, `id` 32 lowercase hex, `j`, `code` (`[a-z0-9_.-]{1,64}`), `level`, `message` (at most 2,000);
+  `b`, `a`, `s`, `g` are left out when unknown (`null`). Every section is opaque JSON, only checked to be an object or a
+  list: the backend never runs or trusts it, and the explorer shows it as text, never HTML.
+- **At most 512 KB** (`413`; the kernel keeps its own under ~200 KB), counted inflated too: the kernel gzips bodies over
+  1 KB (`Content-Encoding: gzip`, like `/v1/errors`).
+- **Idempotent**: a repeated `id` answers `202 { ok: true, id, duplicate: true }` and stores nothing (the kernel may send
+  again after a timeout).
+- **Stored** in `bundles`: the summary in columns, the body **gzipped** (a BLOB). **Kept** 30 days, at most 20 per JobId
+  (checked on insert and hourly) and at most 500 MB stored in all (the oldest go first), swept hourly.
+
+| Endpoint | Role | Answer |
+|---|---|---|
+| `GET /v1/fleet/servers/<jobId>/bundles` | admin, web | `{ bundles: [{ id, job, code, level, message, closing, at (ms), time (ISO), kernel, branch, artifact, seq, generation, players (count), size (bytes), stage, error }] }`, newest first |
+| `GET /v1/fleet/bundles/<id>` | admin, web | `{ bundle: { ...summary, body } }` (the posted JSON); the read-only web role gets the body **without `playerLogs`** (what each player's client logged is for owners) and `playerLogsHidden: true`; `404` when gone |
+
+**Offline history.** Closed and lost servers keep their `servers` row 30 days (was one day), at most 50,000 of them
+(the oldest gone first; live rows never count). `GET /v1/fleet/servers/<jobId>` carries a `history` block for every
+JobId: `alerts` (with this JobId, newest first, at most 200), `reports` (its deploy reports, at most 200), `bundles` (the
+summaries above), `swaps` (generation starts from its bundles' `deploy.history`: `{ at, name, artifact, branch, reason,
+loadSeconds, swapSeconds, bundle }`) and `metrics: { from, to }` (the time range its raw points and rollups cover). When
+the row is gone but alerts, reports, bundles or rollups still name the JobId, the state is **`gone`** (`server: null`)
+instead of `unknown`. `GET /v1/fleet/servers?gone=1` lists the recently gone servers.
+
+**The page.** A server that isn't live shows an **Offline** badge in Health (closed at / lost at / gone), how long it
+ran, a **Timeline** (its alerts, deploy reports, generation swaps from its bundles, its start and its close or loss,
+newest first; an alert or swap with a bundle opens it), its **Debug bundles** and TPS / memory / players charts over
+**its whole life** (the 5-minute rollups past the last 2 hours). Debug bundles also show on a live server's page.
+Opening a bundle (`?bundle=<id>`; the alerts table on the Fleet page links an alert with `d.bundle` there, and every
+alert with a JobId to its server page) shows a summary card (what failed, the trigger, stage, error, triggers, build,
+kernel), then **Players**, **Server log**, **Player logs** (pick a player; not offered to the read-only role) and
+**Deploy and swaps** (the generation history, failed here, swap reports, refusals, heads, Fallback). The Fleet page has
+a **Recently gone** table so offline servers stay reachable.
 
 ### Instant wake
 

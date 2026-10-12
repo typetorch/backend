@@ -3,7 +3,8 @@
  * Cloudflare Worker with D1 (also SQLite, async-only). Here: `bun:sqlite` under Bun, `node:sqlite` under Node 22.5+,
  * both in WAL mode.
  */
-export type SqlValue = string | number | null;
+/** Uint8Array: a BLOB (the debug bundles' gzipped bodies). */
+export type SqlValue = string | number | null | Uint8Array;
 
 export interface FleetDb {
 	exec(sql: string): Promise<void>;

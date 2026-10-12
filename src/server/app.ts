@@ -7,7 +7,7 @@
  *   POST /v1/ingest                 gzip JSON { events, recordings, identities? } -> 202 after the raw write
  *   POST /v1/errors                 { j, errors: [{ fp, template, stack?, count, firstAt, lastAt, branch, build, realm, pids }] }
  *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
- *   POST /v1/fleet/heartbeat | report | alert | closing | deploy      (fleet/http.ts)
+ *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | bundle   (fleet/http.ts; bundle: kernel 0.5.3 debug bundles)
  *
  *   admin routes (admin token as Bearer, or the explorer's session cookie); the `web` role gets the game-data reads (GET,
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
@@ -31,6 +31,7 @@
  *        variant per experiment; nothing else from the file), or none
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
+ *   GET  /v1/fleet/servers/<job>/bundles | bundles/<id>   debug bundles (the web role reads them without playerLogs)
  *   GET  /v1/fleet/servers/<job>;  POST .../watch | .../commands;  GET .../commands/<id>;  GET /v1/fleet/debug/audit
  *        remote debug (plans/25, fleet/remote-debug-http.ts; the game side: GET /v1/fleet/commands, POST /v1/fleet/results
  *        with the API key)
@@ -1569,6 +1570,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 						accept: (topic, message) => bus.publish(topic, message as never),
 						// Plans/25: a watched JobId's heartbeat reply wakes its kernel's debug poll.
 						heartbeatReply: (job) => remoteDebug?.heartbeatReply(job),
+						// A debug bundle's player logs (what each client logged) are for owners: the web role reads the rest.
+						canReadPlayerLogs: () => gate !== undefined && "principal" in gate && gate.principal.role === "admin",
 					},
 					ip,
 				)) ?? json(404, { error: "not found" })
