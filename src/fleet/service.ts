@@ -650,6 +650,12 @@ export function parseBundle(raw: unknown, size?: number): ParsedBundle {
 	if (b.closing !== undefined && b.closing !== null && typeof b.closing !== "boolean") throw new FleetInputError("closing must be true or false");
 	for (const key of BUNDLE_OBJECTS) {
 		const v = b[key];
+		// Roblox's JSONEncode writes an empty table as [] (failure for a critical alert without details,
+		// playerLogs on an empty server): accepted as {}, or the bundle the alert names is lost to a 400.
+		if (Array.isArray(v) && v.length === 0) {
+			b[key] = {};
+			continue;
+		}
 		if (v !== undefined && v !== null && (typeof v !== "object" || Array.isArray(v))) throw new FleetInputError(`${key} must be an object`);
 	}
 	for (const key of BUNDLE_ARRAYS) {
