@@ -19,6 +19,7 @@
  *   GET  /v1/storage                bytes and files per part of the data folder
  *   GET  /v1/settings               live dials from data/settings.json
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
+ *   GET  /v1/identity/resolve?pid=a,b|uid=1,2  pid <-> UserId in bulk (<= 100); admin, or the lookup token (its only route)
  *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
  *   GET  /v1/place                  the game's name, live players and icon (TYPETORCH_UNIVERSE_ID, else the fleet's PlaceId; cached 60 s)
  *   GET  /v1/roblox/products        game pass / developer product names, prices and icons (?gamepass=1,2&product=3; <= 50 ids; cached 1 h)
@@ -171,6 +172,11 @@ const ERRORS_MAX_INFLATE = 2 * 1024 * 1024;
 /** The OAuth state cookie. */
 /** The answer to the web role on a route that changes something or is for owners. */
 const READ_ONLY = "read-only access: this needs the admin token or an owner's session";
+/** The answer to the lookup token anywhere but GET /v1/identity/resolve. */
+const LOOKUP_ONLY = "the lookup token only reaches GET /v1/identity/resolve";
+/** GET /v1/identity/resolve: pids and UserIds per request, and requests per address per minute. */
+const RESOLVE_MAX = 100;
+const RESOLVE_PER_MINUTE = 60;
 /**
  * The only non-GET routes the web role may call: the two read-only query routes (a POST body carries the filters / the
  * SELECT; nothing changes). Every other POST / PUT / PATCH / DELETE is refused to that role before any handler runs.
@@ -314,6 +320,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const auth = new Auth({
 		adminToken: config.adminToken,
 		apiKeys: config.apiKeys,
+		...(config.lookupToken ? { lookupToken: config.lookupToken } : {}),
 		sessions,
 		isOwner: (id) => access.isOwner(id),
 		isViewer: (id) => runtime.isViewer(id),
@@ -378,6 +385,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const newFleetJobs = new NewJobLimiter(() => runtime.get("fleetNewJobsPerMinute"), clock);
 	const testAlertLimiter = new RateLimiter(TEST_ALERTS_PER_MINUTE, clock);
 	const profileLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	const resolveLimiter = new RateLimiter(RESOLVE_PER_MINUTE, clock);
 	// Roblox names and avatars for the player detail: fixed Roblox hosts, cached in memory, capped (server/roblox-profiles.ts).
 	const robloxProfiles = new RobloxProfiles({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	// The sidebar's place card: name, live players and icon (server/roblox-place.ts: fixed hosts, no credentials, 60 s cache).
@@ -581,6 +589,46 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(200, { identities: await identities.byUid(uid) });
 		}
 		return json(200, { count: await identities.count(), backfill: Boolean(config.openCloudKey && config.universeId) });
+	}
+
+	/**
+	 * GET /v1/identity/resolve?pid=a,b&uid=1,2 (admin, or the lookup token): pid -> UserId and UserId -> pids in bulk, for
+	 * scripts and LLM agents. Ids only: no names, avatars or play history. Erased pids are unknown. Admin only among the
+	 * signed-in roles (the web role is refused, per the privacy check). Each call is logged with counts, never the ids.
+	 */
+	async function resolveIdentity(req: Request, url: URL, ip: string): Promise<Response> {
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		let caller = "lookup token";
+		if (!auth.hasLookupBearer(req)) {
+			const gate = adminGate(req, ip);
+			if ("response" in gate) return gate.response;
+			const user = gate.principal.user;
+			caller = user.kind === "roblox" ? `owner ${user.userId}` : "admin token";
+		}
+		if (req.method !== "GET") return json(405, { error: "GET only" });
+		if (!resolveLimiter.take(ip)) return tooMany(resolveLimiter.retryAfter(ip));
+		const list = (name: string) => [...new Set(url.searchParams.getAll(name).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean))];
+		const pids = list("pid");
+		const uidTexts = list("uid");
+		if (!pids.length && !uidTexts.length) return json(400, { error: "give pid=<pid>[,<pid>...] and/or uid=<UserId>[,<UserId>...]" });
+		if (pids.length + uidTexts.length > RESOLVE_MAX) return json(400, { error: `at most ${RESOLVE_MAX} pids and UserIds in one request` });
+		const badPid = pids.find((p) => !PID_PATTERN.test(p));
+		if (badPid !== undefined) return json(400, { error: "bad pid" });
+		const uids: number[] = [];
+		for (const text of uidTexts) {
+			const uid = parseUid(text);
+			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
+			if (!uids.includes(uid)) uids.push(uid);
+		}
+		const erased = (pid: string) => warehouse?.isErased(pid) === true;
+		const known = await identities.uids(pids.filter((p) => !erased(p)));
+		const byPid = pids.map((pid) => ({ pid, uid: known.get(pid) ?? null }));
+		const byUid: { uid: number; pids: string[] }[] = [];
+		for (const uid of uids) byUid.push({ uid, pids: (await identities.byUid(uid)).map((i) => i.pid).filter((p) => !erased(p)) });
+		log(`identity resolve: ${pids.length} pid(s), ${uids.length} UserId(s) by ${caller} from ${ip}`);
+		return json(200, { byPid, byUid });
 	}
 
 	/**
@@ -982,7 +1030,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const given = bearer(req) !== undefined;
 		if (given && authFailures.blocked(ip)) return plain();
 		const principal = auth.principal(req);
-		if (!principal && given) failedAuth(ip, "health check token");
+		if (!principal && given && !auth.hasLookupBearer(req)) failedAuth(ip, "health check token");
 		if (principal?.role !== "admin") return plain();
 		const memory = process.memoryUsage();
 		const out: Record<string, unknown> = {
@@ -1068,6 +1116,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const blocked = blockedResponse(ip);
 		if (blocked) return blocked;
 		if (!checkLimiter.take(ip)) return tooMany(checkLimiter.retryAfter(ip));
+		if (auth.hasLookupBearer(req)) return json(200, { ok: true, role: "lookup", via: "bearer", routes: ["GET /v1/identity/resolve"], service: "typetorch-backend", version: PACKAGE.version });
 		const principal = auth.principal(req);
 		if (principal && (principal.role === "game" || adminIpOk(ip))) {
 			const user = describeUser(principal);
@@ -1469,6 +1518,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!adminIpOk(ip)) return { response: notFound() };
 		const blocked = blockedResponse(ip);
 		if (blocked) return { response: blocked };
+		// The lookup token is a right token for one route: refused here without counting as a failed login.
+		if (auth.hasLookupBearer(req)) return { response: json(403, { error: LOOKUP_ONLY }) };
 		const principal = auth.principal(req);
 		if (!principal) {
 			if (bearer(req) !== undefined) failedAuth(ip, "admin request");
@@ -1578,6 +1629,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			);
 		}
 		if (path === "/v1/erasure") return method === "POST" ? erasure(req, ip) : json(405, { error: "POST only" });
+		// pid <-> UserId for the admin role and the lookup token (which reaches nothing else; readGate refuses it).
+		if (path === "/v1/identity/resolve") return resolveIdentity(req, url, ip);
 
 		// Everything else under /v1 reads (every signed-in role) or manages (admin only; `manage` answers 403 to the web role).
 		if (path.startsWith("/v1/")) {

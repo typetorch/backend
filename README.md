@@ -94,6 +94,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_API_KEY` | yes | The game role: game servers write events, heartbeats, deploy reports, alerts and error logs with it. 32+ characters. It reads nothing. |
 | `TYPETORCH_ADMIN_TOKEN` | yes | The admin role: the CLI (Bearer) and the explorer's token login read and manage with it. 32+ characters, **different** from the API key. |
 | `TYPETORCH_WEB_VIEWERS` | no | Comma-separated Roblox UserIds who may **Sign in with Roblox** as read-only viewers (the **web** role: they see everything, change nothing). Owners (the access list) are admins regardless. Also settable on the Settings page. See [Read-only access](#read-only-access-the-web-role). |
+| `TYPETORCH_LOOKUP_TOKEN` | no | A narrow token for scripts and LLM agents: it reaches `GET /v1/identity/resolve` (pid <-> UserId) and nothing else. 32+ characters, different from the API key and the admin token. Unset = that route takes the admin role only. See [The lookup token](#the-lookup-token-for-scripts-and-llm-agents). |
 | `TYPETORCH_API_KEY_PREVIOUS` | no | Also accepted as a game key, for a rotation without downtime: put the old key here, update the games, remove it. The server prints a reminder at every start while it is set. |
 | `TYPETORCH_DATA_DIR` | no | Where the data lives. `/data` in Docker, `./data` otherwise. |
 | `PORT`, `HOST` | no | Listen address (8787; `127.0.0.1`, `0.0.0.0` in Docker). |
@@ -317,6 +318,34 @@ A web session shows **read-only** next to the name in the sidebar, hides the Set
 from a server's page. The backend enforces all of it regardless of what the page hides: `GET /v1/auth/check` answers
 `role: "web"` for these credentials.
 
+### The lookup token (for scripts and LLM agents)
+
+An agent that only needs to turn a pid from a query into a Roblox UserId (or back) should not hold the admin token, which
+reads everything and manages the server. Set `TYPETORCH_LOOKUP_TOKEN` (`openssl rand -hex 32`) and give the agent that
+instead. It is accepted as a Bearer header on **one** route:
+
+```sh
+curl -H "Authorization: Bearer $TYPETORCH_LOOKUP_TOKEN" "https://backend.example.com/v1/identity/resolve?pid=k3J9x,Qa81z&uid=1001"
+# { "byPid": [{ "pid": "k3J9x", "uid": 1001 }, { "pid": "Qa81z", "uid": null }],
+#   "byUid": [{ "uid": 1001, "pids": ["k3J9x"] }] }
+```
+
+- `pid` and `uid` take comma-separated lists (or repeat the parameter), at most 100 ids in all; either or both. An unknown
+  or erased pid comes back as `uid: null`, an unknown UserId as `pids: []`, in the order asked.
+- The answer holds ids only: no names, avatars or play history.
+- Every other route answers the lookup token `403` before any handler runs, without counting it as a failed login. It
+  can't read the explorer's data, run SQL, open a server's debug view or erase anyone. `GET /v1/auth/check` answers
+  `role: "lookup"` for it.
+- The admin role (token or an owner's session) can call the route too; the **web** role can't.
+- `TYPETORCH_ADMIN_ALLOW_IPS` and the 5-failure lockout apply as on admin routes; 60 requests a minute per address.
+- Each call is logged as `identity resolve: <n> pid(s), <m> UserId(s) by <lookup token | admin token | owner <UserId>> from <address>`,
+  with counts only, never the ids.
+- To rotate or revoke it, change or remove the variable and restart.
+
+**Privacy.** The token hands out the pid <-> UserId link, which joins a player's whole pid-keyed history to their Roblox
+account (see [Privacy](#privacy)). Keep the agent inside the game's own team tooling: don't paste resolved UserIds next to
+play history into chat or social platforms, a ticket another company reads, or a model provider that trains on inputs.
+
 ### Sign in with Roblox
 
 The game's **owners** get in this way as admins: the owner list is the access list in the game's signed settings record,
@@ -423,6 +452,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 **game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an owner's explorer session
 cookie. **web** = the read-only role: a Roblox viewer's session cookie (no token); it gets every route marked `admin, web`
 below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / `PATCH` other than the two query routes.
+**lookup** = `TYPETORCH_LOOKUP_TOKEN` as a Bearer header: the routes marked `lookup` only, `403` everywhere else.
 **open** = no credentials.
 
 | Route | Role | What |
@@ -439,6 +469,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
+| `GET /v1/identity/resolve` | admin, lookup | `?pid=a,b&uid=1,2` (<= 100): `{ byPid: [{ pid, uid \| null }], byUid: [{ uid, pids }] }`; the [lookup token](#the-lookup-token-for-scripts-and-llm-agents)'s only route |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
 | `GET /v1/players/<pid>/errors` | admin, web | the error kinds one player hit |
@@ -1276,7 +1307,9 @@ redeploy. If `OPENCLOUD_API_KEY` is already set for erasure, add the messaging-s
   player (support) and answer Right to Erasure without a DataStore read. It is never part of the events, Parquet files,
   rollups, raw archives or Basin, and goes to one place only: Roblox itself, when an admin opens a player's detail (the
   server asks Roblox's public APIs for that UserId's name and headshot, without the pid; the answer stays in memory, see
-  [Player profiles](#player-profiles)).
+  [Player profiles](#player-profiles)). The [lookup token](#the-lookup-token-for-scripts-and-llm-agents), when set, also
+  hands the bare pid <-> UserId link to whoever holds it (an agent of the dev's own); that is still the dev's own tooling
+  only while the agent keeps it there.
 - **Erasure removes them**: the webhook (or `POST /v1/erasure` by pid) deletes the pid's rows everywhere, then the
   identity rows, and identity rows for an erased pid are refused afterwards. The erasure log never holds the UserId.
 - **Remote debug answers** (player names, logs, state) stay in the backend's memory for at most 3 minutes and in the
