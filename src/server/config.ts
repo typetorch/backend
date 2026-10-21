@@ -59,6 +59,11 @@ export interface ServerConfig {
 	apiKeys: string[];
 	/** The admin token: reads and manages (the CLI, the explorer's token login). */
 	adminToken: string;
+	/**
+	 * The lookup token (TYPETORCH_LOOKUP_TOKEN): reaches GET /v1/identity/resolve (pid <-> UserId) and nothing else, for
+	 * scripts and LLM agents that must not hold the admin token. Undefined = that route takes the admin role only.
+	 */
+	lookupToken?: string;
 	/** Roblox UserIds who may sign in with Roblox as read-only viewers (TYPETORCH_WEB_VIEWERS; the Settings page can add more). */
 	webViewers: number[];
 	/** Only these addresses may reach admin routes and the login (everything else gets 404). Undefined = any. */
@@ -311,6 +316,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		if (key.length < MIN_SECRET_LENGTH) throw new Error(`each TT_ANALYTICS_INGEST_TOKENS entry must be at least ${MIN_SECRET_LENGTH} characters`);
 		if (key === adminToken) throw new Error("an API key equals TYPETORCH_ADMIN_TOKEN; they must be different values");
 	}
+	const lookupToken = secret(env, "TYPETORCH_LOOKUP_TOKEN", false);
+	if (lookupToken && (lookupToken === adminToken || apiKeys.includes(lookupToken))) throw new Error("TYPETORCH_LOOKUP_TOKEN must differ from TYPETORCH_ADMIN_TOKEN and every API key");
 	let webViewers: number[];
 	try {
 		webViewers = parseUserIds(env.TYPETORCH_WEB_VIEWERS ?? "");
@@ -443,6 +450,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		parts,
 		apiKeys,
 		adminToken,
+		...(lookupToken ? { lookupToken } : {}),
 		webViewers,
 		tokenLogin: flag(env, "TYPETORCH_TOKEN_LOGIN", true),
 		trustProxy,
@@ -516,6 +524,7 @@ export function describeConfig(config: ServerConfig): string {
 		`parts=${[...config.parts].join("+")}`,
 		`data=${config.dataDir}`,
 		`api keys=${config.apiKeys.length}`,
+		`lookup token=${yes(config.lookupToken)}`,
 		`explorer=${config.webDir ? "served at /" : "not served"}`,
 		`token login=${config.tokenLogin ? "on" : "off"}`,
 		`web viewers=${config.webViewers.length}`,
