@@ -98,6 +98,15 @@ describe("debug bundles over HTTP", () => {
 		expect(await asJson(res)).toEqual({ ok: true, id: hex(1) });
 	});
 
+	test("empty object sections as [] (Roblox's JSONEncode of an empty table) are accepted as {}", async () => {
+		const res = await send(bundle({ id: hex(0xe1), j: "empty-sections-job", failure: [], playerLogs: [], fallback: [] }));
+		expect(res.status).toBe(202);
+		const read = await h.call(`/v1/fleet/bundles/${hex(0xe1)}`, { headers: admin });
+		const body = ((await asJson(read)) as { bundle: { body: Record<string, unknown> } }).bundle.body;
+		expect([body.failure, body.playerLogs, body.fallback]).toEqual([{}, {}, {}]);
+		expect((await send(bundle({ id: hex(0xe2), j: "empty-sections-job", failure: [1] }))).status).toBe(400);
+	});
+
 	test("a repeat id is idempotent: 202, nothing new stored", async () => {
 		const res = await send(bundle({ message: "a second copy" }));
 		expect(res.status).toBe(202);
