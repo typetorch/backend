@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/typetorch/docs/main/brand/typetorch.svg" width="64" alt="TypeTorch logo">
+
 # @typetorch/backend
 
 The TypeTorch backend: one server for everything a game's TypeTorch needs from the outside (plans: `plans/16-analytics.md`,

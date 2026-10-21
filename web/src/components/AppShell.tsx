@@ -152,9 +152,12 @@ function ThemeToggle() {
 function SidebarPanel({ search, onNavigate }: { search: string; onNavigate?: () => void }) {
 	return (
 		<div className="flex h-full min-h-0 flex-col text-sidebar-foreground">
-			<div className="px-5 pt-5 pb-4">
-				<div className="text-sm font-semibold">TypeTorch</div>
-				<div className="text-xs text-muted-foreground">Backend explorer</div>
+			<div className="flex items-center gap-3 px-5 pt-5 pb-4">
+				<img src="/favicon.svg" alt="" className="size-8 shrink-0" />
+				<div className="min-w-0">
+					<div className="text-sm font-semibold">TypeTorch</div>
+					<div className="text-xs text-muted-foreground">Backend explorer</div>
+				</div>
 			</div>
 			<div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
 				<div className="mb-3">

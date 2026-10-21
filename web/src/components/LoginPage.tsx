@@ -62,6 +62,7 @@ export function LoginPage({ options, initialError, onSignedIn }: { options: Logi
 		<div className="flex min-h-svh items-center justify-center p-4">
 			<Card className="w-full max-w-sm">
 				<CardHeader>
+					<img src="/favicon.svg" alt="" className="mb-2 size-12" />
 					<CardTitle>TypeTorch</CardTitle>
 					<CardDescription>Sign in to the backend explorer.</CardDescription>
 				</CardHeader>
