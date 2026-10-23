@@ -26,7 +26,6 @@ import type {
 	Identity,
 	PlaceCardInfo,
 	RobloxProductInfo,
-	RobloxRestart,
 	RobloxServerLogs,
 	PlayerProfile,
 	QueryInfo,
@@ -213,8 +212,6 @@ export function createApi(options: ApiOptions = {}) {
 		 */
 		robloxServerLogs: (job: string, params: { search?: string; order?: "asc" | "desc"; pageToken?: string; placeId?: number; placeVersion?: number } = {}, signal?: AbortSignal) =>
 			get<RobloxServerLogs>(`/v1/roblox/servers/${encodeURIComponent(job)}/logs${qs(params)}`, signal),
-		/** The universe's server restarts from Roblox, the latest start first. */
-		robloxRestarts: (signal?: AbortSignal) => get<{ restarts: RobloxRestart[]; cached: boolean }>("/v1/roblox/restarts", signal).then((r) => r.restarts),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		fleetAlerts: (params: { since?: number; level?: string; unacked?: boolean; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ alerts: FleetAlert[] }>(`/v1/fleet/alerts${qs(params)}`, signal).then((r) => r.alerts),

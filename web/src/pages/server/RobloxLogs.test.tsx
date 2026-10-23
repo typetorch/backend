@@ -3,7 +3,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { RobloxRestarts, RESTARTS_OFF_TEXT, restartTone } from "@/components/RobloxRestarts";
 import { api, ApiError } from "@/lib/api";
 import type { RobloxServerLogs } from "@/lib/types";
 import { fieldsText, ROBLOX_LOGS_OFF_TEXT, RobloxLogs, severityTone } from "./RobloxLogs";
@@ -81,22 +80,5 @@ describe("RobloxLogs", () => {
 		expect(severityTone("Warning")).toContain("warning");
 		expect(severityTone(null)).toBe("bg-muted-foreground");
 		expect(fieldsText({ a: 1, b: "x" })).toBe("a=1  b=x");
-		expect(restartTone("IN_PROGRESS")).toContain("warning");
-		expect(restartTone("Completed")).toContain("good");
-	});
-});
-
-describe("RobloxRestarts", () => {
-	it("lists restarts with their state", async () => {
-		vi.spyOn(api, "robloxRestarts").mockResolvedValue([{ id: "r1", state: "IN_PROGRESS", startedAt: "2026-10-09T11:00:00.000Z", endedAt: null, fields: { "remaining.servers": 12 } }]);
-		wrap(<RobloxRestarts />);
-		expect(await screen.findByText("IN_PROGRESS")).toBeTruthy();
-		expect(screen.getByText("remaining.servers=12")).toBeTruthy();
-	});
-
-	it("not set up: says what to set", async () => {
-		vi.spyOn(api, "robloxRestarts").mockRejectedValue(new ApiError(409, "off", "/x", { error: "off" }));
-		wrap(<RobloxRestarts />);
-		expect(await screen.findByText(RESTARTS_OFF_TEXT)).toBeTruthy();
 	});
 });

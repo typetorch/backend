@@ -27,7 +27,6 @@
  *                                   the errors and warnings Roblox kept for one game server (Open Cloud server management;
  *                                   OPENCLOUD_API_KEY with universe:read and TYPETORCH_UNIVERSE_ID; the place and version
  *                                   come from the server's heartbeats, the query can name them; cached 20 s)
- *   GET  /v1/roblox/restarts        the universe's server restarts from Roblox (same key; cached 15 s)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/players/<pid>/errors?window=..  the error kinds one player hit (at most 200), most occurrences first
@@ -401,7 +400,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// hosts, no credentials, 1 h cache, a cap on Roblox calls), and a per-IP cap on the requests.
 	const robloxProducts = new RobloxProducts({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const productsLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
-	// Roblox's server logs and restarts (server/roblox-servers.ts: Open Cloud with OPENCLOUD_API_KEY, short caches, a cap
+	// Roblox's logs for one game server (server/roblox-servers.ts: Open Cloud with OPENCLOUD_API_KEY, short caches, a cap
 	// under Roblox's 100 calls a minute), and a per-IP cap on the requests.
 	const robloxServers = new RobloxServers({
 		...(config.openCloudKey ? { apiKey: config.openCloudKey } : {}),
@@ -759,18 +758,6 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		try {
 			const page = await robloxServers.logs({ jobId: job, placeId, placeVersion, severity, search, ascending: order === "asc", ...(pageToken ? { pageToken } : {}) });
 			return json(200, { jobId: job, placeId, placeVersion, ...page });
-		} catch (error) {
-			return robloxServersFailure(error);
-		}
-	}
-
-	/** GET /v1/roblox/restarts (every signed-in role): the universe's server restarts from Roblox, the latest first. */
-	async function serverRestarts(url: URL, ip: string): Promise<Response> {
-		if ([...url.searchParams.keys()].length) return json(400, { error: "no parameters" });
-		if (!robloxServers.configured) return json(409, { error: "Roblox server management is off: set OPENCLOUD_API_KEY (scope universe:read) and TYPETORCH_UNIVERSE_ID" });
-		if (!serversLimiter.take(ip)) return tooMany(serversLimiter.retryAfter(ip));
-		try {
-			return json(200, await robloxServers.restarts());
 		} catch (error) {
 			return robloxServersFailure(error);
 		}
@@ -1740,7 +1727,6 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
-			if (path === "/v1/roblox/restarts") return method === "GET" ? serverRestarts(url, ip) : json(405, { error: "GET only" });
 			const logs = /^\/v1\/roblox\/servers\/([^/]+)\/logs$/.exec(path);
 			if (logs) return method === "GET" ? serverLogs(logs[1] as string, url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });

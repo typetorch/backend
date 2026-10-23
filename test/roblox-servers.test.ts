@@ -1,9 +1,9 @@
 /**
- * Roblox's server logs and restarts: GET /v1/roblox/servers/<job>/logs and GET /v1/roblox/restarts (Open Cloud server
- * management, through a fake fetch here), the heartbeat's `pv`, and the loose readers. All tokens and ids are made up.
+ * Roblox's server logs: GET /v1/roblox/servers/<job>/logs (Open Cloud server management, through a fake fetch here),
+ * the heartbeat's `pv`, and the loose reader. All tokens and ids are made up.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { logFilter, readLog, readRestart } from "../src/server/roblox-servers.ts";
+import { logFilter, readLog } from "../src/server/roblox-servers.ts";
 import { ADMIN, API, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 const UNIVERSE = 5_550_001;
@@ -19,14 +19,6 @@ function fakeRoblox(calls: Call[], state: { status: number }) {
 		const url = new URL(String(input));
 		calls.push({ url: String(input), ...(init ? { init } : {}) });
 		if (state.status !== 200) return new Response(JSON.stringify({ title: "nope" }), { status: state.status });
-		if (url.pathname === `/server-management/v1/universes/${UNIVERSE}/restarts`) {
-			return Response.json({
-				restartStatuses: {
-					"r-old": { state: "COMPLETED", startTime: "2026-10-08T10:00:00Z", endTime: "2026-10-08T10:05:00Z", places: [PLACE], remaining: { servers: 0, players: 0 } },
-					"r-new": { status: "IN_PROGRESS", startTime: "2026-10-09T11:00:00Z", phase: "DELAYING", remaining: { servers: 12, players: 40 } },
-				},
-			});
-		}
 		const logs = /^\/server-management\/v1\/universes\/(\d+)\/places\/(\d+)\/versions\/(\d+)\/game-servers\/([^/]+)\/logs$/.exec(url.pathname);
 		if (logs) {
 			const token = url.searchParams.get("pageToken");
@@ -42,7 +34,7 @@ function fakeRoblox(calls: Call[], state: { status: number }) {
 	}) as typeof fetch;
 }
 
-describe("Roblox server logs and restarts", () => {
+describe("Roblox server logs", () => {
 	let h: Harness;
 	let off: Harness;
 	const calls: Call[] = [];
@@ -71,13 +63,12 @@ describe("Roblox server logs and restarts", () => {
 		const before = calls.length;
 		expect((await get(`/v1/roblox/servers/${JOB}/logs`, {})).status).toBe(401);
 		expect((await get(`/v1/roblox/servers/${JOB}/logs`, { headers: bearer(API) })).status).toBe(401);
-		expect((await get(`/v1/roblox/restarts`, { method: "POST", headers: bearer(ADMIN) })).status).toBe(405);
+		expect((await get(`/v1/roblox/servers/${JOB}/logs`, { method: "POST", headers: bearer(ADMIN) })).status).toBe(405);
 		for (const q of ["?nope=1", "?severity=Err or", "?severity=a,b,c,d,e,f,g,h,i", "?order=up", "?placeVersion=0", "?placeId=abc", "?search=" + "x".repeat(201), "?severity=a&severity=b"]) {
 			const r = await get(`/v1/roblox/servers/${JOB}/logs${q}`);
 			expect({ q, status: r.status }).toEqual({ q, status: 400 });
 		}
 		expect((await get("/v1/roblox/servers/bad%20job/logs")).status).toBe(400);
-		expect((await get("/v1/roblox/restarts?x=1")).status).toBe(400);
 		expect(calls.length).toBe(before);
 	});
 
@@ -112,17 +103,10 @@ describe("Roblox server logs and restarts", () => {
 		expect((await asJson(await get(`/v1/roblox/servers/abc-unknown/logs?placeVersion=3&placeId=99`))).placeId).toBe(99);
 	});
 
-	test("restarts: normalised, the latest first", async () => {
-		const r = await asJson(await get("/v1/roblox/restarts"));
-		expect(r.restarts.map((x: { id: string }) => x.id)).toEqual(["r-new", "r-old"]);
-		expect(r.restarts[0]).toEqual({ id: "r-new", state: "IN_PROGRESS", startedAt: "2026-10-09T11:00:00.000Z", endedAt: null, fields: { phase: "DELAYING", "remaining.servers": 12, "remaining.players": 40 } });
-		expect(r.restarts[1]).toMatchObject({ state: "COMPLETED", endedAt: "2026-10-08T10:05:00.000Z", fields: { places: String(PLACE) } });
-	});
-
 	test("Roblox refusing: 403 is a 502 naming the scope, 400 stays 400; never the key", async () => {
 		h.setNow(h.now() + 60_000);
 		state.status = 403;
-		const r = await get("/v1/roblox/restarts");
+		const r = await get(`/v1/roblox/servers/${JOB}/logs?search=refused`);
 		expect(r.status).toBe(502);
 		const body = await r.text();
 		expect(body).toContain("universe:read");
@@ -135,13 +119,12 @@ describe("Roblox server logs and restarts", () => {
 
 	test("without the key or the universe: 409, nothing asked", async () => {
 		const before = calls.length;
-		expect((await off.call("/v1/roblox/restarts", { headers: bearer(ADMIN) })).status).toBe(409);
 		expect((await off.call(`/v1/roblox/servers/${JOB}/logs?placeVersion=1&placeId=2`, { headers: bearer(ADMIN) })).status).toBe(409);
 		expect(calls.length).toBe(before);
 	});
 });
 
-describe("loose readers", () => {
+describe("loose reader", () => {
 	test("filters: one severity is ==, quotes and control characters in the search are safe", () => {
 		expect(logFilter({})).toBeUndefined();
 		expect(logFilter({ severity: ["Error"] })).toBe('severity == "Error"');
@@ -160,9 +143,5 @@ describe("loose readers", () => {
 			fields: {},
 		});
 		expect(readLog({ messageTimestampMs: "soon", message: 5 })).toMatchObject({ time: null, message: null, fields: { messageTimestampMs: "soon", message: 5 } });
-	});
-
-	test("a restart without known names keeps its fields", () => {
-		expect(readRestart("x", { progress: 0.5, done: false })).toEqual({ id: "x", state: null, startedAt: null, endedAt: null, fields: { progress: 0.5, done: false } });
 	});
 });

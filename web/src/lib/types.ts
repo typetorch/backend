@@ -1349,15 +1349,6 @@ export interface RobloxServerLogs {
 	cached: boolean;
 }
 
-/** One of the universe's server restarts from Roblox (GET /v1/roblox/restarts). */
-export interface RobloxRestart {
-	id: string;
-	state: string | null;
-	startedAt: string | null;
-	endedAt: string | null;
-	fields: Record<string, string | number | boolean>;
-}
-
 /** GET /v1/roblox/products: a game pass or developer product, asked from Roblox by the backend (cached 1 h). */
 export interface RobloxProductInfo {
 	type: "gamepass" | "product";

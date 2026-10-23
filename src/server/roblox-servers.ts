@@ -1,19 +1,17 @@
 /**
- * Roblox's own view of the game servers (Open Cloud server management, beta), read with OPENCLOUD_API_KEY (scope
- * universe:read) on TYPETORCH_UNIVERSE_ID:
- *   - a game server's logs: the errors and warnings Roblox kept for one JobId (about 3 minutes behind; Roblox folds
- *     repeats into a count), filed under the place version the server ran (heartbeat `pv`);
- *   - the universe's server restarts (running and finished), keyed by restart id.
- * Both are beta and Roblox documents only part of their shapes, so each entry is read loosely: the fields the explorer
- * shows (time, severity, message; a restart's state and start time) are picked from the names Roblox uses, and the other
- * plain fields come along as `fields` (bounded, control characters taken out). The key goes only into `x-api-key`
+ * Roblox's logs for one game server (Open Cloud server management, beta: GameServers_ListGameServerLogs), read with
+ * OPENCLOUD_API_KEY (scope universe:read) on TYPETORCH_UNIVERSE_ID: the errors and warnings Roblox kept for a JobId
+ * (about 3 minutes behind; Roblox folds repeats into a count), filed under the place version the server ran (heartbeat
+ * `pv`). Roblox documents only part of the shape, so each entry is read loosely: the fields the explorer shows (time,
+ * severity, message, count, stack) are picked from the names Roblox uses, and the other plain fields come along as
+ * `fields` (bounded, control characters taken out). The key goes only into `x-api-key`
  * (opencloud.ts); it is never in an answer, an error or a log line.
  *
  * Roblox allows 100 calls a minute per key owner (shared with every other use of the key), so answers are kept for
- * `ttlMs` (logs 20 s, restarts 15 s), one lookup per query at a time, and at most `perMinute` (default 60) leave the server.
+ * `logsTtlMs` (20 s), one lookup per query at a time, and at most `perMinute` (default 60) leave the server.
  * Over that, an older answer is served when there is one, else RobloxServersError 429.
  */
-import { listGameServerLogs, listRestartStatuses, OpenCloudError } from "../opencloud.ts";
+import { listGameServerLogs, OpenCloudError } from "../opencloud.ts";
 import { RateLimiter } from "./http.ts";
 
 export interface GameServerLog {
@@ -44,16 +42,6 @@ export interface LogsQuery {
 	pageSize?: number;
 }
 
-export interface RestartStatus {
-	id: string;
-	/** Its state or phase as Roblox spells it (e.g. in progress, completed), when Roblox says. */
-	state: string | null;
-	startedAt: string | null;
-	endedAt: string | null;
-	/** The status' other plain fields, one level of nesting flattened to dotted names. */
-	fields: Record<string, string | number | boolean>;
-}
-
 export class RobloxServersError extends Error {
 	override name = "RobloxServersError";
 	constructor(
@@ -73,7 +61,6 @@ export interface RobloxServersOptions {
 	/** Open Cloud calls a minute at most (default 60, under Roblox's 100). */
 	perMinute?: number;
 	logsTtlMs?: number;
-	restartsTtlMs?: number;
 	timeoutMs?: number;
 }
 
@@ -101,7 +88,7 @@ export class RobloxServers {
 		this.limiter = new RateLimiter(o.perMinute ?? 60, this.clock);
 	}
 
-	/** Both reads need the key and the universe. */
+	/** Logs need the key and the universe. */
 	get configured(): boolean {
 		return Boolean(this.o.apiKey && this.o.universeId);
 	}
@@ -123,18 +110,6 @@ export class RobloxServers {
 				...(q.pageToken ? { pageToken: q.pageToken } : {}),
 			});
 			return { logs: page.logs.map(readLog), nextPageToken: page.nextPageToken ?? null };
-		});
-	}
-
-	/** The universe's restarts, the latest start first. */
-	async restarts(): Promise<{ restarts: RestartStatus[]; cached: boolean }> {
-		return this.cached("restarts", this.o.restartsTtlMs ?? 15_000, async () => {
-			const statuses = await listRestartStatuses(this.cloud());
-			const restarts = Object.entries(statuses)
-				.slice(0, 200)
-				.map(([id, status]) => readRestart(id, status));
-			restarts.sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
-			return { restarts };
 		});
 	}
 
@@ -277,14 +252,4 @@ export function readLog(r: Record<string, unknown>): GameServerLog {
 		placeVersion: placeVersion !== null && Number.isSafeInteger(placeVersion) ? placeVersion : null,
 	};
 	return { ...log, fields: rest(r, used) };
-}
-
-const RESTART_STATE = ["state", "status", "phase", "restartState", "restartStatus"];
-const RESTART_START = ["startTime", "createTime", "startedAt", "launchTime", "startTimeMs"];
-const RESTART_END = ["endTime", "completeTime", "completedAt", "finishTime", "endTimeMs"];
-
-export function readRestart(id: string, r: Record<string, unknown>): RestartStatus {
-	const used = new Set<string>();
-	const status = { id: clean(id, 128), state: pickText(r, used, RESTART_STATE, 64), startedAt: pickTime(r, used, RESTART_START), endedAt: pickTime(r, used, RESTART_END) };
-	return { ...status, fields: rest(r, used) };
 }

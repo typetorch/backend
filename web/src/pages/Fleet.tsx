@@ -7,7 +7,6 @@ import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { HealthBadge } from "@/components/HealthReasons";
-import { RobloxRestarts } from "@/components/RobloxRestarts";
 import { api } from "@/lib/api";
 import { fmtAgo, fmtDuration, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
@@ -566,9 +565,6 @@ export default function Fleet() {
 			</div>
 			<Section title="Alerts" description="Newest first (kept 90 days). An alert with a debug bundle opens it on its server's page.">
 				<QueryState query={alerts}>{(data) => <Alerts alerts={data} />}</QueryState>
-			</Section>
-			<Section title="Restarts" description="Server restarts of the whole game as Roblox lists them (Creator Hub's Server Management), the latest first.">
-				<RobloxRestarts />
 			</Section>
 			<Section title="Recently gone" description="Servers that closed or stopped sending heartbeats, the most recent first (kept 30 days): their pages show what happened.">
 				<QueryState query={gone}>{(data) => <RecentlyGone servers={data} />}</QueryState>

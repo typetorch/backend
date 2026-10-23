@@ -6,8 +6,8 @@
  *     Scope universe-datastores.objects:read (and :delete to remove the link).
  *   - MessagingService (v2 `:publishMessage`, the CLI's call too): remote debug's instant wake (fleet/remote-debug-wake.ts).
  *     Scope universe-messaging-service:publish.
- *   - Server management (v1, beta): a game server's error / warning logs and the universe's server restarts, read only
- *     (server/roblox-servers.ts). Scope universe:read.
+ *   - Server management (v1, beta): a game server's error / warning logs, read only (server/roblox-servers.ts).
+ *     Scope universe:read.
  */
 export const OPEN_CLOUD = "https://apis.roblox.com";
 
@@ -168,17 +168,4 @@ export async function listGameServerLogs(
 	const logs = (Array.isArray(body.gameServerLogs) ? body.gameServerLogs : []).filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null && !Array.isArray(e));
 	const next = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
 	return next ? { logs, nextPageToken: next } : { logs };
-}
-
-/**
- * The universe's server restarts (running and finished): `GET /server-management/v1/universes/{u}/restarts`, an object
- * of statuses keyed by restart id, as Roblox sent them.
- */
-export async function listRestartStatuses(options: OpenCloudOptions & { universeId: number }): Promise<Record<string, Record<string, unknown>>> {
-	const path = `/server-management/v1/universes/${options.universeId}/restarts`;
-	const response = await call(options, "GET", path);
-	if (response.status < 200 || response.status >= 300) fail("GET", path, response.status, response.text, SERVER_MANAGEMENT_READ_SCOPE);
-	const out: Record<string, Record<string, unknown>> = {};
-	for (const [id, status] of Object.entries(record(record(response.body).restartStatuses))) out[id] = record(status);
-	return out;
 }

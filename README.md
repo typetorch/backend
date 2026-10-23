@@ -38,7 +38,7 @@ is the same command.
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
 - [The analytics part (DuckDB)](#the-analytics-part-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite)
-- [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs and restarts](#roblox-server-logs-and-restarts))
+- [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -121,7 +121,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
 | `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) and Roblox's discovery document from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
-| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs and restarts](#roblox-server-logs-and-restarts) |
+| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
 | `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
@@ -479,7 +479,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
-| `GET /v1/roblox/servers/<job>/logs`, `GET /v1/roblox/restarts` | admin, web | Roblox's [server logs and restarts](#roblox-server-logs-and-restarts) (Open Cloud) |
+| `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
 | `GET /v1/identity/resolve` | admin, lookup | `?pid=a,b&uid=1,2` (<= 100): `{ byPid: [{ pid, uid \| null }], byUid: [{ uid, pids }] }`; the [lookup token](#the-lookup-token-for-scripts-and-llm-agents)'s only route |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
@@ -1024,8 +1024,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `GET /v1/identity/<pid>/profile` | admin, web | `{ pid, linked: false }`, or `{ pid, linked: true, uid, roblox: "ok" \| "partial" \| "not-found" \| "unavailable", cached, name, displayName, avatar }` (null when Roblox didn't say). 120 a minute per address |
 | `GET /v1/place` | admin, web | `{ configured: false }` while neither `TYPETORCH_UNIVERSE_ID` is set nor a heartbeat carried a PlaceId; else `{ configured: true, roblox: "ok" \| "partial" \| "unavailable", cached, placeId, universeId, name, playing, icon, url }` (null when Roblox didn't say). The server asks Roblox's public games and thumbnails APIs without credentials (never the Open Cloud key), caches 60 s, keeps an older answer while Roblox is down; the icon is only an https URL on `*.rbxcdn.com`. 120 a minute per address |
 | `GET /v1/roblox/products?gamepass=1,2&product=3` | admin, web | `{ items: [{ type: "gamepass" \| "product", id, status: "ok" \| "not_found" \| "unavailable", name, price, forSale, icon }] }` in request order (duplicates dropped). Ids are comma-separated positive integers, at most 50 in all; anything else is a 400 before Roblox is asked. The server asks Roblox's public APIs without credentials (never the Open Cloud key): `apis.roblox.com/game-passes/v1/game-passes/<id>/product-info`, `apis.roblox.com/developer-products/v1/developer-products/<id>/details`, and `thumbnails.roblox.com` (`/v1/game-passes`, `/v1/developer-products/icons` by the product's TargetId) for 150x150 icons, only https URLs on `*.rbxcdn.com`. Cached 1 h (not found 10 min, Roblox down 1 min, an older good answer kept while down), one lookup per item at a time, at most 240 Roblox calls a minute and 6 at once. 120 requests a minute per address |
-| `GET /v1/roblox/servers/<job>/logs?severity=&search=&order=&pageToken=&placeId=&placeVersion=` | admin, web | one page of the errors and warnings Roblox kept for a game server: `{ jobId, placeId, placeVersion, logs: [{ time, severity, message, count, stack, placeVersion, fields }], nextPageToken, cached }` ([below](#roblox-server-logs-and-restarts)) |
-| `GET /v1/roblox/restarts` | admin, web | `{ restarts: [{ id, state, startedAt, endedAt, fields }], cached }`: the universe's server restarts from Roblox, the latest start first |
+| `GET /v1/roblox/servers/<job>/logs?severity=&search=&order=&pageToken=&placeId=&placeVersion=` | admin, web | one page of the errors and warnings Roblox kept for a game server: `{ jobId, placeId, placeVersion, logs: [{ time, severity, message, count, stack, placeVersion, fields }], nextPageToken, cached }` ([below](#roblox-server-logs)) |
 | `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
@@ -1102,7 +1101,7 @@ section it still writes for kernels before 0.4), so it works even when a game's 
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs-and-restarts) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
+| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
 | `POST /v1/fleet/report` | game | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
 | `POST /v1/fleet/alert` | game | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k, d? }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`). `d` (kernel 0.5.2) is kept as the alert's `details` when it is a flat object (at most 16 keys; values strings of at most 1,000 bytes, numbers or booleans; at most 4 KB of JSON), else `details` is `null` (never a 400). `deploy_failed` carries `{ stage, error, attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }`; from 0.5.3 `d.bundle` names the [debug bundle](#debug-bundles-and-offline-history) that follows |
 | `POST /v1/fleet/bundle` | game | a kernel 0.5.3 [debug bundle](#debug-bundles-and-offline-history) (at most 512 KB, plain or `Content-Encoding: gzip`) -> `202 { ok: true, id }` |
@@ -1322,13 +1321,12 @@ it in `OPENCLOUD_API_KEY` on Coolify (as a secret) with `TYPETORCH_UNIVERSE_ID` 
 redeploy. If `OPENCLOUD_API_KEY` is already set for erasure, add the messaging-service API system with
 `universe-messaging-service:publish` to that key instead of making a second one.
 
-### Roblox server logs and restarts
+### Roblox server logs
 
-Roblox keeps each game server's errors and warnings and lists the universe's server restarts through Open Cloud's
-server management API (beta: [Observability](https://create.roblox.com/docs/cloud/reference/features/observability),
-`GameServers_ListGameServerLogs` and `Restarts_ListRestartStatuses`). With `OPENCLOUD_API_KEY` given the **universe:read**
-scope on the game and `TYPETORCH_UNIVERSE_ID`, the backend reads both for the explorer: the server page's **Roblox logs**
-section and the Fleet page's **Restarts** card.
+Roblox keeps each game server's errors and warnings and serves them per JobId through Open Cloud's server management
+API (beta: [Observability](https://create.roblox.com/docs/cloud/reference/features/observability),
+`GameServers_ListGameServerLogs`). With `OPENCLOUD_API_KEY` given the **universe:read** scope on the game and
+`TYPETORCH_UNIVERSE_ID`, the backend reads them for the server page's **Roblox logs** section.
 
 - Roblox files a server's logs under its place and **place version**. Kernels that send `pv` (game.PlaceVersion) in the
   heartbeat give the backend both; for an older kernel, or a server the fleet never heard of, the route answers 409 and
@@ -1336,13 +1334,12 @@ section and the Fleet page's **Restarts** card.
 - Filters go to Roblox as CEL: `severity` (comma-separated words, as Roblox spells them) becomes `severity in [...]`,
   `search` (<= 200 characters, case-insensitive full text) `search == "..."`. Newest first (`order=asc` for oldest
   first), 50 a page, `nextPageToken` for the next.
-- Roblox documents only part of these answers, so each entry is read loosely: the time, severity, message, repeat count
-  and stack (a restart's state, start and end) are picked from the names Roblox uses, every other plain field comes along
-  in `fields`. Logs show up about 3 minutes after the server writes them; Roblox folds repeated messages into a count.
+- Roblox documents only part of the answer, so each entry is read loosely: the time, severity, message, repeat count
+  and stack are picked from the names Roblox uses, every other plain field comes along in `fields`. Logs show up about 3 minutes after the server writes them; Roblox folds repeated messages into a count.
 - Roblox allows 100 calls a minute per key owner, shared with every other use of the key: logs are cached 20 s,
-  restarts 15 s, at most 60 calls a minute leave the backend (an older answer is served past that), and each address
-  may ask 120 times a minute. A refused key is a 502 naming the scope; a filter Roblox refuses is a 400. Both routes
-  answer 409 while the key or the universe isn't set.
+  at most 60 calls a minute leave the backend (an older answer is served past that), and each address
+  may ask 120 times a minute. A refused key is a 502 naming the scope; a filter Roblox refuses is a 400. The route
+  answers 409 while the key or the universe isn't set.
 
 ## Privacy
 
