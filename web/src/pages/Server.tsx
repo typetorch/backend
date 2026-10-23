@@ -31,6 +31,7 @@ import { DexTab } from "./server/DexTab";
 import { AuditTab, BudgetTab, BuildsTab, ErrorsTab, ModulesTab, NetworkTab } from "./server/InfoTabs";
 import { LogsTab, type PlayerLogRequest } from "./server/LogsTab";
 import { PlayersTab } from "./server/PlayersTab";
+import { RobloxLogs } from "./server/RobloxLogs";
 import { DebugBundles } from "./server/Bundles";
 import { isBundleId, lifeStart, lifetimeMs, offlineText } from "./server/history";
 import { DebugContext, type DebugContextValue, Tone, useFirstFetch } from "./server/shared";
@@ -257,9 +258,12 @@ function ServerView({ job }: { job: string }) {
 		<DebugBundles bundles={data.history.bundles} open={openBundle} onOpen={setBundle} readOnly={readOnly} />
 	) : null;
 	const since = lifeStart(data);
+	// Roblox's own logs for this JobId: for a live server and a gone one alike (no debug session needed).
+	const placeVersion = data.server?.placeVersion ?? status.data?.status?.placeVersion;
+	const robloxLogs = data.state !== "unknown" ? <RobloxLogs job={job} placeVersion={placeVersion} /> : null;
 	return (
 		<DebugContext.Provider value={context}>
-			<Header job={job} detail={data} placeVersion={status.data?.status?.placeVersion} />
+			<Header job={job} detail={data} placeVersion={placeVersion ?? undefined} />
 			{!live ? (
 				<>
 					<Gone detail={data} />
@@ -269,6 +273,7 @@ function ServerView({ job }: { job: string }) {
 						</Section>
 					) : null}
 					{data.state !== "unknown" ? bundles : null}
+					{robloxLogs}
 					{data.server || since !== undefined ? (
 						<Section title="Its whole life" description="TPS, memory and players from its heartbeats (5-minute averages past the last 2 hours; kept 30 days).">
 							<ServerCharts job={job} live={false} since={since} />
@@ -332,6 +337,7 @@ function ServerView({ job }: { job: string }) {
 						</TabsContent>
 					</Tabs>
 					{bundles}
+					{robloxLogs}
 				</>
 			)}
 		</DebugContext.Provider>

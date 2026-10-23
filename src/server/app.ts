@@ -23,6 +23,10 @@
  *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
  *   GET  /v1/place                  the game's name, live players and icon (TYPETORCH_UNIVERSE_ID, else the fleet's PlaceId; cached 60 s)
  *   GET  /v1/roblox/products        game pass / developer product names, prices and icons (?gamepass=1,2&product=3; <= 50 ids; cached 1 h)
+ *   GET  /v1/roblox/servers/<job>/logs?severity=a,b&search=&order=asc&pageToken=&placeId=&placeVersion=
+ *                                   the errors and warnings Roblox kept for one game server (Open Cloud server management;
+ *                                   OPENCLOUD_API_KEY with universe:read and TYPETORCH_UNIVERSE_ID; the place and version
+ *                                   come from the server's heartbeats, the query can name them; cached 20 s)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/players/<pid>/errors?window=..  the error kinds one player hit (at most 200), most occurrences first
@@ -101,6 +105,7 @@ import { BlessKeys, DEVICE_COOKIE, DEVICE_LIFE_MS, DeviceStore, agentLabel } fro
 import { InstanceKey } from "./instance-key.ts";
 import { RobloxPlace } from "./roblox-place.ts";
 import { MAX_PRODUCT_IDS, parseIdList, RobloxProducts } from "./roblox-products.ts";
+import { RobloxServers, RobloxServersError, SEARCH_MAX, SEVERITY_PATTERN } from "./roblox-servers.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
@@ -395,6 +400,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// hosts, no credentials, 1 h cache, a cap on Roblox calls), and a per-IP cap on the requests.
 	const robloxProducts = new RobloxProducts({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const productsLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	// Roblox's logs for one game server (server/roblox-servers.ts: Open Cloud with OPENCLOUD_API_KEY, short caches, a cap
+	// under Roblox's 100 calls a minute), and a per-IP cap on the requests.
+	const robloxServers = new RobloxServers({
+		...(config.openCloudKey ? { apiKey: config.openCloudKey } : {}),
+		...(config.universeId ? { universeId: config.universeId } : {}),
+		clock,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+	});
+	const serversLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Plans/25 remote debug: the kernel's polls and result posts per JobId, the explorer's commands and watches.
 	const debugLimiters = {
 		poll: new RateLimiter(90, clock),
@@ -699,6 +713,59 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (gamepass.length + product.length > MAX_PRODUCT_IDS) return json(400, { error: `at most ${MAX_PRODUCT_IDS} ids` });
 		if (!productsLimiter.take(ip)) return tooMany(productsLimiter.retryAfter(ip));
 		return json(200, { items: await robloxProducts.get({ gamepass, product }) });
+	}
+
+	/**
+	 * GET /v1/roblox/servers/<job>/logs (every signed-in role): one page of the errors and warnings Roblox kept for a game
+	 * server. Roblox files them under the server's place and place version: the fleet's row has both (heartbeat `p` /
+	 * `pv`), `placeId` / `placeVersion` in the query name them for a server the fleet doesn't know or an older kernel.
+	 */
+	async function serverLogs(job: string, url: URL, ip: string): Promise<Response> {
+		const allowed = new Set(["severity", "search", "order", "pageToken", "placeId", "placeVersion"]);
+		for (const key of url.searchParams.keys()) {
+			if (!allowed.has(key)) return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
+			if (url.searchParams.getAll(key).length > 1) return json(400, { error: `one ${key}` });
+		}
+		if (!/^[A-Za-z0-9-]{1,64}$/.test(job)) return json(400, { error: "bad JobId" });
+		const severity = (url.searchParams.get("severity") ?? "").split(",").filter((s) => s !== "");
+		if (severity.length > 8 || !severity.every((s) => SEVERITY_PATTERN.test(s))) return json(400, { error: "severity: up to 8 comma-separated words" });
+		const search = url.searchParams.get("search") ?? "";
+		if (search.length > SEARCH_MAX) return json(400, { error: `search: at most ${SEARCH_MAX} characters` });
+		const order = url.searchParams.get("order");
+		if (order !== null && order !== "asc" && order !== "desc") return json(400, { error: "order: asc or desc" });
+		const pageToken = url.searchParams.get("pageToken") ?? "";
+		if (pageToken.length > 2048 || /[^\x21-\x7e]/.test(pageToken)) return json(400, { error: "bad pageToken" });
+		const asId = (name: string): number | undefined | null => {
+			const raw = url.searchParams.get(name);
+			if (raw === null) return undefined;
+			return /^[1-9]\d{0,15}$/.test(raw) && Number.isSafeInteger(Number(raw)) ? Number(raw) : null;
+		};
+		const askedPlace = asId("placeId");
+		const askedVersion = asId("placeVersion");
+		if (askedPlace === null || askedVersion === null) return json(400, { error: "placeId and placeVersion are positive integers" });
+		if (!robloxServers.configured) return json(409, { error: "Roblox server management is off: set OPENCLOUD_API_KEY (scope universe:read) and TYPETORCH_UNIVERSE_ID" });
+		const known = fleet ? await fleet.placeOf(job) : null;
+		const placeId = askedPlace ?? known?.placeId ?? undefined;
+		const placeVersion = askedVersion ?? known?.placeVersion ?? undefined;
+		if (!placeId || !placeVersion) {
+			return json(409, {
+				error: "the server's place version isn't known (its kernel doesn't send `pv` yet): pass placeVersion (and placeId) in the query",
+				placeId: placeId ?? null,
+				placeVersion: placeVersion ?? null,
+			});
+		}
+		if (!serversLimiter.take(ip)) return tooMany(serversLimiter.retryAfter(ip));
+		try {
+			const page = await robloxServers.logs({ jobId: job, placeId, placeVersion, severity, search, ascending: order === "asc", ...(pageToken ? { pageToken } : {}) });
+			return json(200, { jobId: job, placeId, placeVersion, ...page });
+		} catch (error) {
+			return robloxServersFailure(error);
+		}
+	}
+
+	function robloxServersFailure(error: unknown): Response {
+		if (error instanceof RobloxServersError) return error.status === 429 ? tooMany(60) : json(error.status, { error: error.message });
+		return json(502, { error: "Roblox server management failed" });
 	}
 
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
@@ -1660,6 +1727,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
+			const logs = /^\/v1\/roblox\/servers\/([^/]+)\/logs$/.exec(path);
+			if (logs) return method === "GET" ? serverLogs(logs[1] as string, url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
 			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
 			const playerErrors = /^\/v1\/players\/([^/]+)\/errors$/.exec(path);

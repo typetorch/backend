@@ -61,6 +61,8 @@ export interface ServerInfo {
 	startedAt: string | null;
 	lastWrite: string | null;
 	placeId: number | null;
+	/** The place version the server runs (heartbeat `pv`, game.PlaceVersion); Fleet API only, null from older kernels. */
+	placeVersion?: number | null;
 	/** Running an A/B experiment pin (`x = 1`). */
 	experiment: boolean;
 	kernel: string | null;
