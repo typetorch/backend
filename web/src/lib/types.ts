@@ -589,6 +589,8 @@ export interface FleetServer {
 	kernel: string | null;
 	experiment: boolean | null;
 	placeId?: number | null;
+	/** The place version the server runs (heartbeat `pv`); null or missing from older kernels. */
+	placeVersion?: number | null;
 	serverVersion?: number | null;
 	/** Kernel 0.4.0: the heartbeat's budget summary `bu` (requests per minute next to Roblox's limits; fleet API only). */
 	budget?: ServerBudget | null;
@@ -1322,6 +1324,38 @@ export interface TestAlertResult {
 	ok: boolean;
 	status?: number;
 	error?: string;
+}
+
+/** One entry of Roblox's game server logs (GET /v1/roblox/servers/<job>/logs; Open Cloud, beta, read loosely). */
+export interface RobloxServerLog {
+	time: string | null;
+	/** As Roblox spells it (an error or a warning). */
+	severity: string | null;
+	message: string | null;
+	/** Identical messages Roblox folded into this entry, when it says. */
+	count: number | null;
+	stack: string | null;
+	placeVersion: number | null;
+	/** Roblox's other plain fields. */
+	fields: Record<string, string | number | boolean>;
+}
+
+export interface RobloxServerLogs {
+	jobId: string;
+	placeId: number;
+	placeVersion: number;
+	logs: RobloxServerLog[];
+	nextPageToken: string | null;
+	cached: boolean;
+}
+
+/** One of the universe's server restarts from Roblox (GET /v1/roblox/restarts). */
+export interface RobloxRestart {
+	id: string;
+	state: string | null;
+	startedAt: string | null;
+	endedAt: string | null;
+	fields: Record<string, string | number | boolean>;
 }
 
 /** GET /v1/roblox/products: a game pass or developer product, asked from Roblox by the backend (cached 1 h). */

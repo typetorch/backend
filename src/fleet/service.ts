@@ -238,6 +238,8 @@ export interface ParsedHeartbeat {
 	startedAt: number | null;
 	lastWrite: number | null;
 	placeId: number | null;
+	/** `pv` (game.PlaceVersion): the place version the server runs, what Roblox's server logs are filed under. */
+	placeVersion: number | null;
 	experiment: 0 | 1;
 	kernel: string | null;
 	appliedSeq: number | null;
@@ -337,6 +339,7 @@ export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedH
 		startedAt: toMs(int(b, "s")),
 		lastWrite: toMs(int(b, "u")),
 		placeId: int(b, "p"),
+		placeVersion: int(b, "pv"),
 		experiment: loose(b, "x") === 1 ? 1 : 0,
 		kernel: text(b, "v", 32),
 		appliedSeq: int(b, "q"),
@@ -712,6 +715,7 @@ interface ServerRow {
 	started_at: number | null;
 	last_write: number | null;
 	place_id: number | null;
+	place_version: number | null;
 	experiment: number | null;
 	kernel: string | null;
 	applied_seq: number | null;
@@ -733,9 +737,9 @@ interface ServerRow {
 
 /** Columns read for servers. The access code is not among them because it is never stored. */
 const SERVER_COLUMNS =
-	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen, closed_at, lost_at";
+	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, place_version, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen, closed_at, lost_at";
 
-/** Kernel 0.4.0 and 0.4.2 columns, added to fleet files made before them (name, type). */
+/** Kernel 0.4.0 and 0.4.2 columns (and `pv`'s place_version), added to fleet files made before them (name, type). */
 const ADDED_SERVER_COLUMNS: [string, string][] = [
 	["budget", "TEXT"],
 	["tps", "REAL"],
@@ -743,6 +747,7 @@ const ADDED_SERVER_COLUMNS: [string, string][] = [
 	["phys_fps", "REAL"],
 	["mem_mb", "REAL"],
 	["lua_mb", "REAL"],
+	["place_version", "INTEGER"],
 ];
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -761,6 +766,7 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		startedAt: iso(r.started_at),
 		lastWrite: iso(r.last_write),
 		placeId: r.place_id,
+		placeVersion: r.place_version ?? null,
 		experiment: r.experiment === 1,
 		kernel: r.kernel,
 		appliedSeq: r.applied_seq,
@@ -878,7 +884,7 @@ CREATE TABLE IF NOT EXISTS servers (
 	job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
 	last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
 	last_error TEXT, server_version INTEGER, sent_at INTEGER, budget TEXT, tps REAL, tps_min REAL, phys_fps REAL, mem_mb REAL, lua_mb REAL,
-	first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
+	place_version INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
 CREATE INDEX IF NOT EXISTS servers_open ON servers (last_seen) WHERE closed_at IS NULL AND lost_at IS NULL;
@@ -1076,19 +1082,19 @@ export class FleetService {
 
 	async applyHeartbeat(p: ParsedHeartbeat): Promise<void> {
 		const now = this.clock();
-		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, now, now];
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, now, now];
 		const job = p.job;
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
 		// One commit: the row, the history point (kernel 0.4.2: one per heartbeat) and the per-server cap on points.
 		await this.db.transaction((tx) => {
 			tx.run(
-				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen) ` +
-					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
+				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, place_version, first_seen, last_seen) ` +
+					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
 					`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
 					`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
 					`applied_seq = excluded.applied_seq, generation = excluded.generation, health = excluded.health, last_error = excluded.last_error, ` +
 					`server_version = excluded.server_version, sent_at = excluded.sent_at, budget = excluded.budget, tps = excluded.tps, tps_min = excluded.tps_min, ` +
-					`phys_fps = excluded.phys_fps, mem_mb = excluded.mem_mb, lua_mb = excluded.lua_mb, last_seen = excluded.last_seen, closed_at = NULL, lost_at = NULL`,
+					`phys_fps = excluded.phys_fps, mem_mb = excluded.mem_mb, lua_mb = excluded.lua_mb, place_version = excluded.place_version, last_seen = excluded.last_seen, closed_at = NULL, lost_at = NULL`,
 				row,
 			);
 			tx.run("INSERT INTO server_metrics (job, t, tps, tps_min, phys_fps, mem_mb, lua_mb, players) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [job, now, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.players]);
@@ -1416,6 +1422,12 @@ export class FleetService {
 		const cut = Math.floor(rawFrom / ROLLUP_MS) * ROLLUP_MS;
 		const rolled = await this.db.all<MetricRow>("SELECT t, tps, tps_min, phys_fps, mem_mb, lua_mb, players FROM server_metrics_5m WHERE job = ? AND t > ? AND t < ? ORDER BY t", [job, options.since - ROLLUP_MS, cut]);
 		return { points: [...rolled.map(pointOf), ...rows.map(pointOf)], rolledUntil: cut };
+	}
+
+	/** A server's PlaceId and place version (heartbeat `p` / `pv`), what Roblox files its logs under; null without a row. */
+	async placeOf(job: string): Promise<{ placeId: number | null; placeVersion: number | null } | null> {
+		const row = await this.db.first<{ place_id: number | null; place_version: number | null }>("SELECT place_id, place_version FROM servers WHERE job = ?", [job]);
+		return row ? { placeId: row.place_id, placeVersion: row.place_version ?? null } : null;
 	}
 
 	/**
