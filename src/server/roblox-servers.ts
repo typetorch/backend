@@ -61,6 +61,10 @@ export interface RobloxServersOptions {
 	/** Open Cloud calls a minute at most (default 60, under Roblox's 100). */
 	perMinute?: number;
 	logsTtlMs?: number;
+	/**
+	 * Per Open Cloud call (default 8 s), two tries at most: the answer must reach the explorer well inside the server's
+	 * 30 s idle timeout, or the proxy in front answers a bare 502 instead of the reason.
+	 */
 	timeoutMs?: number;
 }
 
@@ -115,7 +119,7 @@ export class RobloxServers {
 
 	private cloud() {
 		if (!this.o.apiKey || !this.o.universeId) throw new RobloxServersError("Roblox server management is off: set OPENCLOUD_API_KEY (scope universe:read) and TYPETORCH_UNIVERSE_ID", 409);
-		return { apiKey: this.o.apiKey, universeId: this.o.universeId, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), timeoutMs: this.o.timeoutMs ?? 10_000 };
+		return { apiKey: this.o.apiKey, universeId: this.o.universeId, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), timeoutMs: this.o.timeoutMs ?? 8000, attempts: 2 };
 	}
 
 	private async cached<T extends object>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T & { cached: boolean }> {
