@@ -27,7 +27,7 @@ is the same command.
 - [Settings](#settings)
 - [Runtime settings (the Settings page)](#runtime-settings-the-settings-page)
 - [Security](#security)
-- [Routes and roles](#routes-and-roles)
+- [Routes and roles](#routes-and-roles) ([API docs for agents](#api-docs-for-agents): OpenAPI, Swagger UI, llms.txt)
 - [Deploy on Coolify](#deploy-on-coolify)
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
@@ -512,9 +512,23 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PUT /v1/access/keys` | admin token only (not a session) | `{ keys: [base64 raw Ed25519 public key, ...] }` (4 at most) |
 | `POST /v1/central/report` | admin | send the origin report now |
 | `GET /healthz` | open | `{ ok }`; with the admin role: `state` (`ready`, `handover`, `failed`, `stopping`), memory, loader lag, row counts, the bus |
+| `GET /openapi.json`, `GET /docs`, `GET /llms.txt` | open (the admin allow list's addresses) | [machine-readable docs](#api-docs-for-agents): the OpenAPI 3.1 spec, Swagger UI over it, and an [llms.txt](https://llmstxt.org) for LLM agents |
 | `GET /` and the explorer's files | open | the built explorer (404 when it isn't built) |
 
 The explorer calls `/api/<route>` (its dev proxy's prefix); the backend takes `/api` off, so both reach the same routes.
+
+### API docs for agents
+
+`GET /openapi.json` is an OpenAPI 3.1 spec of every route above (roles, parameters, bodies, the query names), built from
+the route table in `src/server/openapi.ts`; `GET /docs` is Swagger UI over it (the pinned `swagger-ui-dist` from jsDelivr
+with SRI, under its own CSP; "Authorize" takes the admin, API or lookup token, or uses your explorer session);
+`GET /llms.txt` tells an LLM agent what this server is and links the spec, this README, the
+[TypeTorch docs](https://github.com/typetorch/docs) and the source. Point an agent at `https://<backend>/llms.txt` (and give it
+the [lookup token](#the-lookup-token-for-scripts-and-llm-agents) rather than the admin token when that is all it needs). The
+links are absolute when `TYPETORCH_PUBLIC_URL` is set, relative otherwise; under the explorer's prefix (`/api/docs`) the spec's
+server is `/api`. They hold no data or settings, and answer `404` outside `TYPETORCH_ADMIN_ALLOW_IPS` like the explorer.
+A new route goes into `ROUTES` in `src/server/openapi.ts`: `test/openapi.test.ts` fails when `app.ts` answers a path the
+spec doesn't list.
 
 ## Deploy on Coolify
 
