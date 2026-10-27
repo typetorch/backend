@@ -6,6 +6,11 @@
  * wake message: "Waking server..."), and the server long-polls for commands.
  * Each fetch on a tab is one audited, allow-listed, read-only command; its answer stays in this page's memory (gone on
  * reload). A closed, lost or unknown server shows what the fleet knows and sends no watch.
+ *
+ * Offline history: a server that isn't live (closed, lost, or "gone": its row is past the fleet's 30 days but alerts,
+ * reports or bundles still name it) shows an Offline badge, how long it ran, a Timeline (alerts, deploy reports, swaps
+ * from its debug bundles, the close or loss), its Debug bundles and charts over its whole life. Debug bundles show on
+ * live servers too; ?bundle=<id> opens one (the alerts page links there).
  */
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
@@ -26,9 +31,13 @@ import { DexTab } from "./server/DexTab";
 import { AuditTab, BudgetTab, BuildsTab, ErrorsTab, ModulesTab, NetworkTab } from "./server/InfoTabs";
 import { LogsTab, type PlayerLogRequest } from "./server/LogsTab";
 import { PlayersTab } from "./server/PlayersTab";
+import { RobloxLogs } from "./server/RobloxLogs";
+import { DebugBundles } from "./server/Bundles";
+import { isBundleId, lifeStart, lifetimeMs, offlineText } from "./server/history";
 import { DebugContext, type DebugContextValue, Tone, useFirstFetch } from "./server/shared";
 import { StateTab } from "./server/StateTab";
 import { ServerCharts, StatusTab } from "./server/StatusTab";
+import { Timeline } from "./server/Timeline";
 
 export const SERVER_TABS = [
 	{ id: "status", label: "Status" },
@@ -79,9 +88,22 @@ export default function ServerPage() {
 	return <ServerView key={jobId} job={jobId} />;
 }
 
+/** A server that isn't live: "Offline" and when it went (closed at / lost at), or gone. Colour never carries the meaning alone. */
+export function OfflineBadge({ detail }: { detail: FleetServerDetail }) {
+	const last = detail.server?.health;
+	return (
+		<span className="inline-flex flex-wrap items-baseline gap-1.5" title={last ? `Last reported health: ${last}` : undefined}>
+			<Tone tone="bg-muted-foreground">Offline</Tone>
+			<span className="text-xs font-normal text-muted-foreground">{offlineText(detail)}</span>
+		</span>
+	);
+}
+
 function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServerDetail; placeVersion?: number }) {
 	const s = detail?.server;
-	const uptime = s?.startedAt ? Date.now() - new Date(s.startedAt).getTime() : undefined;
+	const live = detail?.state === "live";
+	// Live: up since it started; not live: how long it ran (start to close or loss).
+	const uptime = detail ? lifetimeMs(detail) : undefined;
 	return (
 		<>
 			<PageHeader
@@ -104,16 +126,20 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 					<KeyValue label="Players">
 						{fmtInt(s.players)} / {fmtInt(s.maxPlayers)}
 					</KeyValue>
-					<KeyValue label="Up">{uptime !== undefined && uptime >= 0 ? fmtDuration(uptime) : "–"}</KeyValue>
-					<KeyValue label="Health">
-						<HealthBadge server={s} />
-					</KeyValue>
+					<KeyValue label={live ? "Up" : "Ran for"}>{uptime !== undefined && uptime >= 0 ? fmtDuration(uptime) : "–"}</KeyValue>
+					<KeyValue label="Health">{live ? <HealthBadge server={s} /> : <OfflineBadge detail={detail as FleetServerDetail} />}</KeyValue>
 					<KeyValue label="Place version">{placeVersion ?? "–"}</KeyValue>
 					<KeyValue label="Last heartbeat">{fmtAgo(s.lastSeen)}</KeyValue>
 					<KeyValue label="Type">{s.serverType ?? "–"}</KeyValue>
 				</div>
+			) : detail?.state === "gone" ? (
+				<div className="flex flex-wrap gap-x-6 gap-y-1.5">
+					<KeyValue label="Health">
+						<OfflineBadge detail={detail} />
+					</KeyValue>
+				</div>
 			) : null}
-			{s && reasonLines(s).length ? (
+			{s && live && reasonLines(s).length ? (
 				<section aria-label="Why this server needs a look" className="space-y-1">
 					<div className="text-xs font-medium text-muted-foreground">Why it is {s.health && s.health !== "ok" ? s.health : "flagged"}</div>
 					<ReasonList lines={reasonLines(s)} />
@@ -135,19 +161,29 @@ function Connection({ live, connected, lastPollAt, watchError, watching, waking 
 	return <Tone tone="bg-[var(--status-warning)]">{waking ? WAKING_TEXT : watching ? CONNECTING_TEXT : "Opening a session"}</Tone>;
 }
 
+/** Shown once a gone JobId's row is past the fleet's keep (30 days after it closes or is lost). */
+export const GONE_TEXT = "The fleet no longer has this server's heartbeats (kept 30 days after it goes). What it still holds is below.";
+
 function Gone({ detail }: { detail: FleetServerDetail }) {
 	const s = detail.server;
 	if (detail.state === "unknown")
 		return (
 			<Alert>
 				<AlertTitle>No heartbeat from this JobId</AlertTitle>
-				<AlertDescription>The fleet keeps a server for a day after it goes. Nothing to debug.</AlertDescription>
+				<AlertDescription>The fleet keeps a server's history for 30 days after it goes. Nothing to debug.</AlertDescription>
+			</Alert>
+		);
+	if (detail.state === "gone")
+		return (
+			<Alert>
+				<AlertTitle>Gone</AlertTitle>
+				<AlertDescription>{GONE_TEXT}</AlertDescription>
 			</Alert>
 		);
 	const text =
 		detail.state === "closed"
-			? `This server closed at ${fmtTime(s?.closedAt ?? s?.lastSeen)} UTC: nothing to debug.`
-			: `This server stopped sending heartbeats at ${fmtTime(s?.lostAt ?? s?.lastSeen)} UTC: nothing to debug.`;
+			? `This server closed at ${fmtTime(s?.closedAt ?? s?.lastSeen)} UTC: nothing to debug. Its history is below.`
+			: `This server stopped sending heartbeats at ${fmtTime(s?.lostAt ?? s?.lastSeen)} UTC: nothing to debug. Its history is below.`;
 	return (
 		<Alert>
 			<AlertTitle>{detail.state === "closed" ? "Closed" : "Lost"}</AlertTitle>
@@ -179,6 +215,9 @@ function ServerView({ job }: { job: string }) {
 	if (wakingNow !== waking) setWaking(wakingNow);
 
 	const [tabParam, setTab] = useParam("tab", "status");
+	// The open debug bundle (?bundle=<id>: the alerts page links there; anything but a bundle id is ignored).
+	const [bundleParam, setBundle] = useParam("bundle");
+	const openBundle = isBundleId(bundleParam) ? bundleParam : "";
 	// (the remote ops below are declared before any early return: hooks run in the same order every render)
 	// The audit (who sent which command, from which address) is for owners; a viewer's page has no fetches anyway.
 	const tabs = readOnly ? SERVER_TABS.filter((t) => t.id !== "audit") : SERVER_TABS;
@@ -215,15 +254,29 @@ function ServerView({ job }: { job: string }) {
 			</>
 		);
 	const data = detail.data;
+	const bundles = data.history ? (
+		<DebugBundles bundles={data.history.bundles} open={openBundle} onOpen={setBundle} readOnly={readOnly} />
+	) : null;
+	const since = lifeStart(data);
+	// Roblox's own logs for this JobId: for a live server and a gone one alike (no debug session needed).
+	const placeVersion = data.server?.placeVersion ?? status.data?.status?.placeVersion;
+	const robloxLogs = data.state !== "unknown" ? <RobloxLogs job={job} placeVersion={placeVersion} /> : null;
 	return (
 		<DebugContext.Provider value={context}>
-			<Header job={job} detail={data} placeVersion={status.data?.status?.placeVersion} />
+			<Header job={job} detail={data} placeVersion={placeVersion ?? undefined} />
 			{!live ? (
 				<>
 					<Gone detail={data} />
-					{data.server ? (
-						<Section title="Last hour" description="TPS, memory and players from its heartbeats.">
-							<ServerCharts job={job} live={false} />
+					{data.state !== "unknown" && data.history ? (
+						<Section title="Timeline" description="Alerts, deploy reports, generation swaps (from its debug bundles) and how it ended, newest first.">
+							<Timeline detail={data} onBundle={setBundle} />
+						</Section>
+					) : null}
+					{data.state !== "unknown" ? bundles : null}
+					{robloxLogs}
+					{data.server || since !== undefined ? (
+						<Section title="Its whole life" description="TPS, memory and players from its heartbeats (5-minute averages past the last 2 hours; kept 30 days).">
+							<ServerCharts job={job} live={false} since={since} />
 						</Section>
 					) : null}
 				</>
@@ -283,6 +336,8 @@ function ServerView({ job }: { job: string }) {
 							{readOnly ? null : <AuditTab active={tab === "audit"} job={job} />}
 						</TabsContent>
 					</Tabs>
+					{bundles}
+					{robloxLogs}
 				</>
 			)}
 		</DebugContext.Provider>

@@ -24,6 +24,8 @@ services:
       TYPETORCH_ADMIN_TOKEN: ${TYPETORCH_ADMIN_TOKEN:?set TYPETORCH_ADMIN_TOKEN to 32+ random characters, different from the API key}
       # Optional.
       TYPETORCH_API_KEY_PREVIOUS: ${TYPETORCH_API_KEY_PREVIOUS:-}
+      # A token that only resolves pid <-> UserId (GET /v1/identity/resolve), for scripts and LLM agents.
+      TYPETORCH_LOOKUP_TOKEN: ${TYPETORCH_LOOKUP_TOKEN:-}
       TYPETORCH_PUBLIC_URL: ${TYPETORCH_PUBLIC_URL:-}
       # Coolify's proxy is one hop in front: client addresses come from X-Forwarded-For.
       TYPETORCH_TRUST_PROXY: ${TYPETORCH_TRUST_PROXY:-1}

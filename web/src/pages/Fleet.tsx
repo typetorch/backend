@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useState } from "react";
+import { Link } from "react-router";
 import { cn } from "cn";
 import { EmptyState, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
@@ -7,10 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { HealthBadge } from "@/components/HealthReasons";
 import { api } from "@/lib/api";
-import { fmtAgo, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
+import { fmtAgo, fmtDuration, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
-import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, ServerBudget } from "@/lib/types";
+import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, GoneServer, ServerBudget } from "@/lib/types";
 // Plans/25: every JobId here links to its server page (/servers/<JobId>).
+import { alertBundle } from "./server/history";
 import { JobLink } from "./server/shared";
 
 type StreamState = "connecting" | "live" | "retrying";
@@ -67,7 +69,10 @@ function useFleetStream(branch: string): { state: StreamState; log: LiveEvent[] 
 				// keep the type
 			}
 			setLog((current) => [{ at: Date.now(), type, text: describe(type, data) }, ...current].slice(0, 50));
-			if (type === "server") void client.invalidateQueries({ queryKey: ["fleet", "servers"] });
+			if (type === "server") {
+				void client.invalidateQueries({ queryKey: ["fleet", "servers"] });
+				void client.invalidateQueries({ queryKey: ["fleet", "gone"] });
+			}
 			if (type === "alert" || type === "alert_ack") void client.invalidateQueries({ queryKey: ["fleet", "alerts"] });
 			if (type === "report" || type === "deploy") void client.invalidateQueries({ queryKey: ["fleet", "report"] });
 		};
@@ -378,7 +383,7 @@ function Report({ data }: { data: FleetReports }) {
 	);
 }
 
-const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
+export const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
 	{ id: "at", header: "When (UTC)", type: "date", accessor: (a) => a.at, cell: (a) => fmtTime(a.at), className: "font-mono text-xs tabular-nums" },
 	{
 		id: "level",
@@ -405,10 +410,64 @@ const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
 		cell: (a) => (a.job && a.job !== "cli" ? <JobLink job={a.job} /> : (a.job ?? "–")),
 		className: "font-mono text-xs",
 	},
+	// Kernel 0.5.3: an alert followed by a debug bundle (d.bundle) opens it on the server's page.
+	{
+		id: "bundle",
+		header: "Bundle",
+		type: "boolean",
+		accessor: (a) => alertBundle(a.details) !== undefined,
+		cell: (a) => {
+			const bundle = alertBundle(a.details);
+			return a.job && a.job !== "cli" && bundle ? (
+				<Link to={`/servers/${encodeURIComponent(a.job)}?bundle=${bundle}`} className="text-xs underline-offset-2 hover:underline">
+					Open bundle
+				</Link>
+			) : null;
+		},
+		format: (_v, a) => (alertBundle(a.details) ? "bundle" : ""),
+	},
 	{ id: "branch", header: "Branch", type: "enum", accessor: (a) => a.branch ?? null, defaultHidden: true },
 	{ id: "source", header: "Source", type: "enum", accessor: (a) => a.source ?? null, defaultHidden: true },
 	{ id: "acked", header: "Acked", type: "boolean", accessor: (a) => a.acked, className: "text-xs" },
 ];
+
+/** How long a gone server ran: start to close or loss. */
+function ranFor(s: GoneServer): number | null {
+	const start = s.startedAt ? new Date(s.startedAt).getTime() : Number.NaN;
+	const end = new Date(s.closedAt ?? s.lostAt ?? s.lastSeen ?? "").getTime();
+	return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+}
+
+const goneAt = (s: GoneServer) => s.closedAt ?? s.lostAt ?? null;
+
+export const GONE_COLUMNS: DataColumn<GoneServer>[] = [
+	{ id: "job", header: "Job", accessor: (s) => s.job, cell: (s) => <JobLink job={s.job} />, className: "font-mono text-xs" },
+	{ id: "state", header: "Ended", type: "enum", options: ["closed", "lost"], accessor: (s) => s.state },
+	{ id: "goneAt", header: "When (UTC)", type: "date", accessor: goneAt, cell: (s) => fmtTime(goneAt(s)), className: "font-mono text-xs tabular-nums" },
+	{ id: "ranFor", header: "Ran for", type: "number", accessor: ranFor, cell: (s) => (ranFor(s) === null ? "–" : fmtDuration(ranFor(s) as number)), className: "tabular-nums" },
+	{ id: "branch", header: "Branch", type: "enum", accessor: (s) => s.branch },
+	{ id: "artifact", header: "Artifact", type: "enum", accessor: (s) => s.artifact, className: "font-mono text-xs" },
+	{ id: "health", header: "Last health", type: "enum", accessor: (s) => s.health ?? "unknown", className: "text-xs" },
+	{ id: "players", header: "Players", accessor: (s) => s.players, defaultHidden: true },
+	{ id: "kernel", header: "Kernel", type: "enum", accessor: (s) => s.kernel, className: "text-xs" },
+	{ id: "lastError", header: "Last error", accessor: (s) => s.lastError, defaultHidden: true, className: "max-w-80 truncate text-xs" },
+];
+
+/** Plans/25 offline history: servers that closed or were lost (kept 30 days), so their pages stay reachable. */
+function RecentlyGone({ servers }: { servers: GoneServer[] }) {
+	return (
+		<DataTable
+			id="fleet-gone"
+			label="Recently gone servers"
+			columns={GONE_COLUMNS}
+			data={servers}
+			rowId={(s) => s.job}
+			defaultSort={[{ id: "goneAt", desc: true }]}
+			maxHeight="24rem"
+			empty={<EmptyState>No server closed or was lost in the last 30 days.</EmptyState>}
+		/>
+	);
+}
 
 function Alerts({ alerts }: { alerts: FleetAlert[] }) {
 	return (
@@ -435,6 +494,7 @@ export default function Fleet() {
 	});
 	const report = useQuery({ queryKey: ["fleet", "report", branch], queryFn: ({ signal }) => api.fleetReport(branch ? { branch } : {}, signal) });
 	const alerts = useQuery({ queryKey: ["fleet", "alerts"], queryFn: ({ signal }) => api.fleetAlerts({ limit: 100 }, signal) });
+	const gone = useQuery({ queryKey: ["fleet", "gone", branch], queryFn: ({ signal }) => api.fleetGoneServers(branch || undefined, signal) });
 	const stream = useFleetStream(branch);
 	const streamTone =
 		stream.state === "live" ? "bg-[var(--status-good)]" : stream.state === "retrying" ? "bg-[var(--status-critical)]" : "bg-[var(--status-warning)]";
@@ -503,8 +563,11 @@ export default function Fleet() {
 					)}
 				</Section>
 			</div>
-			<Section title="Alerts" description="Newest first (kept 90 days).">
+			<Section title="Alerts" description="Newest first (kept 90 days). An alert with a debug bundle opens it on its server's page.">
 				<QueryState query={alerts}>{(data) => <Alerts alerts={data} />}</QueryState>
+			</Section>
+			<Section title="Recently gone" description="Servers that closed or stopped sending heartbeats, the most recent first (kept 30 days): their pages show what happened.">
+				<QueryState query={gone}>{(data) => <RecentlyGone servers={data} />}</QueryState>
 			</Section>
 		</>
 	);

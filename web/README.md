@@ -1,40 +1,45 @@
-# TypeTorch web: analytics explorer
+# TypeTorch web: the backend explorer
 
-An internal, client-only explorer for the self-hosted TypeTorch analytics server (`../analytics`): overview, Roblox
-numbers, retention, funnels, players (timeline and node graph), flow, experiments, first-session signals, events,
-the live fleet, and raw queries / read-only SQL. Vite + React + TypeScript + Tailwind + shadcn/ui; no SSR.
+The TypeTorch backend's web explorer: overview, Roblox numbers, retention, funnels, players (profile, timeline and node
+graph, errors), flow, experiments, first-session signals, events, the live fleet and one server's page (remote debug,
+debug bundles, offline history), error logs, performance, raw queries / read-only SQL, and the runtime settings. Vite +
+React + TypeScript + Tailwind + shadcn/ui; no SSR.
 
-Part of TypeTorch. Read `../TypeTorch.md` (hub) and `../plans/07-web-mobile.md` (this repo's plan) first.
+It lives in the backend repo (`web/`) and ships with it: `bun run web:install && bun run web:build` in the repo root (or
+the Docker image) builds it into `web/dist`, and the backend serves it at `/`, where people sign in (the admin token,
+Sign in with Roblox, or Sign in with typetorch.dev; see the backend README). This README is about working on it.
 
 ## Run it
 
-Needs Bun (package manager), Node 22.12+ (runs Vite) and a running analytics server.
+Needs Bun (package manager), Node 22.12+ (runs Vite: `scripts/vite.mjs`, because Vite's restart hangs under Bun) and a
+backend to talk to.
 
 ```sh
 bun install
-bun run dev -- --env-file C:\Users\<you>\.config\typetorch\fleet\fleet.env    # http://localhost:5173
-bun run local -- --env-file <same file>                                      # build, then serve dist/ at http://localhost:4173
-bun run preview -- --env-file <same file>                                    # serve an existing dist/
+bun run dev -- --game <game repo>                     # http://localhost:5173
+bun run build && bun run preview -- --game <game repo>   # serve dist/ at http://localhost:4173
 ```
 
-`--env-file` is needed once: the path (never the token) is remembered in `.explorer.local` (git-ignored), and without any, `~/.config/typetorch/fleet/fleet.env` (the `bun run local` server's file) is used when it exists. So after the first run, `bun run dev` is enough.
+From the backend repo's root, `bun run web:dev -- --game <game repo>` is the same as `bun run dev` here.
 
-`--env-file` is the analytics server's own env file: the explorer reads `TT_ANALYTICS_HOST`, `TT_ANALYTICS_PORT`
-(0.0.0.0 means this machine) and `TT_ANALYTICS_ADMIN_TOKEN` from it. For a remote server, use a file (or environment
-variables) with `TT_ANALYTICS_URL=https://...` and `TT_ANALYTICS_ADMIN_TOKEN`. Instead of the flag you can set
-`TT_ANALYTICS_ENV_FILE`. `--port <n>` picks another port.
+The dev and preview servers proxy `/api/...` to the backend (`server/proxy.ts`, wired up in `vite.config.ts`):
 
-**The token never reaches the browser.** The page calls `/api/...`; the dev or preview server forwards it to the
-analytics server and adds `Authorization: Bearer <admin token>` (`server/proxy.ts`). Because any other page open in
-the same browser could also send requests to localhost, a guard runs first: only the read endpoints the explorer uses
-(`POST /v1/query/*`, `POST /v1/sql`, `GET /v1/queries`, `GET /v1/storage`, `GET /v1/identity`, `GET /v1/identity/<pid>/profile`, `POST /v1/identity/backfill`, `GET /v1/rollups/*`, `GET /v1/fleet/servers|reports|alerts|stream`,
-the server page's `GET /v1/fleet/servers/<JobId>` (and `/metrics`), `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit`
-(remote debug: the commands are read-only and audited by the backend, as `token`),
-`GET /v1/admin/settings`, `GET /healthz`), only from the explorer's own origin (Sec-Fetch-Site / Origin), JSON bodies only. Erasure, ingest,
-alert acks and settings changes (`PATCH /v1/admin/settings`, the test alert) are never forwarded. The servers listen on localhost only. No CORS change is needed on the
-analytics server.
+- **Token:** `TYPETORCH_ADMIN_TOKEN` from the game repo's `.env` (`--game`); `TYPETORCH_ENV_FILE` names another file, and a
+  `TYPETORCH_ADMIN_TOKEN` in the environment wins over both.
+- **Backend URL:** `--url <url>` (or `TYPETORCH_BACKEND_URL`), else the game's `typetorch.json` `backend.url` (the old
+  `fleet.url` is still read), else `http://127.0.0.1:8787`. The token only goes to https URLs or to this machine.
+- `--port <n>` picks another port.
 
-Without a token every `/api` call answers 503 and the header shows "no admin token".
+Without a token every `/api` call answers 503 (the script warns at start when there is no `--game`).
+
+**The token never reaches the browser.** The page calls `/api/...`; the proxy forwards it to the backend and adds
+`Authorization: Bearer <admin token>`. With the proxy there is no login page: `GET /v1/auth/check` answers `admin`. Because
+any other page open in the same browser could also send requests to localhost, a guard runs first: only the routes in
+`ALLOWED_ROUTES` (`server/proxy.ts`: the queries, SQL, rollups, storage, identity lookups and backfill, error kinds, the
+live stream, the fleet lists, marks and streams, one server's page with its metrics and remote debug watch / commands /
+answers and the debug audit, `GET /v1/admin/settings`, `GET /v1/auth/check`, `GET /healthz`), only from the explorer's own
+origin (Sec-Fetch-Site / Origin), JSON bodies only. Erasure, ingest, alert acks, the owner list and settings changes
+(`PATCH /v1/admin/settings`, the test alert) are never forwarded. The servers listen on localhost only.
 
 ## Pages
 
@@ -54,8 +59,9 @@ backend's rule): up to an hour per minute, up to 6 hours per 5 minutes, up to a 
 | Experiments | per-variant numbers and the plain "how sure" sentences, per player or per server (A/B pins) | `experiment` |
 | First session | early leaves per zone, screen loops, back-and-forth, idle / camera spins / repeated clicks from recordings | `confusion` |
 | Events | top event names by kind, then the newest rows of a picked name (fleet rows without props) | `top-events`, `events` |
-| Fleet | live servers, latest deploy, alerts, live event log, updated over the SSE stream; every JobId links to its server page | fleet API |
-| Server (`/servers/<JobId>`, under Fleet in the sidebar) | one server: header (branch, build, kernel, players, uptime, health, place version, last heartbeat), TPS / memory / players over the last hour, and while it runs, read-only remote debug tabs: Status (the kernel's status()), Logs (the server's log ring, Fetch newer; a player's client log), Players, State (Modules > State: roots, tables, pages, key filter), Dex (lazy tree from `game`, properties), Modules and Assets, Builds, Budget, Errors, Network, Audit. Until the server's first poll it says "Connecting" (its next heartbeat, up to 30 s), or "Waking server..." when the watch reply says a wake message went out (the backend's instant wake: it polls within seconds; the page re-reads the server every second meanwhile). A closed, lost or unknown server says so and sends no watch. Answers stay in the page (not the query cache, localStorage or the URL; these tables don't save their view) | `/v1/fleet/servers/<JobId>`, `.../metrics`, remote debug (backend README) |
+| Fleet | live servers (Health badge with the reasons a server is flagged), latest deploy, alerts, live event log, updated over the SSE stream, and a Recently gone table; every JobId links to its server page | fleet API |
+| Server (`/servers/<JobId>`, under Fleet in the sidebar) | one server: header (branch, build, kernel, players, uptime, health, place version, last heartbeat), TPS / memory / players over the last hour, and while it runs, read-only remote debug tabs: Status (the kernel's status()), Logs (the server's log ring, Fetch newer; a player's client log), Players, State (Modules > State: roots, tables, pages, key filter), Dex (lazy tree from `game`, properties), Modules and Assets, Builds, Budget, Errors, Network, Audit. Until the server's first poll it says "Connecting" (its next heartbeat, up to 30 s), or "Waking server..." when the watch reply says a wake message went out (the backend's instant wake: it polls within seconds; the page re-reads the server every second meanwhile). Below, live or gone, Roblox logs: the errors and warnings Roblox kept for the JobId (search, newest / oldest first, Load more; asks for the place version when an older kernel didn't report it). A closed, lost or unknown server says so and sends no watch. Answers stay in the page (not the query cache, localStorage or the URL; these tables don't save their view) | `/v1/fleet/servers/<JobId>`, `.../metrics`, remote debug (backend README), `/v1/roblox/servers/<JobId>/logs` |
+| Errors | error kinds in the window (realm, branch, artifact filter, text search) with counts, players and sparklines; a row opens the kind in a side sheet (`?fp=`) with its stack, series and the players who hit it | `/v1/errors`, `/v1/errors/<fp>`, `/v1/errors/<fp>/players` |
 | Performance | client fps / memory / ping and server TPS / memory / players over time, by device class, input, screen size, branch or build, p10 / p50 / p90 / p99 (p99 marked worst); orange / red flags on possible problems (`lib/perf-thresholds.ts`); deploy marks on every chart (hover: what it was; click: filter to that build); compare builds or before vs after a mark; live servers' TPS and memory with each one's history; a Step picker | `perf-client`, `perf-server`, `perf-compare`, `/v1/fleet/marks`, `/v1/fleet/servers/<job>/metrics` |
 | Query | any named query with JSON filters/options (raw JSON), and read-only SQL over `events` / `recordings` | `/v1/query/*`, `/v1/sql` |
 | Settings | the backend's runtime settings (alert webhook as set / not set, format and levels, admin allow list, token login, rate limits, retention): source badge per field (Dashboard / Env / Default), bounds checked before saving, Reset to env, Send test alert, recent changes, the env-only names. Through the dev proxy it is read only | `/v1/admin/settings` |
@@ -118,13 +124,15 @@ bun run typecheck
 bun run build       # dist/ (pages, charts and the graph view load on demand)
 ```
 
-`src/lib/types.ts` mirrors the analytics queries' result types (a separate repo: copied, not imported); keep it in
-step when a query changes. `src/components/ui/` is shadcn/ui as generated (radix, nova preset); chart colors and
+`src/lib/types.ts` mirrors the backend's query and route result types (`../src/queries`, `../src/fleet`, ...: copied,
+not imported, since the explorer builds on its own); keep it in step when a query or route changes. `src/components/ui/` is shadcn/ui as generated (radix, nova preset); chart colors and
 status colors are tokens in `src/index.css`.
 
 ## Open issues
 
-- Not hosted anywhere: it's a local tool. Hosting it (e.g. the Cloudflare Worker in plan 07) needs a server side that
-  holds the token and an auth layer in front.
+- The proxy's `ALLOWED_ROUTES` has not kept up with every page: `GET /v1/place` (the sidebar's place card),
+  `GET /v1/roblox/products` (product names), `GET /v1/experiments` and `/v1/experiments/<key>/players`,
+  `GET /v1/errors/<fp>/players`, `GET /v1/players/<pid>/errors`, and the debug bundle routes are refused through it (403),
+  so those parts stay empty under `bun run dev`. The explorer the backend serves at `/` has them all.
 - `top-events` counts server rows (no pid) as one "player" (an analytics query quirk).
 - Days are UTC everywhere (the server's day buckets).

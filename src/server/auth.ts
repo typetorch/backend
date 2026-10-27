@@ -1,10 +1,12 @@
 /**
- * Who is calling. Three roles:
+ * Who is calling. Three roles (and one narrow token):
  *   game  - the API key (or the previous one while it is rotated): game servers write events, heartbeats, deploy reports,
  *           alerts and error logs. It reads nothing.
  *   admin - the admin token as a Bearer header (the CLI), or an explorer session cookie: reads and manages.
  *   web   - read-only: a Roblox viewer's explorer session (the `webViewers` setting; Sign in with Roblox only, no token).
  *           Sees everything the explorer shows, changes nothing.
+ *   lookup - the lookup token (TYPETORCH_LOOKUP_TOKEN, optional) as a Bearer header: GET /v1/identity/resolve only (pid <->
+ *           UserId), for scripts and LLM agents. It is not a Principal: every other route refuses it before any handler runs.
  *
  * Explorer sessions are random 32-byte ids kept in memory (12 h idle / 7 days at most), bound to a hash of the admin
  * token they were made with, so changing the token ends them all. A session is made by pasting the admin token or by
@@ -124,6 +126,8 @@ export type SignedIn = Principal & { role: AccessRole };
 export interface AuthOptions {
 	adminToken: string;
 	apiKeys: readonly string[];
+	/** The lookup token, when one is set. */
+	lookupToken?: string;
 	sessions: Sessions;
 	/** Whether a Roblox user is (still) an owner; an owner's (admin) session ends when this turns false. */
 	isOwner(userId: number): boolean;
@@ -145,6 +149,11 @@ export class Auth {
 
 	hasGameKey(req: Request): boolean {
 		return tokenIn(bearer(req), this.o.apiKeys);
+	}
+
+	/** The request carries the lookup token as a Bearer header (never true while no lookup token is set). */
+	hasLookupBearer(req: Request): boolean {
+		return this.o.lookupToken !== undefined && tokenIn(bearer(req), [this.o.lookupToken]);
 	}
 
 	/** The role a Roblox user signs in with: owners are admins, viewers get the web role, anyone else stays out. */

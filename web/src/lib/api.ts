@@ -10,6 +10,7 @@ import type {
 	BackfillResult,
 	BlessedDevice,
 	DebugAuditEntry,
+	DebugBundle,
 	ErrorDetail,
 	ErrorList,
 	ErrorPlayers,
@@ -21,10 +22,12 @@ import type {
 	FleetReports,
 	FleetServerDetail,
 	FleetServers,
+	GoneServer,
 	Health,
 	Identity,
 	PlaceCardInfo,
 	RobloxProductInfo,
+	RobloxServerLogs,
 	PlayerProfile,
 	QueryInfo,
 	QueryName,
@@ -205,6 +208,12 @@ export function createApi(options: ApiOptions = {}) {
 		/** Game pass and developer product names, prices and icons (at most 50 ids in all; the backend asks Roblox). */
 		robloxProducts: (ids: { gamepass?: number[]; product?: number[] }, signal?: AbortSignal) =>
 			get<{ items: RobloxProductInfo[] }>(`/v1/roblox/products${qs({ gamepass: ids.gamepass?.join(","), product: ids.product?.join(",") })}`, signal).then((r) => r.items),
+		/**
+		 * One page of the errors and warnings Roblox kept for a game server (the backend asks Open Cloud). The place and
+		 * version come from the server's heartbeats; a 409 with `placeVersion: null` means it must be given here.
+		 */
+		robloxServerLogs: (job: string, params: { search?: string; order?: "asc" | "desc"; pageToken?: string; placeId?: number; placeVersion?: number } = {}, signal?: AbortSignal) =>
+			get<RobloxServerLogs>(`/v1/roblox/servers/${encodeURIComponent(job)}/logs${qs(params)}`, signal),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		fleetAlerts: (params: { since?: number; level?: string; unacked?: boolean; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ alerts: FleetAlert[] }>(`/v1/fleet/alerts${qs(params)}`, signal).then((r) => r.alerts),
@@ -237,6 +246,10 @@ export function createApi(options: ApiOptions = {}) {
 		/** Live servers with the heartbeat-metrics fields when the backend has them (tps, memMb...). */
 		perfServers: (branch?: string, signal?: AbortSignal) => get<{ servers: PerfServer[]; players: number }>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		/** One server's TPS / memory history (the heartbeat-metrics contract; 404 on backends before it). */
+		/** Closed and lost servers, the most recently gone first (the Fleet page's Recently gone). */
+		fleetGoneServers: (branch?: string, signal?: AbortSignal) => get<{ servers: GoneServer[] }>(`/v1/fleet/servers${qs({ gone: 1, branch, limit: 200 })}`, signal).then((r) => r.servers),
+		/** Kernel 0.5.3: one debug bundle with its body (no playerLogs for the read-only role). */
+		debugBundle: (id: string, signal?: AbortSignal) => get<{ bundle: DebugBundle }>(`/v1/fleet/bundles/${encodeURIComponent(id)}`, signal).then((r) => r.bundle),
 		serverMetrics: (job: string, since?: number, signal?: AbortSignal) =>
 			get<{ points: ServerMetricPoint[] }>(`/v1/fleet/servers/${encodeURIComponent(job)}/metrics${qs({ since })}`, signal).then((r) => r.points),
 		/** Plans/25: one server by JobId (any age), its state and its remote debug session. */

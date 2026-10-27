@@ -589,6 +589,8 @@ export interface FleetServer {
 	kernel: string | null;
 	experiment: boolean | null;
 	placeId?: number | null;
+	/** The place version the server runs (heartbeat `pv`); null or missing from older kernels. */
+	placeVersion?: number | null;
 	serverVersion?: number | null;
 	/** Kernel 0.4.0: the heartbeat's budget summary `bu` (requests per minute next to Roblox's limits; fleet API only). */
 	budget?: ServerBudget | null;
@@ -626,8 +628,11 @@ export interface ServerBudget {
 	mem?: { t?: number; h?: number };
 }
 
-/** Plans/25: what the server page knows about one JobId (any age). */
-export type ServerState = "live" | "closed" | "lost" | "unknown";
+/**
+ * Plans/25: what the server page knows about one JobId (any age). "gone": the servers row is gone (kept 30 days) but
+ * alerts, deploy reports, debug bundles or metrics still name the JobId.
+ */
+export type ServerState = "live" | "closed" | "lost" | "gone" | "unknown";
 
 /** Plans/25: the remote debug session of one server, as the backend sees it. */
 export interface DebugStatus {
@@ -648,12 +653,100 @@ export interface WatchReply extends DebugStatus {
 	wake?: boolean;
 }
 
-/** GET /v1/fleet/servers/<job>: its servers row of any age (rows go a day after a server is gone), its state, the debug session. */
+/**
+ * GET /v1/fleet/servers/<job>: its servers row of any age (rows go 30 days after a server is gone), its state, the debug
+ * session and its history (missing from backends before debug bundles).
+ */
 export interface FleetServerDetail {
-	server: (FleetServer & { closedAt?: string | null; lostAt?: string | null }) | null;
+	server: (FleetServer & { closedAt?: string | null; lostAt?: string | null; firstSeen?: string }) | null;
 	state: ServerState;
 	debug: DebugStatus;
+	history?: ServerHistory;
 }
+
+/** What the fleet still holds about a JobId, newest first. */
+export interface ServerHistory {
+	alerts: FleetAlert[];
+	reports: FleetServerReport[];
+	bundles: BundleSummary[];
+	/** Generation starts from its bundles' deploy history. */
+	swaps: BundleSwap[];
+	/** The time range its metrics cover (raw points and 5-minute rollups), unix ms. */
+	metrics: { from: number | null; to: number | null };
+}
+
+/** One deploy report of one server. */
+export interface FleetServerReport {
+	seq: number;
+	branch: string | null;
+	artifact: string | null;
+	job: string;
+	result: string;
+	error: string | null;
+	seconds: number | null;
+	at: number;
+	generation?: number | null;
+	kernel?: string | null;
+	players?: number | null;
+}
+
+/** Kernel 0.5.3: a debug bundle's summary (GET /v1/fleet/servers/<job>/bundles). */
+export interface BundleSummary {
+	id: string;
+	job: string;
+	/** What made the kernel send it: an alert code, start_failed, health_rollback, players_moved, closing, manual. */
+	code: string;
+	level: "critical" | "warning" | "info";
+	message: string;
+	closing: boolean;
+	at: number;
+	time: string;
+	kernel: string | null;
+	branch: string | null;
+	artifact: string | null;
+	seq: number | null;
+	generation: number | null;
+	players: number;
+	size: number;
+	stage?: string | null;
+	error?: string | null;
+}
+
+export interface BundleSwap {
+	at: number;
+	name: string | null;
+	artifact: string | null;
+	branch: string | null;
+	reason: string | null;
+	loadSeconds: number | null;
+	swapSeconds: number | null;
+	bundle: string;
+}
+
+/**
+ * GET /v1/fleet/bundles/<id>: the summary and the posted JSON. Every section is the kernel's, untrusted: the page shows
+ * it as text only. `playerLogs` is missing for the read-only role (`playerLogsHidden`).
+ */
+export interface DebugBundle extends BundleSummary {
+	body: BundleBody;
+	playerLogsHidden?: boolean;
+}
+
+export interface BundleBody {
+	/** `triggers`: every trigger that joined this bundle (those within 3 s of the first). */
+	failure?: { stage?: unknown; error?: unknown; report?: unknown; triggers?: unknown } | null;
+	server?: Record<string, unknown> | null;
+	deploy?: Record<string, unknown> | null;
+	fallback?: Record<string, unknown> | null;
+	alerts?: unknown[] | null;
+	players?: unknown[] | null;
+	serverLog?: unknown[] | null;
+	playerLogs?: Record<string, unknown> | null;
+	[key: string]: unknown;
+}
+
+/** GET /v1/fleet/servers?gone=1: a closed or lost server. */
+export type GoneServer = FleetServer & { closedAt: string | null; lostAt: string | null; state: "closed" | "lost"; firstSeen?: string };
 
 /** GET /v1/fleet/debug/audit: one queued command (never its answer, never a player's UserId). */
 export interface DebugAuditEntry {
@@ -1231,6 +1324,29 @@ export interface TestAlertResult {
 	ok: boolean;
 	status?: number;
 	error?: string;
+}
+
+/** One entry of Roblox's game server logs (GET /v1/roblox/servers/<job>/logs; Open Cloud, beta, read loosely). */
+export interface RobloxServerLog {
+	time: string | null;
+	/** As Roblox spells it (an error or a warning). */
+	severity: string | null;
+	message: string | null;
+	/** Identical messages Roblox folded into this entry, when it says. */
+	count: number | null;
+	stack: string | null;
+	placeVersion: number | null;
+	/** Roblox's other plain fields. */
+	fields: Record<string, string | number | boolean>;
+}
+
+export interface RobloxServerLogs {
+	jobId: string;
+	placeId: number;
+	placeVersion: number;
+	logs: RobloxServerLog[];
+	nextPageToken: string | null;
+	cached: boolean;
 }
 
 /** GET /v1/roblox/products: a game pass or developer product, asked from Roblox by the backend (cached 1 h). */

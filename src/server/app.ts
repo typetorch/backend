@@ -7,7 +7,7 @@
  *   POST /v1/ingest                 gzip JSON { events, recordings, identities? } -> 202 after the raw write
  *   POST /v1/errors                 { j, errors: [{ fp, template, stack?, count, firstAt, lastAt, branch, build, realm, pids }] }
  *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
- *   POST /v1/fleet/heartbeat | report | alert | closing | deploy      (fleet/http.ts)
+ *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | bundle   (fleet/http.ts; bundle: kernel 0.5.3 debug bundles)
  *
  *   admin routes (admin token as Bearer, or the explorer's session cookie); the `web` role gets the game-data reads (GET,
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
@@ -19,9 +19,14 @@
  *   GET  /v1/storage                bytes and files per part of the data folder
  *   GET  /v1/settings               live dials from data/settings.json
  *   GET  /v1/identity?pid=|uid=     pid <-> UserId; POST /v1/identity/backfill
+ *   GET  /v1/identity/resolve?pid=a,b|uid=1,2  pid <-> UserId in bulk (<= 100); admin, or the lookup token (its only route)
  *   GET  /v1/identity/<pid>/profile  the pid's UserId and its Roblox name, display name and avatar (server-side, cached)
  *   GET  /v1/place                  the game's name, live players and icon (TYPETORCH_UNIVERSE_ID, else the fleet's PlaceId; cached 60 s)
  *   GET  /v1/roblox/products        game pass / developer product names, prices and icons (?gamepass=1,2&product=3; <= 50 ids; cached 1 h)
+ *   GET  /v1/roblox/servers/<job>/logs?severity=a,b&search=&order=asc&pageToken=&placeId=&placeVersion=
+ *                                   the errors and warnings Roblox kept for one game server (Open Cloud server management;
+ *                                   OPENCLOUD_API_KEY with universe:read and TYPETORCH_UNIVERSE_ID; the place and version
+ *                                   come from the server's heartbeats, the query can name them; cached 20 s)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/players/<pid>/errors?window=..  the error kinds one player hit (at most 200), most occurrences first
@@ -31,6 +36,7 @@
  *        variant per experiment; nothing else from the file), or none
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
  *   GET  /v1/fleet/servers | servers/<job>/metrics | reports | alerts | stream;  POST /v1/fleet/alerts/<id>/ack
+ *   GET  /v1/fleet/servers/<job>/bundles | bundles/<id>   debug bundles (the web role reads them without playerLogs)
  *   GET  /v1/fleet/servers/<job>;  POST .../watch | .../commands;  GET .../commands/<id>;  GET /v1/fleet/debug/audit
  *        remote debug (plans/25, fleet/remote-debug-http.ts; the game side: GET /v1/fleet/commands, POST /v1/fleet/results
  *        with the API key)
@@ -44,6 +50,7 @@
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
+ *   GET  /openapi.json | /docs | /llms.txt   the OpenAPI spec, Swagger UI over it, llms.txt (openapi.ts; the allow list's addresses)
  *   GET  /v1/auth/check             which role the credentials have and which parts run (no side effects); 401 says which logins are on;
  *                                   both carry `dashboard` (the typetorch.dev broker's origin) while that login is on
  *   POST /v1/auth/login | logout    explorer session by pasting the admin token
@@ -95,6 +102,7 @@ import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
 import { meterSqlite, parseStatsWindow, ServerMetrics, STATS_WINDOWS } from "./metrics.ts";
+import { DOCS_CSP, SWAGGER_INIT, llmsTxt, openApiSpec, swaggerPage } from "./openapi.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
 import { CentralLogin } from "./central-login.ts";
 import { CentralReporter, type ReportResult } from "./central-report.ts";
@@ -102,6 +110,7 @@ import { BlessKeys, DEVICE_COOKIE, DEVICE_LIFE_MS, DeviceStore, agentLabel } fro
 import { InstanceKey } from "./instance-key.ts";
 import { RobloxPlace } from "./roblox-place.ts";
 import { MAX_PRODUCT_IDS, parseIdList, RobloxProducts } from "./roblox-products.ts";
+import { RobloxServers, RobloxServersError, SEARCH_MAX, SEVERITY_PATTERN } from "./roblox-servers.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
@@ -175,6 +184,11 @@ const ERRORS_MAX_INFLATE = 2 * 1024 * 1024;
 /** The OAuth state cookie. */
 /** The answer to the web role on a route that changes something or is for owners. */
 const READ_ONLY = "read-only access: this needs the admin token or an owner's session";
+/** The answer to the lookup token anywhere but GET /v1/identity/resolve. */
+const LOOKUP_ONLY = "the lookup token only reaches GET /v1/identity/resolve";
+/** GET /v1/identity/resolve: pids and UserIds per request, and requests per address per minute. */
+const RESOLVE_MAX = 100;
+const RESOLVE_PER_MINUTE = 60;
 /**
  * The only non-GET routes the web role may call: the two read-only query routes (a POST body carries the filters / the
  * SELECT; nothing changes). Every other POST / PUT / PATCH / DELETE is refused to that role before any handler runs.
@@ -321,6 +335,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const auth = new Auth({
 		adminToken: config.adminToken,
 		apiKeys: config.apiKeys,
+		...(config.lookupToken ? { lookupToken: config.lookupToken } : {}),
 		sessions,
 		isOwner: (id) => access.isOwner(id),
 		isViewer: (id) => runtime.isViewer(id),
@@ -385,6 +400,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const newFleetJobs = new NewJobLimiter(() => runtime.get("fleetNewJobsPerMinute"), clock);
 	const testAlertLimiter = new RateLimiter(TEST_ALERTS_PER_MINUTE, clock);
 	const profileLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	const resolveLimiter = new RateLimiter(RESOLVE_PER_MINUTE, clock);
 	// Roblox names and avatars for the player detail: fixed Roblox hosts, cached in memory, capped (server/roblox-profiles.ts).
 	const robloxProfiles = new RobloxProfiles({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	// The sidebar's place card: name, live players and icon (server/roblox-place.ts: fixed hosts, no credentials, 60 s cache).
@@ -394,6 +410,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// hosts, no credentials, 1 h cache, a cap on Roblox calls), and a per-IP cap on the requests.
 	const robloxProducts = new RobloxProducts({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const productsLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	// Roblox's logs for one game server (server/roblox-servers.ts: Open Cloud with OPENCLOUD_API_KEY, short caches, a cap
+	// under Roblox's 100 calls a minute), and a per-IP cap on the requests.
+	const robloxServers = new RobloxServers({
+		...(config.openCloudKey ? { apiKey: config.openCloudKey } : {}),
+		...(config.universeId ? { universeId: config.universeId } : {}),
+		clock,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+	});
+	const serversLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Plans/25 remote debug: the kernel's polls and result posts per JobId, the explorer's commands and watches.
 	const debugLimiters = {
 		poll: new RateLimiter(90, clock),
@@ -592,6 +617,46 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 
 	/**
+	 * GET /v1/identity/resolve?pid=a,b&uid=1,2 (admin, or the lookup token): pid -> UserId and UserId -> pids in bulk, for
+	 * scripts and LLM agents. Ids only: no names, avatars or play history. Erased pids are unknown. Admin only among the
+	 * signed-in roles (the web role is refused, per the privacy check). Each call is logged with counts, never the ids.
+	 */
+	async function resolveIdentity(req: Request, url: URL, ip: string): Promise<Response> {
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		let caller = "lookup token";
+		if (!auth.hasLookupBearer(req)) {
+			const gate = adminGate(req, ip);
+			if ("response" in gate) return gate.response;
+			const user = gate.principal.user;
+			caller = user.kind === "roblox" ? `owner ${user.userId}` : "admin token";
+		}
+		if (req.method !== "GET") return json(405, { error: "GET only" });
+		if (!resolveLimiter.take(ip)) return tooMany(resolveLimiter.retryAfter(ip));
+		const list = (name: string) => [...new Set(url.searchParams.getAll(name).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean))];
+		const pids = list("pid");
+		const uidTexts = list("uid");
+		if (!pids.length && !uidTexts.length) return json(400, { error: "give pid=<pid>[,<pid>...] and/or uid=<UserId>[,<UserId>...]" });
+		if (pids.length + uidTexts.length > RESOLVE_MAX) return json(400, { error: `at most ${RESOLVE_MAX} pids and UserIds in one request` });
+		const badPid = pids.find((p) => !PID_PATTERN.test(p));
+		if (badPid !== undefined) return json(400, { error: "bad pid" });
+		const uids: number[] = [];
+		for (const text of uidTexts) {
+			const uid = parseUid(text);
+			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
+			if (!uids.includes(uid)) uids.push(uid);
+		}
+		const erased = (pid: string) => warehouse?.isErased(pid) === true;
+		const known = await identities.uids(pids.filter((p) => !erased(p)));
+		const byPid = pids.map((pid) => ({ pid, uid: known.get(pid) ?? null }));
+		const byUid: { uid: number; pids: string[] }[] = [];
+		for (const uid of uids) byUid.push({ uid, pids: (await identities.byUid(uid)).map((i) => i.pid).filter((p) => !erased(p)) });
+		log(`identity resolve: ${pids.length} pid(s), ${uids.length} UserId(s) by ${caller} from ${ip}`);
+		return json(200, { byPid, byUid });
+	}
+
+	/**
 	 * GET /v1/identity/<pid>/profile (admin): the pid's UserId and its Roblox username, display name and avatar headshot,
 	 * looked up by the server (RobloxProfiles: fixed hosts, timeouts, cached). `linked: false` when no UserId is known;
 	 * `roblox` says how the lookup went, and the UserId is there even when Roblox didn't answer.
@@ -659,6 +724,59 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (gamepass.length + product.length > MAX_PRODUCT_IDS) return json(400, { error: `at most ${MAX_PRODUCT_IDS} ids` });
 		if (!productsLimiter.take(ip)) return tooMany(productsLimiter.retryAfter(ip));
 		return json(200, { items: await robloxProducts.get({ gamepass, product }) });
+	}
+
+	/**
+	 * GET /v1/roblox/servers/<job>/logs (every signed-in role): one page of the errors and warnings Roblox kept for a game
+	 * server. Roblox files them under the server's place and place version: the fleet's row has both (heartbeat `p` /
+	 * `pv`), `placeId` / `placeVersion` in the query name them for a server the fleet doesn't know or an older kernel.
+	 */
+	async function serverLogs(job: string, url: URL, ip: string): Promise<Response> {
+		const allowed = new Set(["severity", "search", "order", "pageToken", "placeId", "placeVersion"]);
+		for (const key of url.searchParams.keys()) {
+			if (!allowed.has(key)) return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
+			if (url.searchParams.getAll(key).length > 1) return json(400, { error: `one ${key}` });
+		}
+		if (!/^[A-Za-z0-9-]{1,64}$/.test(job)) return json(400, { error: "bad JobId" });
+		const severity = (url.searchParams.get("severity") ?? "").split(",").filter((s) => s !== "");
+		if (severity.length > 8 || !severity.every((s) => SEVERITY_PATTERN.test(s))) return json(400, { error: "severity: up to 8 comma-separated words" });
+		const search = url.searchParams.get("search") ?? "";
+		if (search.length > SEARCH_MAX) return json(400, { error: `search: at most ${SEARCH_MAX} characters` });
+		const order = url.searchParams.get("order");
+		if (order !== null && order !== "asc" && order !== "desc") return json(400, { error: "order: asc or desc" });
+		const pageToken = url.searchParams.get("pageToken") ?? "";
+		if (pageToken.length > 2048 || /[^\x21-\x7e]/.test(pageToken)) return json(400, { error: "bad pageToken" });
+		const asId = (name: string): number | undefined | null => {
+			const raw = url.searchParams.get(name);
+			if (raw === null) return undefined;
+			return /^[1-9]\d{0,15}$/.test(raw) && Number.isSafeInteger(Number(raw)) ? Number(raw) : null;
+		};
+		const askedPlace = asId("placeId");
+		const askedVersion = asId("placeVersion");
+		if (askedPlace === null || askedVersion === null) return json(400, { error: "placeId and placeVersion are positive integers" });
+		if (!robloxServers.configured) return json(409, { error: "Roblox server management is off: set OPENCLOUD_API_KEY (scope universe:read) and TYPETORCH_UNIVERSE_ID" });
+		const known = fleet ? await fleet.placeOf(job) : null;
+		const placeId = askedPlace ?? known?.placeId ?? undefined;
+		const placeVersion = askedVersion ?? known?.placeVersion ?? undefined;
+		if (!placeId || !placeVersion) {
+			return json(409, {
+				error: "the server's place version isn't known (its kernel doesn't send `pv` yet): pass placeVersion (and placeId) in the query",
+				placeId: placeId ?? null,
+				placeVersion: placeVersion ?? null,
+			});
+		}
+		if (!serversLimiter.take(ip)) return tooMany(serversLimiter.retryAfter(ip));
+		try {
+			const page = await robloxServers.logs({ jobId: job, placeId, placeVersion, severity, search, ascending: order === "asc", ...(pageToken ? { pageToken } : {}) });
+			return json(200, { jobId: job, placeId, placeVersion, ...page });
+		} catch (error) {
+			return robloxServersFailure(error);
+		}
+	}
+
+	function robloxServersFailure(error: unknown): Response {
+		if (error instanceof RobloxServersError) return error.status === 429 ? tooMany(60) : json(error.status, { error: error.message });
+		return json(502, { error: "Roblox server management failed" });
 	}
 
 	/** POST /v1/identity/backfill (admin): pid <-> UserId for players who joined before identity rows existed. */
@@ -990,7 +1108,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const given = bearer(req) !== undefined;
 		if (given && authFailures.blocked(ip)) return plain();
 		const principal = auth.principal(req);
-		if (!principal && given) failedAuth(ip, "health check token");
+		if (!principal && given && !auth.hasLookupBearer(req)) failedAuth(ip, "health check token");
 		if (principal?.role !== "admin") return plain();
 		const memory = process.memoryUsage();
 		const out: Record<string, unknown> = {
@@ -1076,6 +1194,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const blocked = blockedResponse(ip);
 		if (blocked) return blocked;
 		if (!checkLimiter.take(ip)) return tooMany(checkLimiter.retryAfter(ip));
+		if (auth.hasLookupBearer(req)) return json(200, { ok: true, role: "lookup", via: "bearer", routes: ["GET /v1/identity/resolve"], service: "typetorch-backend", version: PACKAGE.version });
 		const principal = auth.principal(req);
 		if (principal && (principal.role === "game" || adminIpOk(ip))) {
 			const user = describeUser(principal);
@@ -1477,6 +1596,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!adminIpOk(ip)) return { response: notFound() };
 		const blocked = blockedResponse(ip);
 		if (blocked) return { response: blocked };
+		// The lookup token is a right token for one route: refused here without counting as a failed login.
+		if (auth.hasLookupBearer(req)) return { response: json(403, { error: LOOKUP_ONLY }) };
 		const principal = auth.principal(req);
 		if (!principal) {
 			if (bearer(req) !== undefined) failedAuth(ip, "admin request");
@@ -1506,10 +1627,27 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return gate.principal.role === "admin" ? { principal: gate.principal as Principal & { role: "admin" } } : { response: json(403, { error: READ_ONLY }) };
 	}
 
+	/** GET /openapi.json, /docs (+ its script), /llms.txt. Absolute links when TYPETORCH_PUBLIC_URL is set. */
+	function docs(req: Request, path: string): Response {
+		const o = { ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}), prefix: routePath(req) === new URL(req.url).pathname ? "" : "/api" };
+		const text = (body: string, type: string, csp?: string) =>
+			new Response(body, { status: 200, headers: { "content-type": type, "cache-control": "no-cache", ...(csp ? { "content-security-policy": csp } : {}) } });
+		if (path === "/openapi.json") return json(200, openApiSpec(o), { "cache-control": "no-cache" });
+		if (path === "/docs") return text(swaggerPage(), "text/html; charset=utf-8", DOCS_CSP);
+		if (path === "/docs/swagger-init.js") return text(SWAGGER_INIT, "text/javascript; charset=utf-8");
+		return text(llmsTxt(o), "text/markdown; charset=utf-8");
+	}
+
 	async function route(req: Request, url: URL, path: string, ip: string): Promise<Response> {
 		const method = req.method;
 		if (method === "OPTIONS") return json(405, { error: "no CORS here: use the same origin or a Bearer token" });
 		if (path === "/healthz" && method === "GET") return health(req, ip);
+		// The machine-readable docs (openapi.ts), for the allow list's addresses like the explorer.
+		if (path === "/openapi.json" || path === "/docs" || path === "/docs/swagger-init.js" || path === "/llms.txt") {
+			if (!adminIpOk(ip)) return notFound();
+			if (method !== "GET" && method !== "HEAD") return json(405, { error: "GET only" });
+			return docs(req, path);
+		}
 
 		// Open: who am I, log in and out, Sign in with Roblox.
 		if (path === "/v1/auth/check") return method === "GET" ? authCheck(req, ip) : json(405, { error: "GET only" });
@@ -1578,12 +1716,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 						accept: (topic, message) => bus.publish(topic, message as never),
 						// Plans/25: a watched JobId's heartbeat reply wakes its kernel's debug poll.
 						heartbeatReply: (job) => remoteDebug?.heartbeatReply(job),
+						// A debug bundle's player logs (what each client logged) are for owners: the web role reads the rest.
+						canReadPlayerLogs: () => gate !== undefined && "principal" in gate && gate.principal.role === "admin",
 					},
 					ip,
 				)) ?? json(404, { error: "not found" })
 			);
 		}
 		if (path === "/v1/erasure") return method === "POST" ? erasure(req, ip) : json(405, { error: "POST only" });
+		// pid <-> UserId for the admin role and the lookup token (which reaches nothing else; readGate refuses it).
+		if (path === "/v1/identity/resolve") return resolveIdentity(req, url, ip);
 
 		// Everything else under /v1 reads (every signed-in role) or manages (admin only; `manage` answers 403 to the web role).
 		if (path.startsWith("/v1/")) {
@@ -1613,6 +1755,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
+			const logs = /^\/v1\/roblox\/servers\/([^/]+)\/logs$/.exec(path);
+			if (logs) return method === "GET" ? serverLogs(logs[1] as string, url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
 			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
 			const playerErrors = /^\/v1\/players\/([^/]+)\/errors$/.exec(path);

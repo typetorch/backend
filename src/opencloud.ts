@@ -6,6 +6,8 @@
  *     Scope universe-datastores.objects:read (and :delete to remove the link).
  *   - MessagingService (v2 `:publishMessage`, the CLI's call too): remote debug's instant wake (fleet/remote-debug-wake.ts).
  *     Scope universe-messaging-service:publish.
+ *   - Server management (v1, beta): a game server's error / warning logs, read only (server/roblox-servers.ts).
+ *     Scope universe:read.
  */
 export const OPEN_CLOUD = "https://apis.roblox.com";
 
@@ -25,6 +27,8 @@ export interface OpenCloudOptions {
 	/** Base URL override (tests). */
 	base?: string;
 	timeoutMs?: number;
+	/** Tries for a GET (429, 5xx or no answer; default 3). Writes are never retried. */
+	attempts?: number;
 }
 
 async function call(options: OpenCloudOptions, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown; text: string }> {
@@ -33,7 +37,8 @@ async function call(options: OpenCloudOptions, method: string, path: string, bod
 	const headers: Record<string, string> = { "x-api-key": options.apiKey };
 	if (body !== undefined) headers["content-type"] = "application/json";
 	let lastError: unknown;
-	for (let attempt = 1; attempt <= 3; attempt++) {
+	const attempts = method === "GET" ? Math.max(1, options.attempts ?? 3) : 1;
+	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
 			const response = await doFetch(`${options.base ?? OPEN_CLOUD}${path}`, {
 				method,
@@ -49,14 +54,14 @@ async function call(options: OpenCloudOptions, method: string, path: string, bod
 				parsed = undefined;
 			}
 			// Retry only reads on 429/5xx (writes could apply twice).
-			if (method === "GET" && attempt < 3 && (response.status === 429 || response.status >= 500)) {
+			if (method === "GET" && attempt < attempts && (response.status === 429 || response.status >= 500)) {
 				await new Promise((done) => setTimeout(done, 500 * attempt));
 				continue;
 			}
 			return { status: response.status, body: parsed, text };
 		} catch (error) {
 			lastError = error;
-			if (method !== "GET") break;
+			if (attempt >= attempts) break;
 			await new Promise((done) => setTimeout(done, 500 * attempt));
 		}
 	}
@@ -139,4 +144,31 @@ export async function publishMessage(options: OpenCloudOptions & { universeId: n
 	const path = `/cloud/v2/universes/${options.universeId}:publishMessage`;
 	const response = await call(options, "POST", path, { topic: options.topic, message: options.message });
 	if (response.status < 200 || response.status >= 300) fail("POST", path, response.status, response.text, "universe-messaging-service:publish");
+}
+
+// Server management (v1, beta) ------------------------------------------------------------------------------------------
+
+/** The scope every server management read needs. */
+export const SERVER_MANAGEMENT_READ_SCOPE = "universe:read";
+
+/**
+ * One page of a game server's logs (Roblox keeps its errors and warnings, about 3 minutes behind):
+ * `GET /server-management/v1/universes/{u}/places/{p}/versions/{v}/game-servers/{jobId}/logs`. `filter` is CEL
+ * (`severity`, `message_timestamp`, `search`), `orderBy` is `message_timestamp` or `log_severity` with an optional
+ * " desc". Page size 1-100 (Roblox's default 25). The entries come back as Roblox sent them.
+ */
+export async function listGameServerLogs(
+	options: OpenCloudOptions & { universeId: number; placeId: number; placeVersion: number; jobId: string; pageToken?: string; maxPageSize?: number; filter?: string; orderBy?: string },
+): Promise<{ logs: Record<string, unknown>[]; nextPageToken?: string }> {
+	const params = new URLSearchParams({ maxPageSize: String(Math.min(100, Math.max(1, options.maxPageSize ?? 50))) });
+	if (options.pageToken) params.set("pageToken", options.pageToken);
+	if (options.filter) params.set("filter", options.filter);
+	if (options.orderBy) params.set("orderBy", options.orderBy);
+	const base = `/server-management/v1/universes/${options.universeId}/places/${options.placeId}/versions/${options.placeVersion}/game-servers/${encodeURIComponent(options.jobId)}/logs`;
+	const response = await call(options, "GET", `${base}?${params.toString()}`);
+	if (response.status < 200 || response.status >= 300) fail("GET", base, response.status, response.text, SERVER_MANAGEMENT_READ_SCOPE);
+	const body = record(response.body);
+	const logs = (Array.isArray(body.gameServerLogs) ? body.gameServerLogs : []).filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null && !Array.isArray(e));
+	const next = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
+	return next ? { logs, nextPageToken: next } : { logs };
 }

@@ -1,7 +1,8 @@
+<img src="https://raw.githubusercontent.com/typetorch/docs/main/brand/typetorch.svg" width="64" alt="TypeTorch logo">
+
 # @typetorch/backend
 
-The TypeTorch backend: one server for everything a game's TypeTorch needs from the outside (plans: `plans/16-analytics.md`,
-`plans/20-signed-settings.md`, `plans/21-backend-and-config.md`):
+The TypeTorch backend: one server for everything a game's TypeTorch needs from the outside:
 
 - the **fleet API** (SQLite): live game-server status, deploy reports, alerts;
 - **analytics** on **DuckDB** (your own server) or **Cloudflare Basin**: the shared row format, the stores, the logical
@@ -14,7 +15,11 @@ The TypeTorch backend: one server for everything a game's TypeTorch needs from t
 
 Two keys, nothing else to remember: game servers write with **`TYPETORCH_API_KEY`**; the CLI and the explorer read and
 manage with **`TYPETORCH_ADMIN_TOKEN`**. Runs on Bun and on Node 20+ (the fleet part needs Node 22.5+ for `node:sqlite`,
-or Bun). Ships as one Docker image that works as a Coolify app.
+or Bun). Ships as one Docker image that works as a Coolify app. It is not published to npm (`"private": true`): run it from
+a checkout or the image.
+
+CLI commands below are written `typetorch ...`; the CLI (0.11+) also installs the short alias `tt`, so `tt backend setup`
+is the same command.
 
 ## Contents
 
@@ -22,7 +27,7 @@ or Bun). Ships as one Docker image that works as a Coolify app.
 - [Settings](#settings)
 - [Runtime settings (the Settings page)](#runtime-settings-the-settings-page)
 - [Security](#security)
-- [Routes and roles](#routes-and-roles)
+- [Routes and roles](#routes-and-roles) ([API docs for agents](#api-docs-for-agents): OpenAPI, Swagger UI, llms.txt)
 - [Deploy on Coolify](#deploy-on-coolify)
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
@@ -33,7 +38,7 @@ or Bun). Ships as one Docker image that works as a Coolify app.
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
 - [The analytics part (DuckDB)](#the-analytics-part-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite)
-- [Remote debug](#remote-debug) (read a live game server from the explorer)
+- [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -76,6 +81,10 @@ game's settings written for you.
    in with Roblox (the CLI's Bearer token still works), or `TYPETORCH_ADMIN_ALLOW_IPS=<this PC's public address>`.
    (`bun run local` does not switch the token login off by itself.)
 
+From the game repo instead, `typetorch backend run` (CLI) does the same with a checkout of this repo: it starts the
+server with the game's two keys, opens a quick tunnel, re-runs `backend setup` whenever the tunnel's address changes, and
+restarts either when it drops (`typetorch init` can register it as a login task; `--backend-dir`, `--port`, `--cloudflared`).
+
 Working on the explorer itself: `bun run web:dev` is `vite dev` in `web/`; pass `--game <repo>` (see
 [The explorer](#the-explorer)).
 
@@ -94,6 +103,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_API_KEY` | yes | The game role: game servers write events, heartbeats, deploy reports, alerts and error logs with it. 32+ characters. It reads nothing. |
 | `TYPETORCH_ADMIN_TOKEN` | yes | The admin role: the CLI (Bearer) and the explorer's token login read and manage with it. 32+ characters, **different** from the API key. |
 | `TYPETORCH_WEB_VIEWERS` | no | Comma-separated Roblox UserIds who may **Sign in with Roblox** as read-only viewers (the **web** role: they see everything, change nothing). Owners (the access list) are admins regardless. Also settable on the Settings page. See [Read-only access](#read-only-access-the-web-role). |
+| `TYPETORCH_LOOKUP_TOKEN` | no | A narrow token for scripts and LLM agents: it reaches `GET /v1/identity/resolve` (pid <-> UserId) and nothing else. 32+ characters, different from the API key and the admin token. Unset = that route takes the admin role only. See [The lookup token](#the-lookup-token-for-scripts-and-llm-agents). |
 | `TYPETORCH_API_KEY_PREVIOUS` | no | Also accepted as a game key, for a rotation without downtime: put the old key here, update the games, remove it. The server prints a reminder at every start while it is set. |
 | `TYPETORCH_DATA_DIR` | no | Where the data lives. `/data` in Docker, `./data` otherwise. |
 | `PORT`, `HOST` | no | Listen address (8787; `127.0.0.1`, `0.0.0.0` in Docker). |
@@ -111,7 +121,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
 | `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) and Roblox's discovery document from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
-| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake) |
+| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
 | `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
@@ -148,7 +158,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 
 **Old names** (`TT_ANALYTICS_*`, `TT_FLEET_*`, `TT_SERVER_PARTS`, `TYPETORCH_FLEET_TOKEN`,
 `TYPETORCH_FLEET_INGEST_TOKEN`) still work for this release: each one read prints a one-line warning that names the new
-variable (`TT_ANALYTICS_INGEST_TOKENS` was a list: every entry stays accepted). Remove them. See the CHANGELOG for the map.
+variable (`TT_ANALYTICS_INGEST_TOKENS` was a list: every entry stays accepted). Remove them. The full map of old to new
+names is `LEGACY_ENV` in `src/legacy-env.ts`.
 
 ## Runtime settings (the Settings page)
 
@@ -317,6 +328,34 @@ A web session shows **read-only** next to the name in the sidebar, hides the Set
 from a server's page. The backend enforces all of it regardless of what the page hides: `GET /v1/auth/check` answers
 `role: "web"` for these credentials.
 
+### The lookup token (for scripts and LLM agents)
+
+An agent that only needs to turn a pid from a query into a Roblox UserId (or back) should not hold the admin token, which
+reads everything and manages the server. Set `TYPETORCH_LOOKUP_TOKEN` (`openssl rand -hex 32`) and give the agent that
+instead. It is accepted as a Bearer header on **one** route:
+
+```sh
+curl -H "Authorization: Bearer $TYPETORCH_LOOKUP_TOKEN" "https://backend.example.com/v1/identity/resolve?pid=k3J9x,Qa81z&uid=1001"
+# { "byPid": [{ "pid": "k3J9x", "uid": 1001 }, { "pid": "Qa81z", "uid": null }],
+#   "byUid": [{ "uid": 1001, "pids": ["k3J9x"] }] }
+```
+
+- `pid` and `uid` take comma-separated lists (or repeat the parameter), at most 100 ids in all; either or both. An unknown
+  or erased pid comes back as `uid: null`, an unknown UserId as `pids: []`, in the order asked.
+- The answer holds ids only: no names, avatars or play history.
+- Every other route answers the lookup token `403` before any handler runs, without counting it as a failed login. It
+  can't read the explorer's data, run SQL, open a server's debug view or erase anyone. `GET /v1/auth/check` answers
+  `role: "lookup"` for it.
+- The admin role (token or an owner's session) can call the route too; the **web** role can't.
+- `TYPETORCH_ADMIN_ALLOW_IPS` and the 5-failure lockout apply as on admin routes; 60 requests a minute per address.
+- Each call is logged as `identity resolve: <n> pid(s), <m> UserId(s) by <lookup token | admin token | owner <UserId>> from <address>`,
+  with counts only, never the ids.
+- To rotate or revoke it, change or remove the variable and restart.
+
+**Privacy.** The token hands out the pid <-> UserId link, which joins a player's whole pid-keyed history to their Roblox
+account (see [Privacy](#privacy)). Keep the agent inside the game's own team tooling: don't paste resolved UserIds next to
+play history into chat or social platforms, a ticket another company reads, or a model provider that trains on inputs.
+
 ### Sign in with Roblox
 
 The game's **owners** get in this way as admins: the owner list is the access list in the game's signed settings record,
@@ -351,7 +390,7 @@ hands this backend a signed statement; the role comes from this backend's own li
 On by default whenever `TYPETORCH_PUBLIC_URL` is https (http on loopback); `TYPETORCH_CENTRAL_LOGIN=off` turns it off.
 Without such a public URL it stays off with a warning on the startup line. The admin token and the per-game Sign in with
 Roblox are untouched by it. While it is on, the explorer shows a **TypeTorch Dashboard** link (the issuer, default
-`https://dash.typetorch.dev`) in its header and on the sign-in page; `GET /v1/auth/check` names that origin as `dashboard`.
+`https://dash.typetorch.dev`) as the last sidebar item, below Settings, and on the sign-in page; `GET /v1/auth/check` names that origin as `dashboard`.
 
 - **Identity.** On the first start with the login on, the backend makes an Ed25519 **instance key** in
   `<data dir>/instance.key` (mode 0600, backed up with the data folder). Its fingerprint
@@ -388,8 +427,8 @@ Roblox are untouched by it. While it is on, the explorer shows a **TypeTorch Das
   Every login makes a fresh session (a session id from before is ended), is counted toward the five-failure lockout when it
   fails, and logs `login: typetorch.dev user <id> role <role>`.
 - **Trusting a browser** (once per browser; the broker never sees it): the admin token in the Settings page's form
-  (`POST /auth/device`, only while the token login is on), or a link signed by the game's signing key
-  (`GET /auth/bless/challenge`, then `GET /auth/bless?challenge=&sig=` with an Ed25519 signature over
+  (`POST /auth/device`, only while the token login is on), or a link signed by the game's signing key, which
+  `typetorch backend bless` makes and opens in the game repo (`GET /auth/bless/challenge`, then `GET /auth/bless?challenge=&sig=` with an Ed25519 signature over
   `typetorch-bless-v1\n<fingerprint>\n<challenge>`; the public keys come from `PUT /v1/access/keys` with the admin token).
   The device cookie `tt_device` (`HttpOnly`, `SameSite=Lax`, `Secure` over https, 180 days) holds a random secret whose hash
   is in `<data dir>/devices.json`; it rotates on every login. The Settings page lists trusted browsers; revoking one ends
@@ -423,6 +462,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 **game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an owner's explorer session
 cookie. **web** = the read-only role: a Roblox viewer's session cookie (no token); it gets every route marked `admin, web`
 below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / `PATCH` other than the two query routes.
+**lookup** = `TYPETORCH_LOOKUP_TOKEN` as a Bearer header: the routes marked `lookup` only, `403` everywhere else.
 **open** = no credentials.
 
 | Route | Role | What |
@@ -430,7 +470,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/ingest` | game | gzip JSON `{ events, recordings, identities? }`. Appended to a raw file, then `202 { accepted, rejected }` |
 | `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
-| `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `deploy`, `mark` | game | the kernel's fleet posts and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
+| `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `bundle`, `deploy`, `mark` | game | the kernel's fleet posts (`bundle`: a [debug bundle](#debug-bundles-and-offline-history)) and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
 | `GET /v1/fleet/commands`, `POST /v1/fleet/results` | game | [remote debug](#remote-debug): a watched server's long-poll for read-only commands, and its answers |
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin, web | the logical queries |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin, web | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
@@ -439,6 +479,8 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
+| `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
+| `GET /v1/identity/resolve` | admin, lookup | `?pid=a,b&uid=1,2` (<= 100): `{ byPid: [{ pid, uid \| null }], byUid: [{ uid, pids }] }`; the [lookup token](#the-lookup-token-for-scripts-and-llm-agents)'s only route |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
 | `GET /v1/players/<pid>/errors` | admin, web | the error kinds one player hit |
@@ -449,7 +491,8 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
-| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state) |
+| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state, its [offline history](#debug-bundles-and-offline-history)) |
+| `GET /v1/fleet/servers/<jobId>/bundles`, `GET /v1/fleet/bundles/<id>` | admin, web | [debug bundles](#debug-bundles-and-offline-history); the web role gets a bundle's body without `playerLogs` |
 | `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
@@ -458,7 +501,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
-| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
+| `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
 | `GET /v1/auth/roblox/start`, `/callback` | open (rate limited) | Sign in with Roblox |
 | `GET /auth/typetorch/start`, `/callback` | open (rate limited, lockout) | [Sign in with typetorch.dev](#sign-in-with-typetorchdev); 404 while `TYPETORCH_CENTRAL_LOGIN` is off (so are the next rows) |
@@ -470,15 +513,29 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PUT /v1/access/keys` | admin token only (not a session) | `{ keys: [base64 raw Ed25519 public key, ...] }` (4 at most) |
 | `POST /v1/central/report` | admin | send the origin report now |
 | `GET /healthz` | open | `{ ok }`; with the admin role: `state` (`ready`, `handover`, `failed`, `stopping`), memory, loader lag, row counts, the bus |
+| `GET /openapi.json`, `GET /docs`, `GET /llms.txt` | open (the admin allow list's addresses) | [machine-readable docs](#api-docs-for-agents): the OpenAPI 3.1 spec, Swagger UI over it, and an [llms.txt](https://llmstxt.org) for LLM agents |
 | `GET /` and the explorer's files | open | the built explorer (404 when it isn't built) |
 
 The explorer calls `/api/<route>` (its dev proxy's prefix); the backend takes `/api` off, so both reach the same routes.
 
+### API docs for agents
+
+`GET /openapi.json` is an OpenAPI 3.1 spec of every route above (roles, parameters, bodies, the query names), built from
+the route table in `src/server/openapi.ts`; `GET /docs` is Swagger UI over it (the pinned `swagger-ui-dist` from jsDelivr
+with SRI, under its own CSP; "Authorize" takes the admin, API or lookup token, or uses your explorer session);
+`GET /llms.txt` tells an LLM agent what this server is and links the spec, this README, the
+[TypeTorch docs](https://github.com/typetorch/docs) and the source. Point an agent at `https://<backend>/llms.txt` (and give it
+the [lookup token](#the-lookup-token-for-scripts-and-llm-agents) rather than the admin token when that is all it needs). The
+links are absolute when `TYPETORCH_PUBLIC_URL` is set, relative otherwise; under the explorer's prefix (`/api/docs`) the spec's
+server is `/api`. They hold no data or settings, and answer `404` outside `TYPETORCH_ADMIN_ALLOW_IPS` like the explorer.
+A new route goes into `ROUTES` in `src/server/openapi.ts`: `test/openapi.test.ts` fails when `app.ts` answers a path the
+spec doesn't list.
+
 ## Deploy on Coolify
 
 The backend builds from this repo into one container: the root `Dockerfile` builds the explorer and runs the server;
-`compose.yaml` adds the data volume, the health check on `/healthz` and port 8787. Not run on this machine (no Docker
-here): the files are checked by tests that read them, so expect to fix a typo on the first deploy.
+`compose.yaml` adds the data volume, the health check on `/healthz` and port 8787. There is no CI in this repo that builds
+the image; `test/deploy-files.test.ts` reads the Dockerfile and compose file and checks what they promise.
 
 1. In Coolify create a new resource from this repository: **Docker Compose** (Docker Compose Location `/compose.yaml`) or
    **Dockerfile**. With Dockerfile, add a persistent storage (volume) mounted at `/data`, and put 8787 under **Ports Exposes**.
@@ -493,6 +550,10 @@ here): the files are checked by tests that read them, so expect to fix a typo on
    - optional: `TYPETORCH_ADMIN_ALLOW_IPS`, `TYPETORCH_TRUSTED_PROXIES`, `TYPETORCH_CLOUDFLARE`,
      `ROBLOX_OAUTH_CLIENT_ID` / `ROBLOX_OAUTH_CLIENT_SECRET`, `ROBLOX_WEBHOOK_SECRET`, `OPENCLOUD_API_KEY` (also the [instant wake](#instant-wake)),
      `TYPETORCH_UNIVERSE_ID`, `TYPETORCH_ALERT_WEBHOOK_URL`
+   With **Docker Compose**, only the variables `compose.yaml` lists reach the container (each as `${NAME:-default}`).
+   `TYPETORCH_TRUSTED_PROXIES`, `TYPETORCH_CLOUDFLARE` / `TYPETORCH_CLOUDFLARE_IPS`, `TYPETORCH_WEB_VIEWERS` and the
+   advanced settings other than `TYPETORCH_MEMORY_LIMIT`, `TYPETORCH_THREADS` and `TYPETORCH_RUNTIME_SETTINGS` are not in it: add a line for each one you
+   set, or use the Dockerfile resource (every variable reaches it). Viewers can also be set on the Settings page.
 4. Deploy. The health check is `GET /healthz` inside the container (30 s start period); `docker logs` shows the startup
    line (what is set, never the values) and any old-variable warnings.
 5. Check: `curl https://backend.example.com/healthz` -> `{"ok":true}`;
@@ -566,7 +627,7 @@ the live stream's clients:
                    { "name": "live", "mode": "queue", "queued": 0, "dropped": 0, "maxQueue": 256 } ], "dropped": 0 }
 ```
 
-**`GET /v1/live`** (admin, Server-Sent Events, `?topics=events,heartbeat,deploy,alert,error`, default all). `events` and
+**`GET /v1/live`** (admin, web; Server-Sent Events, `?topics=events,heartbeat,deploy,alert,error`, default all). `events` and
 `heartbeat` are summed up and sent at most once a second (`events` `{ batches, events, recordings, rejected, kinds }`,
 `heartbeat` `{ servers: [{ job, branch, artifact, players, health }], more }`); `deploy`, `alert` and `error` go out at once. Each
 browser has its own 64-message buffer (full = dropped and counted), at most 20 streams at once. `GET /v1/fleet/stream` (the
@@ -625,7 +686,7 @@ What is stored, and what is dropped (counted in `/healthz` -> `errors`, the requ
 
 Counts and pids older than 30 days go (`TYPETORCH_ERROR_KEEP_DAYS`).
 
-Reads (admin): `GET /v1/errors?window=24h&realm=server&branch=prod&build=...&q=text&limit=100&bucket=300` (also
+Reads (admin, web): `GET /v1/errors?window=24h&realm=server&branch=prod&build=...&q=text&limit=100&bucket=300` (also
 `from=` / `to=` in unix ms or ISO) answers `{ window: { from, to, bucketSeconds, buckets }, kinds: [{ fp, template, topFrame,
 realm, count, players, firstAt, lastAt, total, spark: [..] }], totals: { count, kinds, players }, more, builds: [{ build, n,
 lastAt }] }` (`builds`: the artifact ids with errors in the window under the other filters, most recently seen first, at most
@@ -668,8 +729,11 @@ web:build` build it into `web/dist`, and the backend serves it at `/` (the Docke
 Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
 Sessions, Timeline and Errors views), Flow, Experiments, First session, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
-[Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The header shows who is signed in (Roblox name and avatar, or
-"admin token") and a Sign out button. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
+[Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
+Events, Funnels, Flow, Retention, First session, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
+Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
+TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
+name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
 with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker. Every JobId
 on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
 runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,
@@ -750,7 +814,7 @@ Props the queries read (SCHEMA.md "Event catalog"; each can be overridden by a q
 | `purchase` (`name` = kind, default `product`) | `robux`, `product` |
 | `currency` (`name` = currency) | `delta` |
 | `experiment` (`name` = experiment) | `variant` |
-| `fleet` `heartbeat` (no pid; `job` = JobId) | the kernel's fleet status: `t` server type, `b` `c` `a` `n` `m`, `s` `u` (unix s), `p`, `x` (1 = A/B pin), `v`, `q`, `g`, `h`, `e`, `sv`. `k` is never read |
+| `fleet` `heartbeat` (no pid; `job` = JobId) | the kernel's fleet status: `t` server type, `b` `c` `a` `n` `m`, `s` `u` (unix s), `p`, `pv` (place version), `x` (1 = A/B pin), `v`, `q`, `g`, `h`, `e`, `sv`. `k` is never read |
 | `fleet` `deploy_report` | `s` `b` `a` `j` `r` `e` `d` `t` `g` `k` `p` |
 
 ```ts
@@ -782,7 +846,8 @@ const { servers } = await fleet.servers({ branch: "prod" });
 ```
 
 - `storeConfigFromEnv(process.env)` builds a store config from `TYPETORCH_BACKEND_URL` + `TYPETORCH_ADMIN_TOKEN`, or
-  `CLOUDFLARE_ACCOUNT_ID` + `TT_BASIN_BUCKET` + `TT_BASIN_SQL_TOKEN` (or `WRANGLER_BASIN_SQL_AUTH_TOKEN`). The old
+  `CLOUDFLARE_ACCOUNT_ID` + `TT_BASIN_BUCKET` + `TT_BASIN_SQL_TOKEN` (or `WRANGLER_BASIN_SQL_AUTH_TOKEN`), optional
+  `TT_BASIN_NAMESPACE`; `backend` picks one when both are set. The old
   `TT_ANALYTICS_URL` / `TT_ANALYTICS_ADMIN_TOKEN` still work for one release, with a warning on stderr.
 - `store.render(name, filters, options)` (Basin and DuckDB stores) returns the SQL without running it.
 - **Filters** (every query): `from`, `to` (unix ms, ISO time, or a date; a date-only `to` includes that day; an exact instant
@@ -935,12 +1000,13 @@ accounts or tokens for you.
    # PowerShell: $env:WRANGLER_BASIN_SQL_AUTH_TOKEN = "<R2 token>"; bash: export WRANGLER_BASIN_SQL_AUTH_TOKEN=<R2 token>
    npx wrangler basin sql query "<warehouse name>" "SELECT kind, COUNT(*) AS n FROM typetorch.events GROUP BY kind LIMIT 100"
    ```
-6. The CLI can't write a Basin sink in 0.9: `typetorch backend setup` replaces a Basin sink with this backend. For live
+6. The CLI has no command that writes a Basin sink (as of 0.12): `typetorch backend setup` replaces a Basin sink with
+   this backend. For live
    server status, run only the fleet part of the server (`TYPETORCH_PARTS=fleet`, below): Basin is minutes behind.
 
 | Value | Where it lives |
 |---|---|
-| Stream endpoints + send token | The game's signed settings record, field `analytics` (server-only; CLI 0.9 has no command that writes it) |
+| Stream endpoints + send token | The game's signed settings record, field `analytics` (server-only; no CLI command writes it) |
 | R2 token (Basin SQL), account id, bucket | Your PC only (env file), for `createStore({ backend: "basin", ... })` |
 
 Basin facts this package relies on (from the docs, 2026-10-05; live checks need your account):
@@ -971,19 +1037,20 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | Endpoint | Role | What |
 |---|---|---|
 | `POST /v1/ingest` | game | gzip JSON `{ events, recordings }` from game servers. Appended to a raw file, then `202 { accepted, rejected }` |
-| `POST /v1/query/<name>` | admin | `{ filters, options }` -> `{ result, ms }` (input errors 400, timeouts 504) |
-| `GET /v1/queries` | admin | the query list |
-| `GET /v1/rollups/<daily\|players\|player_days\|edges>?from=&to=&pid=&limit=` | admin | the nightly rollup tables |
-| `POST /v1/sql` | admin | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
+| `POST /v1/query/<name>` | admin, web | `{ filters, options }` -> `{ result, ms }` (input errors 400, timeouts 504) |
+| `GET /v1/queries` | admin, web | the query list |
+| `GET /v1/rollups/<daily\|players\|player_days\|edges>?from=&to=&pid=&limit=` | admin, web | the nightly rollup tables |
+| `POST /v1/sql` | admin, web | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
 | `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), free disk space; measured at most every 30 s |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
 | `GET /healthz` | open / admin | `{ ok }`; with the admin role: `state`, memory, loader lag, row counts, fleet counts, the bus, error log counts |
 | `POST /v1/identity` | game | `{ identities: [{ pid, uid, t }] }` from Basin games (the framework posts them to the fleet API's url); DuckDB games send them in the ingest batch (`identities`) |
-| `GET /v1/identity?pid=` / `?uid=` | admin | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
-| `GET /v1/identity/<pid>/profile` | admin | `{ pid, linked: false }`, or `{ pid, linked: true, uid, roblox: "ok" \| "partial" \| "not-found" \| "unavailable", cached, name, displayName, avatar }` (null when Roblox didn't say). 120 a minute per address |
+| `GET /v1/identity?pid=` / `?uid=` | admin, web | pid <-> UserId (`{ identities: [{ pid, uid, firstSeen, lastSeen }] }`); no parameter: `{ count, backfill }` |
+| `GET /v1/identity/<pid>/profile` | admin, web | `{ pid, linked: false }`, or `{ pid, linked: true, uid, roblox: "ok" \| "partial" \| "not-found" \| "unavailable", cached, name, displayName, avatar }` (null when Roblox didn't say). 120 a minute per address |
 | `GET /v1/place` | admin, web | `{ configured: false }` while neither `TYPETORCH_UNIVERSE_ID` is set nor a heartbeat carried a PlaceId; else `{ configured: true, roblox: "ok" \| "partial" \| "unavailable", cached, placeId, universeId, name, playing, icon, url }` (null when Roblox didn't say). The server asks Roblox's public games and thumbnails APIs without credentials (never the Open Cloud key), caches 60 s, keeps an older answer while Roblox is down; the icon is only an https URL on `*.rbxcdn.com`. 120 a minute per address |
 | `GET /v1/roblox/products?gamepass=1,2&product=3` | admin, web | `{ items: [{ type: "gamepass" \| "product", id, status: "ok" \| "not_found" \| "unavailable", name, price, forSale, icon }] }` in request order (duplicates dropped). Ids are comma-separated positive integers, at most 50 in all; anything else is a 400 before Roblox is asked. The server asks Roblox's public APIs without credentials (never the Open Cloud key): `apis.roblox.com/game-passes/v1/game-passes/<id>/product-info`, `apis.roblox.com/developer-products/v1/developer-products/<id>/details`, and `thumbnails.roblox.com` (`/v1/game-passes`, `/v1/developer-products/icons` by the product's TargetId) for 150x150 icons, only https URLs on `*.rbxcdn.com`. Cached 1 h (not found 10 min, Roblox down 1 min, an older good answer kept while down), one lookup per item at a time, at most 240 Roblox calls a minute and 6 at once. 120 requests a minute per address |
+| `GET /v1/roblox/servers/<job>/logs?severity=&search=&order=&pageToken=&placeId=&placeVersion=` | admin, web | one page of the errors and warnings Roblox kept for a game server: `{ jobId, placeId, placeVersion, logs: [{ time, severity, message, count, stack, placeVersion, fields }], nextPageToken, cached }` ([below](#roblox-server-logs)) |
 | `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
@@ -1034,7 +1101,7 @@ in memory only (never on disk, never logged): 6 h for a good one, 60 s for a fai
 older answer or `unavailable`. While Roblox is down the last good answer is served; without one the card shows the UserId.
 Nothing to set: no key is needed.
 
-**Ad-hoc SQL** (`POST /v1/sql`, admin token; `TYPETORCH_SQL=0` turns it off). One SELECT or WITH statement over two
+**Ad-hoc SQL** (`POST /v1/sql`, admin or web role; `TYPETORCH_SQL=0` turns it off). One SELECT or WITH statement over two
 views, `events` and `recordings` (every day file plus a Parquet snapshot of today's live rows, taken again only when
 the live tables changed). Answers `{ columns: [{ name, type }], rows: [[...]], truncated, ms }`: at most `limit` rows
 (default 1,000, at most 10,000), within the query timeout. It runs in a separate DuckDB instance
@@ -1053,25 +1120,28 @@ Settings: see [Settings](#settings) and `server/backend.env.example`.
 ## The fleet API (SQLite)
 
 Live game-server status with near-zero latency, for `typetorch servers`, `report`, `alerts` and `deploy --wait`.
-Kernels post to it directly (`kernel/src/server/Fleet.luau`, settings in the signed settings record's field
-`fleet = { url, token }`, kernel 0.3.8), so it works even when a game's code is broken. One row per server in
+Kernels post to it directly (`kernel/src/server/Fleet.luau`; the URL and key come from the signed settings record's
+`backend = { url, key, analytics? }` section that `typetorch backend setup` writes, or the old `fleet = { url, token }`
+section it still writes for kernels before 0.4), so it works even when a game's code is broken. One row per server in
 `data/fleet.sqlite` (WAL). `TYPETORCH_PARTS=fleet` runs it alone (a game on Basin needs only this).
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `POST /v1/fleet/heartbeat` | ingest | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
-| `POST /v1/fleet/report` | ingest | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
-| `POST /v1/fleet/alert` | ingest | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`) |
-| `POST /v1/fleet/closing` | ingest | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
-| `POST /v1/fleet/deploy` | ingest | `{ s, b, a, ch, t, k?, fr?, m? }` from the CLI after a release (stuck detection's start time and a chart mark): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `t` unix ms or s (a clock a day off is replaced by the backend's) |
-| `POST /v1/fleet/mark` | ingest | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
-| `GET /v1/fleet/servers?branch=&maxAge=` | admin | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
-| `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }` |
-| `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
-| `GET /v1/fleet/alerts?since=<ms>&level=&unacked=1&limit=` | admin | `{ alerts: [...] }` (each with `at` in ms and `acked`) |
-| `GET /v1/fleet/marks?since=&until=&branch=&kinds=&limit=` | admin | `{ marks: [{ id, kind, at, time, branch, seq, artifact, channel, from, kernel, placeVersion, message, results?, inferred? }] }`, oldest first: every release in the deploys table (with its servers per report result; one known only from server reports has `inferred: true`) and the kernel / backup marks. Times unix ms or ISO; default the last 30 days; at most a 366-day window and the `limit` (500, at most 2,000) newest. `branch` keeps that branch's releases and every place-wide mark |
+| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
+| `POST /v1/fleet/report` | game | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
+| `POST /v1/fleet/alert` | game | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k, d? }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`). `d` (kernel 0.5.2) is kept as the alert's `details` when it is a flat object (at most 16 keys; values strings of at most 1,000 bytes, numbers or booleans; at most 4 KB of JSON), else `details` is `null` (never a 400). `deploy_failed` carries `{ stage, error, attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }`; from 0.5.3 `d.bundle` names the [debug bundle](#debug-bundles-and-offline-history) that follows |
+| `POST /v1/fleet/bundle` | game | a kernel 0.5.3 [debug bundle](#debug-bundles-and-offline-history) (at most 512 KB, plain or `Content-Encoding: gzip`) -> `202 { ok: true, id }` |
+| `POST /v1/fleet/closing` | game | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
+| `POST /v1/fleet/deploy` | game | `{ s, b, a, ch, t, k?, fr?, m? }` from the CLI after a release (stuck detection's start time and a chart mark): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `t` unix ms or s (a clock a day off is replaced by the backend's) |
+| `POST /v1/fleet/mark` | game | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
+| `GET /v1/fleet/servers?branch=&maxAge=` | admin, web | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
+| `GET /v1/fleet/servers?gone=1&branch=&limit=` | admin, web | `{ servers: [...rows + closedAt, lostAt, state: closed\|lost, firstSeen] }`: servers that closed or were lost (kept 30 days), the most recently gone first (`limit` 200, at most 1,000) |
+| `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin, web | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }`. A `since` older than the 2-hour raw window adds the 5-minute rollups before it (one point per bucket, `t` = the bucket's start) and `rolledUntil` (unix ms: where the raw points take over) |
+| `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin, web | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
+| `GET /v1/fleet/alerts?since=<ms>&level=&unacked=1&limit=` | admin, web | `{ alerts: [...] }` (each with `at` in ms and `acked`) |
+| `GET /v1/fleet/marks?since=&until=&branch=&kinds=&limit=` | admin, web | `{ marks: [{ id, kind, at, time, branch, seq, artifact, channel, from, kernel, placeVersion, message, results?, inferred? }] }`, oldest first: every release in the deploys table (with its servers per report result; one known only from server reports has `inferred: true`) and the kernel / backup marks. Times unix ms or ISO; default the last 30 days; at most a 366-day window and the `limit` (500, at most 2,000) newest. `branch` keeps that branch's releases and every place-wide mark |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | `{ by? }` |
-| `GET /v1/fleet/stream?branch=&types=server,alert` | admin | Server-Sent Events (below) |
+| `GET /v1/fleet/stream?branch=&types=server,alert` | admin, web | Server-Sent Events (below) |
 
 Rows use long names (`job`, `serverType`, `branch`, `artifact`, `players`, `maxPlayers`, `startedAt`, `lastWrite`,
 `appliedSeq`, `generation`, `health`, `lastError`, `kernel`, `experiment`, `serverVersion`, `budget`, and the latest
@@ -1085,7 +1155,11 @@ ISO strings, except `at` (unix ms).
 missing, non-numeric, negative or out-of-range one (rates over 1,000, memory over 1,000,000 MB) is `null`, and never a
 reason to refuse the heartbeat. Every heartbeat also adds one point to the server's history (`server_metrics`): at most
 720 points per server and 2 hours (older points are dropped by the sweep and never returned), and at most 1,000,000
-points in all (the sweep drops the oldest), which fits a 1,250-server fleet.
+points in all (the sweep drops the oldest), which fits a 1,250-server fleet. Before they go, the sweep **rolls them up**
+(`server_metrics_5m`): one row per server and finished 5-minute bucket (average TPS, physics FPS, memory and Lua heap;
+the slowest second; the most players), kept 30 days and at most 5,000,000 rows (the oldest go first), so a server's
+charts cover its whole life after it is gone. The rollup is an upsert per bucket (two servers sharing the file in a
+handover write the same rows); after a restart it goes on from the newest rollup.
 
 **SSE format:** `event: <type>` and `data: <JSON>` per message, a `: ping` comment every 15 s. Types:
 
@@ -1098,6 +1172,7 @@ points in all (the sweep drops the oldest), which fits a 1,250-server fleet.
 | `mark` | `{ type, mark: <marks row> }` (kernel publish, backup refresh) |
 | `alert` | `{ type, alert: <alerts row> }` |
 | `alert_ack` | `{ type, id }` |
+| `bundle` | `{ type, bundle: <bundle summary> }` (a new debug bundle) |
 
 **Server-side alerts** (swept every 10 s): `server_lost` when a server sends no heartbeat for 90 s without a closing
 message (one alert per branch and artifact per sweep, listing the JobIds; critical when 3 or more), and
@@ -1105,7 +1180,8 @@ message (one alert per branch and artifact per sweep, listing the JobIds; critic
 with no report for it (it lists those JobIds and says nothing about the build). **Notifications:**
 `TYPETORCH_ALERT_WEBHOOK_URL` (Discord, Slack or generic JSON, detected from the URL or `TYPETORCH_ALERT_WEBHOOK_FORMAT`), critical
 only by default (`TYPETORCH_ALERT_WEBHOOK_LEVELS`), the same (code, branch, artifact) at most once per 10 minutes, at most
-20 posts a minute. Reports are kept 30 days, alerts and releases 90 days, kernel / backup marks a year (at most 5,000, the newest). Per-JobId limits (40 a minute) sit above the kernel's
+20 posts a minute. Reports are kept 30 days, alerts and releases 90 days, kernel / backup marks a year (at most 5,000, the newest), closed
+and lost servers 30 days (at most 50,000, the most recently gone kept), debug bundles 30 days. Per-JobId limits (40 a minute) sit above the kernel's
 own 30.
 
 **New JobIds** (`TYPETORCH_NEW_JOBS_PER_MINUTE`, 2,000): JobIds without a `servers` row are let in at most 2,000 per
@@ -1113,7 +1189,7 @@ clock minute across all senders, enough for a 1,250-server fleet (50k CCU) resta
 ingest requests from never-seen JobIds get 429 (`retry-after`: the rest of the minute) and the first refusal of the
 minute raises one `fleet_flood` alert (critical, source `server`, `details: { limit, windowSeconds, example }`), which
 reaches the webhook (deduped like any alert) and the SSE stream. Known JobIds (a `servers` row: live, closed or lost
-in the last day) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the API key (any code in the
+in the last 30 days) and the CLI's `j = "cli"` are never limited by it. Why: anyone with the API key (any code in the
 universe that reads the settings record) could otherwise grow the `servers` table and the per-JobId limiters with
 made-up JobIds. The limiter holds at most that many JobIds and forgets them each minute; a JobId over 64 characters
 gets 400 before any limiter sees it.
@@ -1123,7 +1199,7 @@ so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durab
 
 ## Remote debug
 
-The explorer's server page (`/servers/<JobId>`, plans/25) reads one **live** game server: its status, server log, a
+The explorer's server page (`/servers/<JobId>`) reads one **live** game server: its status, server log, a
 player's client log, the players, module state, a read-only Dex, modules and assets, builds, the budget view, error
 counters and network counters. **Read-only**: there is no op that changes the game server (no kick, ban, rollback, reload,
 pin, switch, Luau or Dex edit). Needs kernel 0.5.0 (the framework ops also framework 0.5.0 with devtools on; an older
@@ -1143,8 +1219,8 @@ A Roblox server can't be called into, so it **pulls**:
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `GET /v1/fleet/servers/<jobId>` | admin | `{ server: <servers row of any age> \| null, state: live\|closed\|lost\|unknown, debug: { watched, watchedUntil?, connected, lastPollAt? } }` (`connected` = the server polled in the last 15 s) |
-| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt?, wake }` (`wake`: a wake message went out to this server in the last 30 s and didn't fail, and it isn't polling yet); `409` for a closed or unknown server (nothing to debug) |
+| `GET /v1/fleet/servers/<jobId>` | admin, web | `{ server: <servers row of any age, + closedAt, lostAt, firstSeen> \| null, state: live\|closed\|lost\|gone\|unknown, debug: { watched, watchedUntil?, connected, lastPollAt? }, history }` (`connected` = the server polled in the last 15 s; `history` and `gone`: see [Debug bundles and offline history](#debug-bundles-and-offline-history)) |
+| `POST /v1/fleet/servers/<jobId>/watch` | admin | `{ job, watched, watchedUntil, connected, lastPollAt?, wake }` (`wake`: a wake message went out to this server in the last 30 s and didn't fail, and it isn't polling yet); `409` for a closed, gone or unknown server (nothing to debug) |
 | `POST /v1/fleet/servers/<jobId>/commands` | admin | `{ op, args? }` -> `202 { id, op, state, createdAt, expiresAt }`; `400` an op outside the allow-list or bad args; `409` not watched (watch first); `429` limits |
 | `GET /v1/fleet/servers/<jobId>/commands/<id>` | admin | `{ id, op, state: queued\|sent\|done\|failed\|expired, createdAt, sentAt?, doneAt?, ms?, result?, error?, redacted? }`; only for whoever queued it (`404` for anyone else, and once the answer is dropped) |
 | `GET /v1/fleet/debug/audit?limit=` | admin | `{ entries: [{ at, who, ip, op, job, args, id }] }`, newest first (the last 500, in memory) |
@@ -1178,6 +1254,61 @@ Unknown argument keys are refused; args are at most 16 KB.
 - `GET /healthz` (admin) shows the counters and what is held (`remoteDebug: { queued, sent, done, failed, expired,
   ignored, dropped, commands, resultBytes, watched, wake }`), never an answer. `wake` is `"off"` or
   `{ published, failed, recent, limited }`.
+
+### Debug bundles and offline history
+
+A game server is gone the moment it closes, and a lost one never says why. So the fleet keeps what happened to a server
+for **30 days** after it goes, and kernel 0.5.3 sends a **debug bundle** when something fails: the explorer's
+`/servers/<JobId>` page shows both after the server is gone.
+
+**Bundles** (`POST /v1/fleet/bundle`, the API key; the same per-JobId limiter scheme as the other fleet POSTs with its
+own entry, 6 a minute, and the same [new-JobId gate](#the-fleet-api-sqlite)):
+
+```
+{ v: 1, id: "<32 lowercase hex>", j: "<JobId>", t: <unix s>, k: "<kernel>", b?, a?, s?, g?,
+  code: "deploy_failed", level: critical|warning|info, message: "<= 2000", closing: true|false,
+  failure: { stage?, error?, report?, triggers? }, server: {...}, deploy: { appliedSeq, history, reports, failing,
+  failedHere, pending, wanted, busy, restoring, heads, refusals }, fallback: {...}, alerts: [...], players: [...],
+  serverLog: [...], playerLogs: { "<UserId>": [...] } }
+```
+
+- The kernel sends one for any critical alert (its `d.bundle` names it), a generation that fails to start, a health
+  rollback, Fallback moving players off, `/tt bundle` (dev), and on BindToClose only when something failed in the last
+  10 minutes; one per trigger code a minute, 10 in a server's life (plus the closing one), ~3 s after the trigger.
+  Triggers within those 3 s join one bundle (`failure.triggers`), so a bundle's `code` can be `start_failed` while the
+  alert that names it says `deploy_failed`.
+- **Checks**: `v` = 1, `id` 32 lowercase hex, `j`, `code` (`[a-z0-9_.-]{1,64}`), `level`, `message` (at most 2,000);
+  `b`, `a`, `s`, `g` are left out when unknown (`null`). Every section is opaque JSON, only checked to be an object or a
+  list: the backend never runs or trusts it, and the explorer shows it as text, never HTML.
+- **At most 512 KB** (`413`; the kernel keeps its own under ~200 KB), counted inflated too: the kernel gzips bodies over
+  1 KB (`Content-Encoding: gzip`, like `/v1/errors`).
+- **Idempotent**: a repeated `id` answers `202 { ok: true, id, duplicate: true }` and stores nothing (the kernel may send
+  again after a timeout).
+- **Stored** in `bundles`: the summary in columns, the body **gzipped** (a BLOB). **Kept** 30 days, at most 20 per JobId
+  (checked on insert and hourly) and at most 500 MB stored in all (the oldest go first), swept hourly.
+
+| Endpoint | Role | Answer |
+|---|---|---|
+| `GET /v1/fleet/servers/<jobId>/bundles` | admin, web | `{ bundles: [{ id, job, code, level, message, closing, at (ms), time (ISO), kernel, branch, artifact, seq, generation, players (count), size (bytes), stage, error }] }`, newest first |
+| `GET /v1/fleet/bundles/<id>` | admin, web | `{ bundle: { ...summary, body } }` (the posted JSON); the read-only web role gets the body **without `playerLogs`** (what each player's client logged is for owners) and `playerLogsHidden: true`; `404` when gone |
+
+**Offline history.** Closed and lost servers keep their `servers` row 30 days (was one day), at most 50,000 of them
+(the oldest gone first; live rows never count). `GET /v1/fleet/servers/<jobId>` carries a `history` block for every
+JobId: `alerts` (with this JobId, newest first, at most 200), `reports` (its deploy reports, at most 200), `bundles` (the
+summaries above), `swaps` (generation starts from its bundles' `deploy.history`: `{ at, name, artifact, branch, reason,
+loadSeconds, swapSeconds, bundle }`) and `metrics: { from, to }` (the time range its raw points and rollups cover). When
+the row is gone but alerts, reports, bundles or rollups still name the JobId, the state is **`gone`** (`server: null`)
+instead of `unknown`. `GET /v1/fleet/servers?gone=1` lists the recently gone servers.
+
+**The page.** A server that isn't live shows an **Offline** badge in Health (closed at / lost at / gone), how long it
+ran, a **Timeline** (its alerts, deploy reports, generation swaps from its bundles, its start and its close or loss,
+newest first; an alert or swap with a bundle opens it), its **Debug bundles** and TPS / memory / players charts over
+**its whole life** (the 5-minute rollups past the last 2 hours). Debug bundles also show on a live server's page.
+Opening a bundle (`?bundle=<id>`; the alerts table on the Fleet page links an alert with `d.bundle` there, and every
+alert with a JobId to its server page) shows a summary card (what failed, the trigger, stage, error, triggers, build,
+kernel), then **Players**, **Server log**, **Player logs** (pick a player; not offered to the read-only role) and
+**Deploy and swaps** (the generation history, failed here, swap reports, refusals, heads, Fallback). The Fleet page has
+a **Recently gone** table so offline servers stay reachable.
 
 ### Instant wake
 
@@ -1216,6 +1347,26 @@ it in `OPENCLOUD_API_KEY` on Coolify (as a secret) with `TYPETORCH_UNIVERSE_ID` 
 redeploy. If `OPENCLOUD_API_KEY` is already set for erasure, add the messaging-service API system with
 `universe-messaging-service:publish` to that key instead of making a second one.
 
+### Roblox server logs
+
+Roblox keeps each game server's errors and warnings and serves them per JobId through Open Cloud's server management
+API (beta: [Observability](https://create.roblox.com/docs/cloud/reference/features/observability),
+`GameServers_ListGameServerLogs`). With `OPENCLOUD_API_KEY` given the **universe:read** scope on the game and
+`TYPETORCH_UNIVERSE_ID`, the backend reads them for the server page's **Roblox logs** section.
+
+- Roblox files a server's logs under its place and **place version**. Kernels that send `pv` (game.PlaceVersion) in the
+  heartbeat give the backend both; for an older kernel, or a server the fleet never heard of, the route answers 409 and
+  the explorer asks for the version (`?placeVersion=`, and `?placeId=` when the fleet has no row).
+- Filters go to Roblox as CEL: `severity` (comma-separated words, as Roblox spells them) becomes `severity in [...]`,
+  `search` (<= 200 characters, case-insensitive full text) `search == "..."`. Newest first (`order=asc` for oldest
+  first), 50 a page, `nextPageToken` for the next.
+- Roblox documents only part of the answer, so each entry is read loosely: the time, severity, message, repeat count
+  and stack are picked from the names Roblox uses, every other plain field comes along in `fields`. Logs show up about 3 minutes after the server writes them; Roblox folds repeated messages into a count.
+- Roblox allows 100 calls a minute per key owner, shared with every other use of the key: logs are cached 20 s,
+  at most 60 calls a minute leave the backend (an older answer is served past that), and each address
+  may ask 120 times a minute. A refused key is a 502 naming the scope; a filter Roblox refuses is a 400. The route
+  answers 409 while the key or the universe isn't set.
+
 ## Privacy
 
 - Events carry a random pid, never a UserId, name or chat. The game keeps UserId -> pid in its DataStore
@@ -1224,7 +1375,9 @@ redeploy. If `OPENCLOUD_API_KEY` is already set for erasure, add the messaging-s
   player (support) and answer Right to Erasure without a DataStore read. It is never part of the events, Parquet files,
   rollups, raw archives or Basin, and goes to one place only: Roblox itself, when an admin opens a player's detail (the
   server asks Roblox's public APIs for that UserId's name and headshot, without the pid; the answer stays in memory, see
-  [Player profiles](#player-profiles)).
+  [Player profiles](#player-profiles)). The [lookup token](#the-lookup-token-for-scripts-and-llm-agents), when set, also
+  hands the bare pid <-> UserId link to whoever holds it (an agent of the dev's own); that is still the dev's own tooling
+  only while the agent keeps it there.
 - **Erasure removes them**: the webhook (or `POST /v1/erasure` by pid) deletes the pid's rows everywhere, then the
   identity rows, and identity rows for an erased pid are refused afterwards. The erasure log never holds the UserId.
 - **Remote debug answers** (player names, logs, state) stay in the backend's memory for at most 3 minutes and in the
@@ -1319,7 +1472,7 @@ these synthetic ones.
 
 ```sh
 bun install
-bun test                       # ~300 tests on a real DuckDB; TT_TEST_HTTP_BACKEND=node runs them on node:http
+bun test                       # ~500 tests on a real DuckDB; TT_TEST_HTTP_BACKEND=node runs them on node:http
 bun run typecheck
 bun run build                  # dist/ for Node
 node scripts/smoke.mjs         # the built server under Node: ingest, loader, query, fleet
@@ -1330,7 +1483,10 @@ cd web && bun run test         # the explorer's tests (vitest); bun run typechec
 ```
 
 The same commands work in PowerShell 5.1 and bash. Tests use temp folders and fake Open Cloud / Basin / webhook / Roblox sign-in
-endpoints with made-up keys; nothing reaches a real service. `bun test` runs only `test/` (`bunfig.toml`); the explorer has its own.
+endpoints with made-up keys; nothing reaches a real service. `bun test` runs only `test/` (`bunfig.toml`); the explorer has its own
+(`bun run test:all` runs both). `bun run local` is the [local run](#quick-start-local); `bun run loadtest`, `bun run
+bench:nightly` and `bun run report` wrap the scripts in `scripts/`. There are no GitHub workflows: tests run where you run
+them, and nothing is published (the package is private).
 
 ## Open issues
 
@@ -1341,8 +1497,8 @@ endpoints with made-up keys; nothing reaches a real service. `bun test` runs onl
   ones mark every column required; both accept what the framework sends).
 - **Basin erasure** deletes only the DataStore link (anonymous rows stay); a DuckDB `iceberg` DELETE job is possible
   later.
-- **Not run here:** the `Dockerfile` and `compose.yaml` (no Docker on this machine; tests read them), the systemd unit and the
-  Caddyfile (no VPS), a real Coolify deploy, and Sign in with Roblox against Roblox itself (tests use a fake Roblox with a
+- **Not exercised by the tests:** the `Dockerfile` and `compose.yaml` (tests read them, nothing builds the image), the systemd
+  unit and the Caddyfile, a real Coolify deploy, and Sign in with Roblox against Roblox itself (tests use a fake Roblox with a
   generated key pair; check the live flow once with your OAuth app). The server itself runs under Bun and Node 22 (tests, smoke
   test, load tests), and the built explorer was driven in a browser against it.
 - The CLI's own fleet client and this API agree on paths and fields (see the fleet table); `servers` rows carry no
