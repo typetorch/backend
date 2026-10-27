@@ -3,7 +3,7 @@
  * the heartbeat's `pv`, and the loose reader. All tokens and ids are made up.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { logFilter, readLog } from "../src/server/roblox-servers.ts";
+import { logFilter, readLog, RobloxServers, RobloxServersError } from "../src/server/roblox-servers.ts";
 import { ADMIN, API, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 const UNIVERSE = 5_550_001;
@@ -143,5 +143,22 @@ describe("loose reader", () => {
 			fields: {},
 		});
 		expect(readLog({ messageTimestampMs: "soon", message: 5 })).toMatchObject({ time: null, message: null, fields: { messageTimestampMs: "soon", message: 5 } });
+	});
+});
+
+describe("Roblox not answering", () => {
+	test("two tries with a deadline each, then a 502 with the reason (never past the idle timeout)", async () => {
+		let calls = 0;
+		const hang = ((_input: string, init?: RequestInit) => {
+			calls++;
+			return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("The operation timed out."))));
+		}) as unknown as typeof fetch;
+		const servers = new RobloxServers({ apiKey: OPEN_CLOUD, universeId: UNIVERSE, fetch: hang, timeoutMs: 50 });
+		const error = await servers.logs({ jobId: JOB, placeId: PLACE, placeVersion: 1 }).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(RobloxServersError);
+		expect((error as RobloxServersError).status).toBe(502);
+		expect((error as Error).message).toContain("timed out");
+		expect((error as Error).message).not.toContain(OPEN_CLOUD);
+		expect(calls).toBe(2);
 	});
 });

@@ -27,6 +27,8 @@ export interface OpenCloudOptions {
 	/** Base URL override (tests). */
 	base?: string;
 	timeoutMs?: number;
+	/** Tries for a GET (429, 5xx or no answer; default 3). Writes are never retried. */
+	attempts?: number;
 }
 
 async function call(options: OpenCloudOptions, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown; text: string }> {
@@ -35,7 +37,8 @@ async function call(options: OpenCloudOptions, method: string, path: string, bod
 	const headers: Record<string, string> = { "x-api-key": options.apiKey };
 	if (body !== undefined) headers["content-type"] = "application/json";
 	let lastError: unknown;
-	for (let attempt = 1; attempt <= 3; attempt++) {
+	const attempts = method === "GET" ? Math.max(1, options.attempts ?? 3) : 1;
+	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
 			const response = await doFetch(`${options.base ?? OPEN_CLOUD}${path}`, {
 				method,
@@ -51,14 +54,14 @@ async function call(options: OpenCloudOptions, method: string, path: string, bod
 				parsed = undefined;
 			}
 			// Retry only reads on 429/5xx (writes could apply twice).
-			if (method === "GET" && attempt < 3 && (response.status === 429 || response.status >= 500)) {
+			if (method === "GET" && attempt < attempts && (response.status === 429 || response.status >= 500)) {
 				await new Promise((done) => setTimeout(done, 500 * attempt));
 				continue;
 			}
 			return { status: response.status, body: parsed, text };
 		} catch (error) {
 			lastError = error;
-			if (method !== "GET") break;
+			if (attempt >= attempts) break;
 			await new Promise((done) => setTimeout(done, 500 * attempt));
 		}
 	}
