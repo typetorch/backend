@@ -1246,3 +1246,59 @@ export interface RobloxProductInfo {
 	/** An https icon on Roblox's CDN (*.rbxcdn.com). */
 	icon: string | null;
 }
+
+// Backend stats (GET /v1/admin/stats): the server's own metrics for the explorer's Backend stats page -------------------
+
+export interface LatencySummary {
+	count: number;
+	p50: number | null;
+	p90: number | null;
+	p99: number | null;
+	max: number | null;
+	avg: number | null;
+}
+
+export type RouteGroup = "ingest" | "errors-in" | "fleet-in" | "long-poll" | "stream" | "query" | "sql" | "rollups" | "errors" | "fleet" | "roblox" | "auth" | "admin" | "health" | "explorer" | "other";
+
+/** One second (or one minute) of the server's work. */
+export interface StatsBucket {
+	at: number;
+	requests: number;
+	status: { "2xx": number; "3xx": number; "4xx": number; "5xx": number };
+	latency: LatencySummary;
+	duckdb: { queries: number; latency: LatencySummary; rowsLoaded: number };
+	sqlite: { reads: number; writes: number };
+	ingest: { rows: number; bytes: number };
+	memory: { rssMb: number; heapMb: number; heapTotalMb: number; externalMb: number } | null;
+	cpuPercent: number | null;
+	loopLagMs: number | null;
+}
+
+export interface RouteStats {
+	group: RouteGroup;
+	requests: number;
+	errors: number;
+	latency: LatencySummary;
+}
+
+export type StatsWindow = "1m" | "5m" | "15m" | "1h";
+
+export interface BackendStats {
+	now: number;
+	uptimeSeconds: number;
+	state: "ready" | "handover" | "failed" | "stopping";
+	version: string;
+	runtime: string;
+	/** Per second, averaged over the last `seconds` whole seconds. */
+	rates: { seconds: number; requests: number; errors: number; duckQueries: number; rowsIn: number; rowsLoaded: number; sqliteReads: number; sqliteWrites: number };
+	sample: { rssMb: number; heapMb: number; heapTotalMb: number; externalMb: number; cpuPercent: number; loopLagMs: number } | null;
+	latency: { recent: LatencySummary; window: LatencySummary };
+	duckdb: { recent: LatencySummary; window: LatencySummary };
+	totals: { requests: number; errors: number; duckQueries: number; rowsIn: number; bytesIn: number; rowsLoaded: number; sqliteReads: number; sqliteWrites: number; since: number };
+	/** Per second, the last 2 minutes (a missing second: nothing happened). */
+	seconds: StatsBucket[];
+	/** Per minute, the last hour. */
+	minutes: StatsBucket[];
+	window: StatsWindow;
+	routes: RouteStats[];
+}

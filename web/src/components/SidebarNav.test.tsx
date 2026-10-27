@@ -143,8 +143,9 @@ describe("sidebar", () => {
 		cleanup();
 		mount("/", { auth: { ...admin, role: "game" } });
 		expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
+		expect(screen.queryByRole("link", { name: "Backend stats" })).toBeNull();
 		// Its group goes with it.
 		expect(screen.queryByRole("button", { name: "Admin" })).toBeNull();
-		expect(within(screen.getByRole("navigation", { name: "Main" })).getAllByRole("link").length).toBe(NAV.length - 1);
+		expect(within(screen.getByRole("navigation", { name: "Main" })).getAllByRole("link").length).toBe(NAV.filter((i) => !i.ownerOnly).length);
 	});
 });

@@ -60,6 +60,7 @@ const router = createBrowserRouter([
 			{ path: "errors", lazy: page(() => import("@/pages/Errors")) },
 			{ path: "query", lazy: page(() => import("@/pages/Query")) },
 			{ path: "settings", lazy: page(() => import("@/pages/Settings")) },
+			{ path: "backend", lazy: page(() => import("@/pages/BackendStats")) },
 			{ path: "*", lazy: page(() => import("@/pages/NotFound")) },
 		],
 	},

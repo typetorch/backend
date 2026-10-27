@@ -39,6 +39,8 @@
  *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
  *   PATCH /v1/admin/settings        { key: value | null } (null = back to the environment), applied at once; lockout guards
  *   POST /v1/admin/settings/test-alert   one test alert through the current webhook (3 a minute)
+ *   GET  /v1/admin/stats?window=1m|5m|15m|1h   server metrics (server/metrics.ts): requests, queries, inserts per second,
+ *                                   latency percentiles, memory, CPU, per route group (the explorer's Backend stats page)
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
@@ -92,6 +94,7 @@ import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie
 import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
+import { meterSqlite, parseStatsWindow, ServerMetrics, STATS_WINDOWS } from "./metrics.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
 import { CentralLogin } from "./central-login.ts";
 import { CentralReporter, type ReportResult } from "./central-report.ts";
@@ -146,6 +149,8 @@ export interface App {
 	readonly errors: ErrorStore;
 	readonly access: AccessStore;
 	readonly live: LiveHub;
+	/** Server metrics (GET /v1/admin/stats): requests, queries, inserts, latency, memory. */
+	readonly metrics: ServerMetrics;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
 	readonly remoteDebug?: RemoteDebugHub;
 	/** Plans/25 "Instant wake": the wake publisher (off without OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID). */
@@ -213,6 +218,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// One bus for the whole process. Stores that answer for their data are awaited subscribers; the rest are queued.
 	const bus: BackendBus = new EventBus<BackendTopics>({ maxQueue: config.busMaxQueue, maxBytes: config.busMaxBytes, log });
+	// Server metrics: every request, DuckDB statement, SQLite statement and accepted row is counted (the Backend stats page).
+	const metrics = new ServerMetrics({ clock });
 
 	const openWarehouse = () =>
 		Warehouse.open({
@@ -227,6 +234,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			fsyncMs: config.fsyncMs,
 			clock,
 			log,
+			hooks: { statement: (ms) => metrics.duckQuery(ms), loaded: (rows) => metrics.rowsLoaded(rows) },
 		});
 	// DuckDB first. Held by another process (a rolling deploy's previous container): start in handover instead of failing,
 	// and take it over once it lets go (see "Rolling deploys" below). Any other error stops the start as before.
@@ -259,7 +267,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		...(options.fetch ? { fetch: options.fetch } : {}),
 	});
 	// One SQLite file for the fleet tables, pid <-> UserId and the error logs.
-	const sqlite = await openSqlite(config.fleetDb);
+	const sqlite = meterSqlite(await openSqlite(config.fleetDb), metrics);
 	const identities = await IdentityStore.open(sqlite);
 	const errors = await ErrorStore.open(sqlite, {
 		clock,
@@ -481,6 +489,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (error instanceof RawLogClosed) return restarting();
 			throw error;
 		}
+		metrics.rowsIn(batch.events.length + batch.recordings.length, read.bytes);
 		return json(202, {
 			accepted: batch.events.length + batch.recordings.length,
 			rejected: batch.rejected,
@@ -1621,6 +1630,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (admin instanceof Response) return admin;
 				return method === "GET" ? json(200, settingsView(ip, admin)) : patchSettings(req, ip, admin);
 			}
+			if (path === "/v1/admin/stats") {
+				if (method !== "GET") return json(405, { error: "GET only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				const window = parseStatsWindow(url.searchParams.get("window"));
+				if (!window) return json(400, { error: `window must be one of ${STATS_WINDOWS.join(", ")}` });
+				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName() });
+			}
 			if (path === "/v1/admin/settings/test-alert") {
 				if (method !== "POST") return json(405, { error: "POST only" });
 				const admin = manage();
@@ -1696,6 +1713,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			url.pathname = path;
 		}
 		let response: Response;
+		const started = performance.now();
 		if (stopping) {
 			// Stopping: nothing new starts (the next server takes it; the senders retry on 503).
 			response = restarting();
@@ -1710,6 +1728,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				inflight--;
 			}
 		}
+		metrics.request(req.method, path, response.status, performance.now() - started);
 		const html = (response.headers.get("content-type") ?? "").startsWith("text/html");
 		return withSecurityHeaders(response, { https: isHttps(req, proxyOpts), csp: html ? EXPLORER_CSP : API_CSP });
 	}
@@ -1760,9 +1779,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		nightlyCheck();
 		void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 	}
+	// The metrics sampler (memory, CPU, event loop lag) once a second; one reading now so the page never starts empty.
+	metrics.sample();
 	if (!options.manualJobs) {
 		if (warehouse) startWarehouseJobs(warehouse);
-		const jobs = [setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000)];
+		const jobs = [setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000), setInterval(() => metrics.sample(), 1000)];
 		if (fleet) jobs.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
 		for (const t of jobs) t.unref?.();
 		timers.push(...jobs);
@@ -1891,6 +1912,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		errors,
 		access,
 		live,
+		metrics,
 		...(central ? { central: { fingerprint: central.key.fingerprint, report: () => central.reporter.report(), devices: central.devices } } : {}),
 		sessionCount: () => sessions.size,
 		sessions,
