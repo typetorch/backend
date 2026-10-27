@@ -48,6 +48,7 @@
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
+ *   GET  /openapi.json | /docs | /llms.txt   the OpenAPI spec, Swagger UI over it, llms.txt (openapi.ts; the allow list's addresses)
  *   GET  /v1/auth/check             which role the credentials have and which parts run (no side effects); 401 says which logins are on;
  *                                   both carry `dashboard` (the typetorch.dev broker's origin) while that login is on
  *   POST /v1/auth/login | logout    explorer session by pasting the admin token
@@ -98,6 +99,7 @@ import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie
 import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
+import { DOCS_CSP, SWAGGER_INIT, llmsTxt, openApiSpec, swaggerPage } from "./openapi.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
 import { CentralLogin } from "./central-login.ts";
 import { CentralReporter, type ReportResult } from "./central-report.ts";
@@ -1616,10 +1618,27 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return gate.principal.role === "admin" ? { principal: gate.principal as Principal & { role: "admin" } } : { response: json(403, { error: READ_ONLY }) };
 	}
 
+	/** GET /openapi.json, /docs (+ its script), /llms.txt. Absolute links when TYPETORCH_PUBLIC_URL is set. */
+	function docs(req: Request, path: string): Response {
+		const o = { ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}), prefix: routePath(req) === new URL(req.url).pathname ? "" : "/api" };
+		const text = (body: string, type: string, csp?: string) =>
+			new Response(body, { status: 200, headers: { "content-type": type, "cache-control": "no-cache", ...(csp ? { "content-security-policy": csp } : {}) } });
+		if (path === "/openapi.json") return json(200, openApiSpec(o), { "cache-control": "no-cache" });
+		if (path === "/docs") return text(swaggerPage(), "text/html; charset=utf-8", DOCS_CSP);
+		if (path === "/docs/swagger-init.js") return text(SWAGGER_INIT, "text/javascript; charset=utf-8");
+		return text(llmsTxt(o), "text/markdown; charset=utf-8");
+	}
+
 	async function route(req: Request, url: URL, path: string, ip: string): Promise<Response> {
 		const method = req.method;
 		if (method === "OPTIONS") return json(405, { error: "no CORS here: use the same origin or a Bearer token" });
 		if (path === "/healthz" && method === "GET") return health(req, ip);
+		// The machine-readable docs (openapi.ts), for the allow list's addresses like the explorer.
+		if (path === "/openapi.json" || path === "/docs" || path === "/docs/swagger-init.js" || path === "/llms.txt") {
+			if (!adminIpOk(ip)) return notFound();
+			if (method !== "GET" && method !== "HEAD") return json(405, { error: "GET only" });
+			return docs(req, path);
+		}
 
 		// Open: who am I, log in and out, Sign in with Roblox.
 		if (path === "/v1/auth/check") return method === "GET" ? authCheck(req, ip) : json(405, { error: "GET only" });
