@@ -122,6 +122,8 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	// The Settings page can read through the proxy (the webhook URL is never in the answer). Saving and the test alert are
 	// not forwarded: change settings on the backend's own explorer, signed in.
 	{ method: "GET", path: /^\/v1\/admin\/settings$/ },
+	// The Backend stats page: the server's own metrics (counts and timings, no secrets).
+	{ method: "GET", path: /^\/v1\/admin\/stats$/ },
 ];
 
 export interface GuardInput {

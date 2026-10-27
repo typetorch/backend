@@ -323,6 +323,7 @@ const ROUTES: Route[] = [
 	{ method: "get", path: "/v1/admin/settings", tag: "admin", roles: ["admin"], summary: "Runtime settings: values, sources, bounds, audit list" },
 	{ method: "patch", path: "/v1/admin/settings", tag: "admin", roles: ["admin"], summary: "Change runtime settings", description: "`{ key: value | null }` (null = back to the environment), applied at once, with lockout guards.", body: obj() },
 	{ method: "post", path: "/v1/admin/settings/test-alert", tag: "admin", roles: ["admin"], summary: "Send one test alert through the saved webhook (3 a minute)" },
+	{ method: "get", path: "/v1/admin/stats", tag: "admin", roles: ["admin"], summary: "The server's own metrics (the explorer's Backend stats page)", description: "Requests, DuckDB statements, rows in / loaded and SQLite reads / writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag; per second for 2 min and per minute for 1 h; per route group over `window`; totals since start.", params: [q("window", "the route group table's window (default 5m)", { type: "string", enum: ["1m", "5m", "15m", "1h"] })] },
 	{ method: "get", path: "/v1/access", tag: "admin", roles: ["admin"], summary: "The owner list" },
 	{ method: "put", path: "/v1/access", tag: "admin", roles: ["adminToken"], summary: "Replace the owner list", body: obj({ seq: int(), owners: arr(int(), "UserIds") }, ["seq", "owners"]) },
 	{ method: "get", path: "/v1/access/keys", tag: "admin", roles: ["admin"], summary: "The signing keys a trust link may use" },

@@ -499,6 +499,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
+| `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
@@ -728,9 +729,9 @@ web:build` build it into `web/dist`, and the backend serves it at `/` (the Docke
 Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
 Sessions, Timeline and Errors views), Flow, Experiments, First session, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
-[Runtime settings](#runtime-settings-the-settings-page)). The sidebar groups them (Overview; Players & gameplay: Players,
-Events, Funnels, Flow, Retention, First session, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings, owners
-only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
+[Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
+Events, Funnels, Flow, Retention, First session, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
+Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
 TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
 name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
 with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker. Every JobId
@@ -759,6 +760,17 @@ Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-
 **Live servers**: each server's latest TPS and memory from its heartbeat, and its own history
 (`GET /v1/fleet/servers/<jobId>/metrics`, kernel 0.4.2 heartbeats; the page says so when a server or the backend doesn't have
 it). A **Step** picker overrides the window's step (1 min to 1 day, 2 to 400 steps).
+
+**Backend stats** (`/backend`, owners only): what the backend process itself is doing, like Roblox's Performance tab for a game
+server. Tiles with the last 10 seconds: requests / s (and 5xx / s), queries / s (DuckDB statements; SQLite reads next to it),
+inserts / s (rows accepted by ingest; rows the loader put into DuckDB and SQLite writes next to it), request latency p50 / p90 /
+p99, memory (RSS, heap, native), CPU share and event loop lag, uptime. Charts over the last 2 minutes per second or the last 60
+minutes per minute: requests, queries and inserts, request latency, DuckDB statement latency, memory, CPU and lag. A table per
+route group (ingest, fleet posts, queries, SQL, fleet reads, sign-in, admin, explorer files...) with requests, 5xx and p50 / p90 /
+p99 / max / avg over a picked window (1 min to 1 hour), and the totals since the server started. Live updates every 2 s (a
+Pause button). Everything is in the server's memory, bounded (latency as fixed log-spaced histograms, so percentiles cost the
+same at any load; `src/server/metrics.ts`); event streams and the remote debug long-poll are counted as requests but kept out
+of the latency percentiles, since their duration is the client's wait.
 
 Working on it: `bun run web:dev` (or `cd web && bun run dev -- --game <game repo>`) starts Vite with a proxy: `/api` goes to the
 backend with the admin token **from the game repo's `.env`** (`TYPETORCH_ADMIN_TOKEN`, or `TYPETORCH_ENV_FILE`), at the URL in the

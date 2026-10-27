@@ -15,6 +15,7 @@ import {
 	Bug,
 	CalendarRange,
 	Compass,
+	Cpu,
 	FlaskConical,
 	Gamepad2,
 	Gauge,
@@ -91,7 +92,10 @@ export const NAV_GROUPS: NavGroup[] = [
 	{
 		id: "admin",
 		label: "Admin",
-		items: [{ label: "Settings", path: "/settings", icon: Settings, noFilters: true, ownerOnly: true }],
+		items: [
+			{ label: "Settings", path: "/settings", icon: Settings, noFilters: true, ownerOnly: true },
+			{ label: "Backend stats", path: "/backend", icon: Cpu, noFilters: true, ownerOnly: true },
+		],
 	},
 ];
 

@@ -18,8 +18,29 @@ import { PROP_KEYS } from "../schema.ts";
 import type { QueryContext } from "../queries/core.ts";
 import { DAY_MS, duckdb, lit } from "../sql/dialect.ts";
 import type { Filters } from "../sql/filters.ts";
-import { DuckDbStore, readRows } from "../store/duckdb.ts";
+import { DuckDbStore, readRows, type TableResolver } from "../store/duckdb.ts";
 import { RawLog, type ReadyFile } from "./raw.ts";
+
+/** The pooled store of a logical query: each statement's time goes to the metrics hook. */
+class MeteredStore extends DuckDbStore {
+	constructor(
+		connection: DuckDBConnection,
+		resolve: TableResolver,
+		clock: () => number,
+		private readonly onStatement?: (ms: number) => void,
+	) {
+		super(connection, resolve, clock);
+	}
+
+	override async sql(statement: string): Promise<Record<string, unknown>[]> {
+		const started = performance.now();
+		try {
+			return await super.sql(statement);
+		} finally {
+			this.onStatement?.(performance.now() - started);
+		}
+	}
+}
 
 /** A many-readers / one-writer lock (the writer is the live-file swap). */
 export class RwLock {
@@ -90,6 +111,8 @@ export interface WarehouseOptions {
 	fsyncMs: number;
 	clock?: () => number;
 	log?: (line: string) => void;
+	/** Server metrics (server/metrics.ts): every statement on a read connection with its time, every row the loader puts in. */
+	hooks?: { statement?(ms: number): void; loaded?(rows: number): void };
 }
 
 export interface WarehouseStats {
@@ -252,6 +275,7 @@ export class Warehouse {
 			}
 			this.stats.loadedFiles += files;
 			this.stats.loadedRows += rows;
+			this.options.hooks?.loaded?.(rows);
 			if (rows) this.liveVersion++;
 			this.stats.lastLoadMs = Math.round(performance.now() - started);
 			this.stats.lastLoadAt = this.clock();
@@ -511,7 +535,7 @@ export class Warehouse {
 			const c = await this.connection();
 			const timer = setTimeout(() => c.interrupt(), this.options.queryTimeoutSeconds * 1000);
 			try {
-				const store = new DuckDbStore(c, (n, from, to) => tableExpression(this.layout, n, from, to, "live"), this.clock);
+				const store = new MeteredStore(c, (n, from, to) => tableExpression(this.layout, n, from, to, "live"), this.clock, this.options.hooks?.statement);
 				return await runQuery(this.context(), (s) => store.runStatements(s), name, filters, options);
 			} finally {
 				clearTimeout(timer);
@@ -525,11 +549,13 @@ export class Warehouse {
 		return this.lock.read(async () => {
 			const c = await this.connection();
 			const timer = setTimeout(() => c.interrupt(), this.options.queryTimeoutSeconds * 1000);
+			const started = performance.now();
 			try {
 				return await readRows(c, statement);
 			} finally {
 				clearTimeout(timer);
 				this.release(c);
+				this.options.hooks?.statement?.(performance.now() - started);
 			}
 		});
 	}

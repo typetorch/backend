@@ -6,6 +6,7 @@
  */
 import type {
 	AuthInfo,
+	BackendStats,
 	BackfillResult,
 	BlessedDevice,
 	DebugAuditEntry,
@@ -35,6 +36,7 @@ import type {
 	RemoteOp,
 	SettingsView,
 	SqlResult,
+	StatsWindow,
 	StorageReport,
 	TestAlertResult,
 	WatchReply,
@@ -227,6 +229,8 @@ export function createApi(options: ApiOptions = {}) {
 			request<SettingsView>("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(changes), ...(signal ? { signal } : {}) }),
 		/** One test alert through the saved webhook (the backend allows 3 a minute). */
 		testAlert: (signal?: AbortSignal) => post<TestAlertResult>("/v1/admin/settings/test-alert", {}, signal),
+		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */
+		backendStats: (window: StatsWindow, signal?: AbortSignal) => get<BackendStats>(`/v1/admin/stats${qs({ window })}`, signal),
 		/** Sign in with typetorch.dev: the browsers trusted for full admin (owners only). */
 		devices: (signal?: AbortSignal) => get<{ devices: BlessedDevice[] }>("/v1/admin/devices", signal).then((r) => r.devices),
 		revokeDevice: (id: string, signal?: AbortSignal) =>
