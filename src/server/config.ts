@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { alertEnvNames, alertSettingsFromEnv, BACKEND_ALERTS_ENV, type BackendAlertSettings } from "../alerts/rules.ts";
 import { FLEET_NEW_JOBS_PER_MINUTE } from "../fleet/http.ts";
 import { applyLegacyEnv } from "../legacy-env.ts";
 import { parseIpRules, type IpRule } from "./ipfilter.ts";
@@ -155,6 +156,8 @@ export interface ServerConfig {
 	runtimeSettings: boolean;
 	/** Names (never values) of the variables that were set, so the Settings page can say "env" vs "default". */
 	envSet: ReadonlySet<string>;
+	/** The backend alert rules' defaults (TYPETORCH_BACKEND_ALERTS, TYPETORCH_ALERT_<RULE>_*; src/alerts/rules.ts). */
+	backendAlerts?: BackendAlertSettings;
 	/** One line per old variable name that was read: "OLD is deprecated: use NEW". Never holds a value. */
 	warnings: string[];
 }
@@ -487,8 +490,11 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		fleetNewJobsPerMinute: num(env, "TYPETORCH_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),
 		runtimeSettings: flag(env, "TYPETORCH_RUNTIME_SETTINGS", true),
 		envSet: new Set(Object.keys(env).filter((name) => env[name] !== undefined && env[name] !== "")),
+		backendAlerts: alertSettingsFromEnv(env),
 		warnings,
 	};
+	// Any rule variable set: the Settings page says the rules come from the environment.
+	if (alertEnvNames().some((name) => config.envSet.has(name))) (config.envSet as Set<string>).add(BACKEND_ALERTS_ENV);
 	if (adminAllowIps) config.adminAllowIps = adminAllowIps;
 	if (trustedProxies) config.trustedProxies = trustedProxies;
 	if (cloudflareIps) config.cloudflareIps = cloudflareIps;

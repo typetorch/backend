@@ -1356,6 +1356,11 @@ export class FleetService {
 		});
 	}
 
+	/** A backend alert (src/alerts): stored, streamed and published like the sweep's (source server). */
+	async serverAlert(a: { level: AlertLevel; code: string; message: string; branch: string | null; artifact: string | null; seq: number | null; details: Record<string, unknown> | null }): Promise<Alert> {
+		return this.addAlert({ ...a, message: a.message.slice(0, 500), job: null, generation: null, kernel: null, source: "server" });
+	}
+
 	private async addAlert(a: NewAlert): Promise<Alert> {
 		const now = this.clock();
 		const { lastId } = await this.db.run(
