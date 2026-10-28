@@ -3,7 +3,9 @@ import { PROP_KEYS } from "../schema.ts";
 import { DAY_MS, assertSafeKey } from "../sql/dialect.ts";
 import {
 	ENDED_AFTER_MS,
+	NOT_STUDIO,
 	SESSIONS_CTE,
+	sessionDaysCte,
 	dayOf,
 	defineQuery,
 	eventsTable,
@@ -23,8 +25,8 @@ import {
 } from "./core.ts";
 import type { NormalizedFilters } from "../sql/filters.ts";
 
-function sessionCtes(ctx: QueryContext, f: NormalizedFilters, extraCols = ""): string {
-	return `ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp${extraCols} FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx)}), ${SESSIONS_CTE}`;
+function sessionCtes(ctx: QueryContext, f: NormalizedFilters, extraCols = "", extraWhere = ""): string {
+	return `ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp${extraCols} FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, extraWhere)}), ${SESSIONS_CTE}`;
 }
 
 // overview ------------------------------------------------------------------------------------------------------------
@@ -177,18 +179,17 @@ export interface RobloxResult {
 	purchases: number;
 }
 
-/** `c(pid, cday)`: new players whose first session started in the range, with their join day. */
+/**
+ * `c(pid, cday)`: new players whose first session started in the range, with their join day (UTC): the cohort is the
+ * first play date, as on Roblox. Studio play tests don't count.
+ */
 function cohortCte(ctx: QueryContext, f: NormalizedFilters): string {
-	return `c AS (SELECT e.pid AS pid, ${dayOf("MIN(e.t)")} AS cday FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, "e.newp = TRUE")} GROUP BY e.pid)`;
+	return `c AS (SELECT e.pid AS pid, ${dayOf("MIN(e.t)")} AS cday FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, `e.newp = TRUE AND ${NOT_STUDIO}`)} GROUP BY e.pid)`;
 }
 
-/** `c` plus `a(pid, day)`: every day any player played, from the range start to `windowDays` after its end. */
+/** `c` plus `a(pid, day)`: the days a player started a session, from the range start to `windowDays` after its end. */
 function cohortCtes(ctx: QueryContext, f: NormalizedFilters, windowDays: number): string {
-	const table = eventsTable(ctx, f, windowDays);
-	return (
-		`${cohortCte(ctx, f)}, ` +
-		`a AS (SELECT DISTINCT e.pid AS pid, ${dayOf("e.t")} AS day FROM ${table} e WHERE e.t >= ${int(f.from)} AND e.t < ${int(f.to + windowDays * DAY_MS)} AND e.pid IS NOT NULL AND e.pid <> '')`
-	);
+	return `${cohortCte(ctx, f)}, ${sessionDaysCte(ctx, f.from, f.to + windowDays * DAY_MS)}`;
 }
 
 export const roblox = defineQuery<RobloxOptions, RobloxResult>({
@@ -207,7 +208,7 @@ export const roblox = defineQuery<RobloxOptions, RobloxResult>({
 		const robux = ctx.dialect.jsonNumber("props", o.robuxKey);
 		return {
 			numbers:
-				`WITH ${sessionCtes(ctx, f, ", e.kind AS kind, e.props AS props, e.src AS esrc")}, ` +
+				`WITH ${sessionCtes(ctx, f, ", e.kind AS kind, e.props AS props, e.src AS esrc", NOT_STUDIO)}, ` +
 				`p AS (SELECT pid, SUM(t1 - t0) AS playtime, COUNT(DISTINCT day0) AS days FROM (SELECT pid, t0, t1, ${dayOf("t0")} AS day0 FROM s) x GROUP BY pid), ` +
 				`pu AS (SELECT pid, SUM(COALESCE(robux, 0)) AS robux, COUNT(*) AS purchases FROM (SELECT pid, ${robux} AS robux FROM ev WHERE kind = 'purchase' AND ${SERVER_PURCHASE}) y GROUP BY pid) ` +
 				`SELECT a.players, a.playtime_ms, a.play_days, b.sessions, b.qualified, b.first_sessions, b.bounced, c.payers, c.robux, c.purchases ` +
