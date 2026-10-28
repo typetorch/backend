@@ -57,6 +57,8 @@ export interface RuntimeValues {
 	errorKeepDays: number;
 	errorMaxKinds: number;
 	errorRowsPerDay: number;
+	/** Days of audit log entries kept (server/audit.ts). */
+	auditKeepDays: number;
 }
 export type RuntimeKey = keyof RuntimeValues;
 export type SettingSource = "env" | "dashboard" | "default";
@@ -97,6 +99,7 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "errorKeepDays", env: "TYPETORCH_ERROR_KEEP_DAYS", group: "retention", kind: "number", min: 1, max: 3650, unit: "days", label: "Error log history", help: "Days of error counts kept (pruned hourly)." },
 	{ key: "errorMaxKinds", env: "TYPETORCH_ERROR_MAX_KINDS", group: "retention", kind: "number", min: 100, max: 1_000_000, unit: "kinds", label: "Error kinds stored", help: "Past it, new kinds are dropped and counted." },
 	{ key: "errorRowsPerDay", env: "TYPETORCH_ERROR_ROWS_PER_DAY", group: "retention", kind: "number", min: 10_000, max: 1_000_000_000, unit: "rows / day", label: "Error rows per day", help: "New error count and player rows per UTC day; past it they are dropped and counted." },
+	{ key: "auditKeepDays", env: "TYPETORCH_AUDIT_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 3650, unit: "days", label: "Audit log history", help: "Days of audit log entries kept (who did what on the admin side; pruned hourly)." },
 ];
 
 /** Settings that stay environment-only (secrets and wiring): change them on Coolify and redeploy. */
@@ -282,6 +285,7 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		errorKeepDays: config.errorKeepDays,
 		errorMaxKinds: config.errorMaxKinds,
 		errorRowsPerDay: config.errorRowsPerDay,
+		auditKeepDays: config.auditKeepDays,
 	};
 }
 

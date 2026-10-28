@@ -94,8 +94,11 @@ import { validateSettings } from "../settings.ts";
 import { BatchShapeError, validateBatch } from "../validate.ts";
 import { PACKAGE } from "../version.ts";
 import { AccessError, AccessStore } from "./access.ts";
-import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type Principal, type SignedIn } from "./auth.ts";
+import { ANONYMOUS, AUDIT_PAGE_MAX, AuditLog, actorOfUser, routeAction, settingChanges, type AuditActor, type AuditOutcome, type AuditRole, type AuditVia } from "./audit.ts";
+import { BackupError, Backups } from "./backup.ts";
+import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
 import type { ServerConfig } from "./config.ts";
+import { DiskWatch, type DiskUsage } from "./disk.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
 import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tokenIn, tooMany, withSecurityHeaders } from "./http.ts";
 import { ipAllowed } from "./ipfilter.ts";
@@ -112,7 +115,7 @@ import { RobloxPlace } from "./roblox-place.ts";
 import { MAX_PRODUCT_IDS, parseIdList, RobloxProducts } from "./roblox-products.ts";
 import { RobloxServers, RobloxServersError, SEARCH_MAX, SEVERITY_PATTERN } from "./roblox-servers.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
-import { ENV_ONLY, RuntimeSettings, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
+import { ENV_ONLY, RuntimeSettings, SETTINGS, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
 import { StaticSite } from "./static.ts";
 import { measureStorage, type StorageReport } from "./storage.ts";
@@ -134,6 +137,8 @@ export interface AppOptions {
 	handoverRetryMs?: number;
 	/** The wait between origin report polls while the typetorch.dev challenge runs (tests pass a fast one). */
 	reportSleep?: (ms: number) => Promise<void>;
+	/** Reads the data disk's free and total bytes (server/disk.ts; tests pass a fake). */
+	diskUsage?: (path: string) => DiskUsage | null;
 }
 
 /**
@@ -160,6 +165,12 @@ export interface App {
 	readonly live: LiveHub;
 	/** Server metrics (GET /v1/admin/stats): requests, queries, inserts, latency, memory. */
 	readonly metrics: ServerMetrics;
+	/** Who did what on the admin side (server/audit.ts; GET /v1/admin/audit). */
+	readonly audit: AuditLog;
+	/** Local backups and the download (server/backup.ts). */
+	readonly backups: Backups;
+	/** The data disk's free space and its warning level (server/disk.ts). */
+	readonly disk: DiskWatch;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
 	readonly remoteDebug?: RemoteDebugHub;
 	/** Plans/25 "Instant wake": the wake publisher (off without OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID). */
@@ -174,6 +185,10 @@ export interface App {
 	/** One loader tick. */
 	load(): Promise<{ files: number; rows: number }>;
 	nightly(): Promise<{ days: string[]; pruned: number; compacted: boolean }>;
+	/** One scheduled-backup check (tests drive it): a local backup when one is due. */
+	backupTick(): Promise<void>;
+	/** One disk check (tests drive it): the level, and the `disk_low` alert when it got worse. */
+	diskTick(): Promise<void>;
 	stop(): Promise<void>;
 }
 
@@ -214,6 +229,10 @@ const TEST_ALERTS_PER_MINUTE = 3;
 const PROFILE_PER_MINUTE = 120;
 /** Uncached Roblox names one error/experiment/funnel -> players read looks up in the background (the profile cache's caps still apply). */
 const PLAYER_NAME_WARM = 8;
+/** Backups: downloads and "back up now" per minute (each one copies the data folder). */
+const BACKUPS_PER_MINUTE = 2;
+/** How often the backup schedule is checked. */
+const BACKUP_CHECK_MS = 10 * 60_000;
 /** Handover: DuckDB is tried again this often, a warning is logged this often while waiting. */
 const HANDOVER_RETRY_MS = 1000;
 const HANDOVER_WARN_MS = 60_000;
@@ -288,6 +307,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		keepDays: () => runtime.get("errorKeepDays"),
 		maxKinds: () => runtime.get("errorMaxKinds"),
 		rowsPerDay: () => runtime.get("errorRowsPerDay"),
+	});
+	// The audit log (server/audit.ts): every secret in play is redacted from it, whatever a handler puts in the details.
+	const audit = await AuditLog.open(sqlite, {
+		clock,
+		log,
+		keepDays: () => runtime.get("auditKeepDays"),
+		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl")],
 	});
 	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
@@ -428,6 +454,57 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		watches: new RateLimiter(30, clock),
 	};
 	const keepOpen = new WeakMap<Request, () => void>();
+	const backupLimiter = new RateLimiter(BACKUPS_PER_MINUTE, clock);
+	// Backups (server/backup.ts): SQLite by VACUUM INTO on a worker, DuckDB between the warehouse's jobs.
+	const backups = new Backups({
+		dataDir: config.dataDir,
+		dir: config.backupDir,
+		keep: config.backupKeep,
+		everyHours: config.backupHours,
+		fleetDb: config.fleetDb,
+		warehouse: () => warehouse,
+		analyticsOn: config.parts.has("analytics"),
+		sqliteExec: (sql) => sqlite.exec(sql),
+		clock,
+		log,
+	});
+
+	// The data disk (server/disk.ts): measured every 10 minutes; under the threshold the explorer warns and the fleet alerts.
+	const diskThresholds = { warnFreePercent: config.diskWarnFreePercent, criticalFreePercent: config.diskCriticalFreePercent };
+	const disk = new DiskWatch({
+		path: config.dataDir,
+		thresholds: diskThresholds,
+		...(options.diskUsage ? { usage: options.diskUsage } : {}),
+		...(fleet ? { alert: (a) => fleet.diskLow(a) } : {}),
+		clock,
+		log,
+	});
+	const diskTick = () => disk.check().then(() => undefined);
+
+	// The audit log's notes ---------------------------------------------------------------------------------------------
+	// `handle` writes one audit entry per request that changed something on the admin side, after the route answered:
+	// the gate notes who called (readGate), a handler may name the action and add details (and, for the open sign-in
+	// routes, who it was). A write nobody named is still recorded under its method and route (routeAction).
+	interface AuditNote {
+		principal?: Principal;
+		actor?: AuditActor;
+		role?: AuditRole;
+		via?: AuditVia;
+		action?: string;
+		outcome?: AuditOutcome;
+		details?: Record<string, unknown>;
+	}
+	const auditNotes = new WeakMap<Request, AuditNote>();
+	function noteAudit(req: Request, note: AuditNote): void {
+		const before = auditNotes.get(req);
+		auditNotes.set(req, { ...before, ...note, ...(before?.details || note.details ? { details: { ...before?.details, ...note.details } } : {}) });
+	}
+	/** A note for a session that just started: who, with which role, by which sign-in. */
+	function noteSignIn(req: Request, user: SessionUser, role: AccessRole, method: string, extra: Record<string, unknown> = {}): void {
+		noteAudit(req, { actor: actorOfUser(user), role, via: "cookie", action: "sign-in", outcome: "ok", details: { method, role, ...extra } });
+	}
+	/** Records an entry now (no request behind it, or one the handler can't wait for). */
+	const auditNow = (input: Parameters<AuditLog["record"]>[0]) => void audit.record(input);
 
 	let settingsCache: { mtime: number; value: Record<string, unknown> } | undefined;
 	function liveDials(): Record<string, unknown> {
@@ -801,8 +878,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				...(typeof body.maxEntries === "number" ? { maxEntries: body.maxEntries } : {}),
 				...(options.fetch ? { fetch: options.fetch } : {}),
 			});
+			noteAudit(req, { action: "identity.backfill", details: { scanned: result.scanned, added: result.added, known: result.known } });
 			return json(200, result);
 		} catch (error) {
+			noteAudit(req, { action: "identity.backfill", outcome: "failed" });
 			return json(502, { error: `backfill failed: ${((error as Error).message ?? String(error)).slice(0, 300)}` });
 		}
 	}
@@ -945,6 +1024,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			...(w ? { sql: (s: string) => w.sql(s), liveRows: () => w.liveRows() } : {}),
 			clock,
 			cacheSeconds: STORAGE_CACHE_SECONDS,
+			diskThresholds,
+			...(options.diskUsage ? { diskUsage: options.diskUsage } : {}),
 		});
 		storageCache = { at: now, report };
 		report.catch(() => (storageCache = undefined));
@@ -1035,6 +1116,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(400, { error: "body is not JSON" });
 		}
 		const principal = adminIpOk(ip) ? auth.principal(req) : undefined;
+		if (principal && principal.role !== "game") noteAudit(req, { principal });
 		if (principal?.role === "web") return json(403, { error: READ_ONLY });
 		if (principal?.role === "admin") {
 			if (principal.via === "cookie") {
@@ -1051,12 +1133,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			await errors.erasePids(pids);
 			void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 			logErasure(w.layout.erasure, { source: "admin", pids: pids.length, liveRows });
+			// Counts only: the pids themselves are player data.
+			noteAudit(req, { action: "erasure", details: { source: "admin", pids: pids.length, liveRows } });
 			return json(200, { erased: pids.length, liveRows, files: "rewriting in the background" });
 		}
 		if (!config.webhookSecret) return json(401, { error: "erasure webhook secret not configured" });
 		const check = verifyRobloxSignature(req.headers.get("roblox-signature"), text, config.webhookSecret, clock());
 		if (!check.ok) return json(401, { error: check.reason });
 		const request = parseErasureBody(body);
+		// Roblox's signed webhook: recorded with the outcome below (never the UserId: player data).
+		const webhook = (outcome: string, extra: Record<string, unknown> = {}) =>
+			noteAudit(req, { actor: { kind: "roblox-webhook", label: "roblox erasure webhook" }, role: "none", via: "signature", action: "erasure", details: { source: "webhook", event: String(request.eventType).slice(0, 40), outcome, ...extra } });
+		webhook("received");
 		if (request.eventType === "SampleNotification") return json(200, { ok: true, sample: true });
 		if (request.eventType !== "RightToErasureRequest") return json(200, { ok: true, ignored: request.eventType });
 		// A handover: 503, and Roblox sends the notification again.
@@ -1064,6 +1152,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (w instanceof Response) return w;
 		if (config.universeId && request.gameIds.length && !request.gameIds.includes(config.universeId)) {
 			logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "another game" });
+			webhook("another game");
 			return json(200, { ok: true, ignored: "another game" });
 		}
 		if (!request.userId) return json(400, { error: "no UserId in the payload" });
@@ -1076,15 +1165,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			} catch (error) {
 				if (!pids.length) {
 					logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: `lookup failed: ${(error as Error).message.slice(0, 200)}` });
+					webhook("lookup failed");
 					return json(502, { error: "pid lookup failed; Roblox will retry" });
 				}
 			}
 		} else if (!pids.length) {
 			logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no identity row and no Open Cloud key for the DataStore lookup" });
+			webhook("pending: no pid known");
 			return json(202, { ok: true, pending: "no pid known for this UserId: configure OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID, or erase by pid with the admin token" });
 		}
 		if (!pids.length) {
 			logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "no pid link (already anonymous)" });
+			webhook("no pid link");
 			return json(200, { ok: true, erased: 0 });
 		}
 		const { liveRows } = await w.erase(pids);
@@ -1094,6 +1186,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		await errors.erasePids(pids);
 		void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
 		logErasure(w.layout.erasure, { source: "webhook", notification: request.notificationId, outcome: "erased", pids: pids.length, liveRows });
+		webhook("erased", { pids: pids.length, liveRows });
 		return json(200, { ok: true, erased: pids.length });
 	}
 
@@ -1108,7 +1201,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const given = bearer(req) !== undefined;
 		if (given && authFailures.blocked(ip)) return plain();
 		const principal = auth.principal(req);
-		if (!principal && given && !auth.hasLookupBearer(req)) failedAuth(ip, "health check token");
+		if (!principal && given && !auth.hasLookupBearer(req)) failedAuth(ip, "health check token", "bearer");
 		if (principal?.role !== "admin") return plain();
 		const memory = process.memoryUsage();
 		const out: Record<string, unknown> = {
@@ -1140,6 +1233,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		out.live = live.stats;
 		out.errors = errors.stats;
 		out.sessions = sessions.size;
+		if (disk.status) out.disk = { freeBytes: disk.status.freeBytes, totalBytes: disk.status.totalBytes, freePercent: disk.status.freePercent, level: disk.status.level };
 		if (central) {
 			const last = central.reporter.last;
 			out.central = {
@@ -1176,10 +1270,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (gameKeyFailures.blocked(ip)) log(`${ip}: wrong API keys are refused for ${Math.ceil(config.loginWindowMs / 60_000)} min after ${GAME_KEY_MAX_FAILURES} tries`);
 		return json(401, { error: "API key required" });
 	}
-	function failedAuth(ip: string, what: string): void {
+	/**
+	 * A failed sign-in or a wrong admin token: counted toward the lockout, logged, and in the audit log (with the method:
+	 * `token` login, `bearer` token on a route, `typetorch.dev`, `device`); the lockout it may cause gets its own entry.
+	 */
+	function failedAuth(ip: string, what: string, method: string): void {
 		authFailures.fail(ip);
 		log(`${what} failed from ${ip}`);
-		if (authFailures.blocked(ip)) log(`${ip} is blocked for ${Math.ceil(config.loginWindowMs / 60_000)} min after ${config.loginMaxFailures} failed attempts`);
+		auditNow({ actor: ANONYMOUS, role: "none", via: "none", ip, action: "sign-in", outcome: "failed", details: { method, what } });
+		if (authFailures.blocked(ip)) {
+			log(`${ip} is blocked for ${Math.ceil(config.loginWindowMs / 60_000)} min after ${config.loginMaxFailures} failed attempts`);
+			auditNow({ actor: ANONYMOUS, role: "none", via: "none", ip, action: "sign-in.lockout", outcome: "refused", details: { failures: config.loginMaxFailures, minutes: Math.ceil(config.loginWindowMs / 60_000) } });
+		}
 	}
 	function sessionCookie(req: Request, value: string): string {
 		return setCookie(SESSION_COOKIE, value, { secure: secureCookie(req), sameSite: "Strict", maxAgeSeconds: config.sessionMaxMs / 1000 });
@@ -1203,7 +1305,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const parts = { analytics: config.parts.has("analytics"), fleet: config.parts.has("fleet") };
 			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts, ...dashboard(), ...untrustedOwner(principal) });
 		}
-		if (bearer(req) !== undefined) failedAuth(ip, "token check");
+		if (bearer(req) !== undefined) failedAuth(ip, "token check", "bearer");
 		return json(401, { error: "sign in required", login: loginOptions() });
 	}
 
@@ -1237,20 +1339,23 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(400, { error: "body is not JSON" });
 		}
 		if (typeof token !== "string" || !tokenIn(token, [config.adminToken])) {
-			failedAuth(ip, "admin login");
+			failedAuth(ip, "admin login", "token");
 			return json(401, { error: "wrong token" });
 		}
 		authFailures.reset(ip);
 		const id = sessions.create({ kind: "token" });
+		noteSignIn(req, { kind: "token" }, "admin", "token");
 		return json(200, { ok: true, role: "admin", via: "cookie", user: { kind: "token" } }, { "set-cookie": sessionCookie(req, id) });
 	}
 
 	function logout(req: Request): Response {
 		const cookie = readCookie(req, SESSION_COOKIE);
-		if (cookie && sessions.get(cookie)) {
+		const session = cookie ? sessions.get(cookie) : undefined;
+		if (cookie && session) {
 			const problem = cookieMutationProblem(req, proxyOpts);
 			if (problem) return json(403, { error: problem });
 			sessions.destroy(cookie);
+			noteAudit(req, { actor: actorOfUser(session.user), role: session.role, via: "cookie", action: "sign-out", outcome: "ok" });
 		}
 		return json(200, { ok: true }, { "set-cookie": clearCookie(SESSION_COOKIE, { secure: secureCookie(req), sameSite: "Strict" }) });
 	}
@@ -1288,16 +1393,21 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const role = auth.roleOfRobloxUser(who.userId);
 			if (!role) {
 				log(`roblox sign-in refused from ${ip}: user ${who.userId} is not an owner or a viewer`);
+				noteAudit(req, { actor: { kind: "roblox", label: `roblox user ${who.userId}`, userId: who.userId }, role: "none", via: "none", action: "sign-in", outcome: "refused", details: { method: "roblox", reason: "not an owner or a viewer" } });
 				return redirect("/?login_error=not_owner", [clear]);
 			}
-			const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) }, role);
+			const user: SessionUser = { kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) };
+			const id = sessions.create(user, role);
+			noteSignIn(req, user, role, "roblox");
 			return redirect("/", [clear, sessionCookie(req, id)]);
 		} catch (error) {
 			if (error instanceof OAuthError) {
 				log(`roblox sign-in failed from ${ip}: ${error.code}: ${error.detail}`);
+				noteAudit(req, { actor: ANONYMOUS, role: "none", via: "none", action: "sign-in", outcome: "failed", details: { method: "roblox", code: error.code } });
 				return redirect(`/?login_error=${error.code}`, [clear]);
 			}
 			log(`roblox sign-in failed from ${ip}: unexpected error`);
+			noteAudit(req, { actor: ANONYMOUS, role: "none", via: "none", action: "sign-in", outcome: "failed", details: { method: "roblox", code: "failed" } });
 			return redirect("/?login_error=failed", [clear]);
 		}
 	}
@@ -1338,12 +1448,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			who = await central.login.complete({ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") }, readCookie(req, CENTRAL_COOKIE));
 		} catch (error) {
 			const code = error instanceof OAuthError ? error.code : "failed";
-			failedAuth(ip, `typetorch.dev login (${error instanceof OAuthError ? `${error.code}: ${error.detail}` : "unexpected error"})`);
+			failedAuth(ip, `typetorch.dev login (${error instanceof OAuthError ? `${error.code}: ${error.detail}` : "unexpected error"})`, "typetorch.dev");
 			return redirect(`/?login_error=${code}`, [clear]);
 		}
 		const listed = auth.roleOfRobloxUser(who.userId);
 		if (!listed) {
-			failedAuth(ip, `typetorch.dev login (user ${who.userId} is not an owner or a viewer)`);
+			failedAuth(ip, `typetorch.dev login (user ${who.userId} is not an owner or a viewer)`, "typetorch.dev");
 			return redirect("/?login_error=not_owner", [clear]);
 		}
 		let role = listed;
@@ -1357,6 +1467,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				// signatures and the allow list already passed. The session is not tied to a device.
 			} else if (central.config.unblessed === "refuse") {
 				log(`login: typetorch.dev refused owner ${who.userId} from ${ip}: this device was never blessed (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=refuse)`);
+				noteAudit(req, { actor: actorOfUser({ kind: "roblox", userId: who.userId, name: who.name, login: "typetorch.dev" }), role: "none", via: "none", action: "sign-in", outcome: "refused", details: { method: "typetorch.dev", reason: "this browser was never trusted" } });
 				return redirect("/?login_error=not_blessed", [clear]);
 			} else role = "web";
 		}
@@ -1364,7 +1475,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		sessions.destroy(readCookie(req, SESSION_COOKIE));
 		authFailures.reset(ip);
 		const deviceId = role === "admin" && rotated ? rotated.slice(0, rotated.indexOf(".")) : undefined;
-		const id = sessions.create({ kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}), login: "typetorch.dev" }, role, undefined, deviceId);
+		const user: SessionUser = { kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}), login: "typetorch.dev" };
+		const id = sessions.create(user, role, undefined, deviceId);
+		noteSignIn(req, user, role, "typetorch.dev", { device: listed === "admin" ? (rotated ? "trusted" : "not trusted") : "n/a" });
 		log(`login: typetorch.dev user ${who.userId} role ${role}${listed === "admin" ? (rotated ? " (blessed device)" : role === "admin" ? " (unblessed device, TYPETORCH_CENTRAL_LOGIN_UNBLESSED=admin)" : " (owner on a device that was never blessed: read-only)") : ""} from ${ip}`);
 		return redirect("/", [...cookies, sessionCookie(req, id)]);
 	}
@@ -1386,6 +1499,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		sessions.destroy(cookie);
 		const id = sessions.create(user, "admin", undefined, deviceId);
 		log(`login: typetorch.dev user ${user.userId} upgraded to admin by blessing this browser from ${ip}`);
+		noteSignIn(req, user, "admin", "typetorch.dev", { upgraded: "read-only session became admin by trusting this browser" });
 		return sessionCookie(req, id);
 	}
 
@@ -1409,13 +1523,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(400, { error: "body is not JSON" });
 		}
 		if (typeof token !== "string" || !tokenIn(token, [config.adminToken])) {
-			failedAuth(ip, "device blessing (admin token)");
+			failedAuth(ip, "device blessing (admin token)", "device");
 			return json(401, { error: "wrong token" });
 		}
 		authFailures.reset(ip);
 		const agent = agentLabel(req.headers.get("user-agent"));
 		const value = central.devices.bless("admin token", { tokenHash: adminTokenHash, ...(agent ? { agent } : {}) });
 		log(`device blessed with the admin token from ${ip}`);
+		noteAudit(req, { actor: { kind: "token", label: "admin token" }, role: "admin", via: "none", action: "device.trust", outcome: "ok", details: { method: "admin token", device: value.slice(0, value.indexOf(".")) } });
 		const upgraded = upgradeBlessedSession(req, value, ip);
 		const res = json(200, { ok: true, blessed: true, ...(upgraded ? { upgraded: true } : {}) }, { "set-cookie": deviceCookie(req, value) });
 		if (upgraded) res.headers.append("set-cookie", upgraded);
@@ -1440,12 +1555,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!oauthLimiter.take(`bless:${ip}`)) return tooMany(oauthLimiter.retryAfter(`bless:${ip}`));
 		const ok = central.blessKeys.check(central.key.fingerprint, url.searchParams.get("challenge") ?? "", url.searchParams.get("sig") ?? "");
 		if (!ok) {
-			failedAuth(ip, "device blessing (signed link)");
+			failedAuth(ip, "device blessing (signed link)", "device");
 			return redirect("/?login_error=bless");
 		}
 		const agent = agentLabel(req.headers.get("user-agent"));
 		const value = central.devices.bless("signing key", agent ? { agent } : {});
 		log(`device blessed with a signed link from ${ip}`);
+		noteAudit(req, { actor: { kind: "system", label: "game signing key" }, role: "admin", via: "signature", action: "device.trust", outcome: "ok", details: { method: "signed link", device: value.slice(0, value.indexOf(".")) } });
 		const upgraded = upgradeBlessedSession(req, value, ip);
 		return redirect("/?blessed=1", [deviceCookie(req, value), ...(upgraded ? [upgraded] : [])]);
 	}
@@ -1472,8 +1588,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(400, { error: "body is not JSON" });
 		}
 		try {
+			const before = central.blessKeys.size;
 			const keys = central.blessKeys.put(body?.keys);
 			log(`signing keys for device blessing updated: ${keys.length} key(s)`);
+			noteAudit(req, { action: "access.signing-keys", details: { before, after: keys.length } });
 			return json(200, { keys });
 		} catch (error) {
 			return json(400, { error: (error as Error).message });
@@ -1492,13 +1610,22 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(400, { error: "body is not JSON" });
 		}
 		try {
+			const before = access.get().owners;
 			const result = access.put(body);
 			// Owners who were removed (or never were) lose their admin sessions at once (a viewer's web session stays).
 			const ended = endStaleRobloxSessions();
+			const after = result.record.owners;
+			noteAudit(req, {
+				action: "access.owners",
+				details: { seq: result.record.seq, changed: result.changed, added: after.filter((o) => !before.includes(o)), removed: before.filter((o) => !after.includes(o)), sessionsEnded: ended },
+			});
 			if (result.changed) log(`owner list updated to seq ${result.record.seq}: ${result.record.owners.length} owner(s)${ended ? `, ${ended} session(s) ended` : ""}`);
 			return json(200, { ...result.record, changed: result.changed, sessionsEnded: ended });
 		} catch (error) {
-			if (error instanceof AccessError) return json(error.status, { error: error.message, ...(error.seq !== undefined ? { seq: error.seq } : {}) });
+			if (error instanceof AccessError) {
+				noteAudit(req, { action: "access.owners", details: { error: error.message } });
+				return json(error.status, { error: error.message, ...(error.seq !== undefined ? { seq: error.seq } : {}) });
+			}
 			throw error;
 		}
 	}
@@ -1544,20 +1671,30 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		} catch {
 			return json(400, { error: "body is not JSON" });
 		}
+		// The values before, for the audit entry's old -> new (secrets only as set / not set: settingChanges).
+		const before = new Map(SETTINGS.map((d) => [d.key, runtime.get(d.key)]));
 		try {
 			const result = runtime.patch(body, { ...actorOf(principal), ip, robloxSession: isRobloxSession(principal), robloxSignIn: Boolean(oauth) });
 			// The token login turned off: browser sessions made with the token end too (the caller's is a Roblox session).
 			// Viewers taken off the list lose their sessions at once.
 			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
+			noteAudit(req, {
+				action: "settings.change",
+				details: { changes: settingChanges(result.changed, (k) => before.get(k), (k) => runtime.get(k), (k) => runtime.source(k)), ...(sessionsEnded ? { sessionsEnded } : {}) },
+			});
 			return json(200, { ...settingsView(ip, principal), changed: result.changed, ...(sessionsEnded ? { sessionsEnded } : {}) });
 		} catch (error) {
-			if (error instanceof SettingsError) return json(error.status, { error: error.message, ...(error.key ? { key: error.key } : {}), ...(error.guard ? { guard: error.guard } : {}) });
+			if (error instanceof SettingsError) {
+				// The refusal's message names the key and the rule, never a value.
+				noteAudit(req, { action: "settings.change", outcome: error.status === 409 ? "refused" : "failed", details: { error: error.message, ...(error.key ? { key: error.key } : {}), ...(error.guard ? { guard: error.guard } : {}) } });
+				return json(error.status, { error: error.message, ...(error.key ? { key: error.key } : {}), ...(error.guard ? { guard: error.guard } : {}) });
+			}
 			throw error;
 		}
 	}
 
 	/** POST /v1/admin/settings/test-alert: one info alert through the current webhook. Answers a status, never the URL. */
-	async function testAlert(principal: Principal & { role: "admin" }): Promise<Response> {
+	async function testAlert(req: Request, principal: Principal & { role: "admin" }): Promise<Response> {
 		if (!testAlertLimiter.take("test-alert")) return tooMany(testAlertLimiter.retryAfter("test-alert"));
 		if (!notifier.configured) return json(409, { ok: false, error: "no alert webhook is set: save one first" });
 		const actor = actorOf(principal);
@@ -1583,7 +1720,141 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		};
 		const result = await notifier.test(alert);
 		runtime.recordTest(actor, result.ok ? `sent (HTTP ${result.status})` : `failed: ${result.error}`);
+		noteAudit(req, { action: "settings.test-alert", details: { result: result.ok ? `sent (HTTP ${result.status})` : `failed: ${result.error}` } });
 		return json(result.ok ? 200 : 502, result);
+	}
+
+	// The audit log and backups (owners only) ----------------------------------------------------------------------------
+
+	/** GET /v1/admin/audit?actor=&action=&outcome=&since=&until=&before=&limit=&facets=1: newest first, a page at a time. */
+	async function auditRead(url: URL): Promise<Response> {
+		const allowed = new Set(["actor", "action", "outcome", "since", "until", "before", "limit", "facets"]);
+		for (const key of url.searchParams.keys()) {
+			if (!allowed.has(key)) return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
+			if (url.searchParams.getAll(key).length > 1) return json(400, { error: `one ${key}` });
+		}
+		const q = url.searchParams;
+		const actor = q.get("actor") ?? undefined;
+		if (actor !== undefined && (actor.length === 0 || actor.length > 120)) return json(400, { error: "actor: 1 to 120 characters" });
+		const action = q.get("action") ?? undefined;
+		if (action !== undefined && !/^[\w .:/*-]{1,80}$/.test(action)) return json(400, { error: "action: up to 80 letters, digits and . : / - * (a trailing * matches a prefix)" });
+		const outcome = q.get("outcome") ?? undefined;
+		if (outcome !== undefined && outcome !== "ok" && outcome !== "failed" && outcome !== "refused") return json(400, { error: "outcome: ok, failed or refused" });
+		const time = (name: string): number | undefined | null => {
+			const raw = q.get(name);
+			if (raw === null) return undefined;
+			const n = /^\d{1,16}$/.test(raw) ? Number(raw) : raw.length <= 40 ? Date.parse(raw) : Number.NaN;
+			return Number.isFinite(n) ? n : null;
+		};
+		const since = time("since");
+		const until = time("until");
+		if (since === null || until === null) return json(400, { error: "since and until: unix ms or an ISO time" });
+		const int = (name: string, max: number): number | undefined | null => {
+			const raw = q.get(name);
+			if (raw === null) return undefined;
+			return /^\d{1,16}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= max ? Number(raw) : null;
+		};
+		const before = int("before", Number.MAX_SAFE_INTEGER);
+		const limit = int("limit", AUDIT_PAGE_MAX);
+		if (before === null) return json(400, { error: "before: an entry id" });
+		if (limit === null) return json(400, { error: `limit: 1 to ${AUDIT_PAGE_MAX}` });
+		const page = await audit.list({
+			...(actor !== undefined ? { actor } : {}),
+			...(action !== undefined ? { action } : {}),
+			...(outcome !== undefined ? { outcome } : {}),
+			...(since !== undefined ? { since } : {}),
+			...(until !== undefined ? { until } : {}),
+			...(before !== undefined ? { before } : {}),
+			...(limit !== undefined ? { limit } : {}),
+		});
+		const facets = q.get("facets") === "1" ? { facets: await audit.facets() } : {};
+		return json(200, { ...page, keepDays: runtime.get("auditKeepDays"), ...facets });
+	}
+
+	function backupFailure(error: unknown): Response {
+		if (error instanceof BackupError) return json(error.status, { error: error.message }, error.status === 503 ? { "retry-after": String(RETRY_AFTER_SECONDS) } : {});
+		// The message may name a path in the data folder (owners only see it), never a secret.
+		return json(500, { error: `the backup failed: ${((error as Error).message ?? String(error)).slice(0, 200)}` });
+	}
+
+	/** GET /v1/admin/backups: the schedule, the last outcome and the local backups. POST: one now. */
+	async function backupsRoute(req: Request): Promise<Response> {
+		if (req.method === "GET") return json(200, { ...backups.status(), backups: backups.list(), disk: disk.status });
+		if (!backupLimiter.take("backup")) return tooMany(backupLimiter.retryAfter("backup"));
+		// A big folder takes a while: the connection must not time out meanwhile.
+		keepOpen.get(req)?.();
+		try {
+			const manifest = await backups.runLocal("manual");
+			noteAudit(req, { action: "backup.create", details: { name: manifest.name, bytes: manifest.bytes, files: manifest.files, duckdb: manifest.duckdb, seconds: manifest.seconds } });
+			return json(200, { ok: true, manifest, ...backups.status(), backups: backups.list() });
+		} catch (error) {
+			noteAudit(req, { action: "backup.create" });
+			return backupFailure(error);
+		}
+	}
+
+	/** POST /v1/admin/backups/download: a tar of a fresh backup, streamed (without the webhook URL and instance.key). */
+	async function backupDownload(req: Request): Promise<Response> {
+		if (!backupLimiter.take("backup")) return tooMany(backupLimiter.retryAfter("backup"));
+		keepOpen.get(req)?.();
+		try {
+			const { name, manifest, stream } = await backups.download();
+			noteAudit(req, { action: "backup.download", details: { name, bytes: manifest.bytes, files: manifest.files, duckdb: manifest.duckdb } });
+			return new Response(stream, {
+				status: 200,
+				headers: { "content-type": "application/x-tar", "content-disposition": `attachment; filename="${name}.tar"`, "cache-control": "no-store", "x-backup-bytes": String(manifest.bytes) },
+			});
+		} catch (error) {
+			noteAudit(req, { action: "backup.download" });
+			return backupFailure(error);
+		}
+	}
+
+	/** The schedule: a local backup when one is due (recorded in the audit log as the server's). */
+	async function backupTick(): Promise<void> {
+		if (!backups.due() || stopping) return;
+		const system: AuditActor = { kind: "system", label: "server (scheduled)" };
+		try {
+			const manifest = await backups.runLocal("scheduled");
+			await audit.record({ actor: system, role: "none", via: "none", ip: "", action: "backup.create", outcome: "ok", details: { name: manifest.name, bytes: manifest.bytes, files: manifest.files, duckdb: manifest.duckdb, seconds: manifest.seconds } });
+		} catch (error) {
+			// Busy, or a deploy handover: the next check tries again.
+			if (error instanceof BackupError && error.status !== 500) return;
+			await audit.record({ actor: system, role: "none", via: "none", ip: "", action: "backup.create", outcome: "failed", details: { error: ((error as Error).message ?? String(error)).slice(0, 200) } });
+		}
+	}
+
+	/**
+	 * The audit entry for one request, after its route answered (see "The audit log's notes"): what the handler named,
+	 * or any write by a signed-in caller under its route, or the CLI's release starts and marks (the game key).
+	 */
+	async function auditRequest(req: Request, path: string, ip: string, status: number): Promise<void> {
+		const note = auditNotes.get(req);
+		const method = req.method;
+		const principal = note?.principal;
+		let action = note?.action;
+		let details = note?.details;
+		let gameKey = false;
+		if (!action) {
+			if (READ_METHODS.has(method) || method === "OPTIONS" || WEB_POST_ALLOWED.test(path)) return;
+			gameKey = method === "POST" && (path === "/v1/fleet/deploy" || path === "/v1/fleet/mark") && auth.hasGameKey(req);
+			if (!principal && !gameKey) return;
+			const named = routeAction(method, path);
+			action = named.action;
+			if (named.details) details = { ...named.details, ...details };
+		}
+		const actor = note?.actor ?? (principal && "user" in principal ? actorOfUser(principal.user) : gameKey ? { kind: "api-key" as const, label: "api key" } : ANONYMOUS);
+		const outcome = note?.outcome ?? (status < 400 ? "ok" : status === 401 || status === 403 || status === 409 || status === 429 ? "refused" : "failed");
+		await audit.record({
+			actor,
+			role: note?.role ?? (principal?.role as AuditRole | undefined) ?? (gameKey ? "game" : "none"),
+			via: note?.via ?? principal?.via ?? (gameKey ? "bearer" : "none"),
+			ip,
+			action,
+			outcome,
+			status,
+			...(details ? { details } : {}),
+		});
 	}
 
 	// Routing -----------------------------------------------------------------------------------------------------------
@@ -1599,8 +1870,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		// The lookup token is a right token for one route: refused here without counting as a failed login.
 		if (auth.hasLookupBearer(req)) return { response: json(403, { error: LOOKUP_ONLY }) };
 		const principal = auth.principal(req);
+		// Who called, for the audit entry `handle` writes after the route (a write by this caller is recorded).
+		if (principal && principal.role !== "game") noteAudit(req, { principal });
 		if (!principal) {
-			if (bearer(req) !== undefined) failedAuth(ip, "admin request");
+			if (bearer(req) !== undefined) failedAuth(ip, "admin request", "bearer");
 			return { response: json(401, { error: "admin token required" }) };
 		}
 		if (principal.role === "game") return { response: json(401, { error: "admin token required (the API key can write, not read)" }) };
@@ -1782,10 +2055,22 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (!window) return json(400, { error: `window must be one of ${STATS_WINDOWS.join(", ")}` });
 				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName() });
 			}
+			if (path === "/v1/admin/audit") {
+				if (method !== "GET") return json(405, { error: "GET only" });
+				const admin = manage();
+				return admin instanceof Response ? admin : auditRead(url);
+			}
+			if (path === "/v1/admin/backups" || path === "/v1/admin/backups/download") {
+				const download = path === "/v1/admin/backups/download";
+				if (download ? method !== "POST" : method !== "GET" && method !== "POST") return json(405, { error: download ? "POST only" : "GET or POST only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				return download ? backupDownload(req) : backupsRoute(req);
+			}
 			if (path === "/v1/admin/settings/test-alert") {
 				if (method !== "POST") return json(405, { error: "POST only" });
 				const admin = manage();
-				return admin instanceof Response ? admin : testAlert(admin);
+				return admin instanceof Response ? admin : testAlert(req, admin);
 			}
 			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.());
 			// Sign in with typetorch.dev: blessed devices (list, revoke), the blessing keys, a report now. Owners only.
@@ -1803,6 +2088,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (!central.devices.revoke(id)) return json(404, { error: "no such device" });
 				// The admin sessions that device opened end with it.
 				const ended = sessions.endWhere((s) => s.device === id);
+				noteAudit(req, { action: "device.revoke", details: { device: id, sessionsEnded: ended } });
 				log(`device ${id} revoked by ${actorOf(admin).who}${ended ? `; ${ended} session(s) ended` : ""}`);
 				return json(200, { ok: true, sessionsEnded: ended, devices: central.devices.list(central.devices.idOf(readCookie(req, DEVICE_COOKIE), adminTokenHash)) });
 			}
@@ -1871,6 +2157,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			} finally {
 				inflight--;
 			}
+			try {
+				await auditRequest(req, path, ip, response.status);
+			} catch (error) {
+				log(`audit log: ${((error as Error).message ?? String(error)).slice(0, 200)}`);
+			}
 		}
 		metrics.request(req.method, path, response.status, performance.now() - started);
 		const html = (response.headers.get("content-type") ?? "").startsWith("text/html");
@@ -1927,7 +2218,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	metrics.sample();
 	if (!options.manualJobs) {
 		if (warehouse) startWarehouseJobs(warehouse);
-		const jobs = [setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000), setInterval(() => metrics.sample(), 1000)];
+		const jobs = [
+			setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000),
+			setInterval(() => void audit.prune().catch((e) => log(`audit log prune failed: ${(e as Error).message}`)), 10 * 60_000),
+			setInterval(() => metrics.sample(), 1000),
+		];
+		if (config.backupHours > 0) jobs.push(setInterval(() => void backupTick(), BACKUP_CHECK_MS));
+		jobs.push(setInterval(() => void diskTick(), BACKUP_CHECK_MS));
+		void diskTick();
 		if (fleet) jobs.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
 		for (const t of jobs) t.unref?.();
 		timers.push(...jobs);
@@ -2057,6 +2355,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		access,
 		live,
 		metrics,
+		audit,
+		backups,
+		disk,
+		backupTick,
+		diskTick,
 		...(central ? { central: { fingerprint: central.key.fingerprint, report: () => central.reporter.report(), devices: central.devices } } : {}),
 		sessionCount: () => sessions.size,
 		sessions,

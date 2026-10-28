@@ -107,6 +107,15 @@ export interface ServerConfig {
 	errorsIpPerMinute: number;
 	/** New error count and player rows per UTC day; past it new rows are dropped and counted (/healthz). */
 	errorRowsPerDay: number;
+	/** Days of audit log entries kept (server/audit.ts). */
+	auditKeepDays: number;
+	/** Local backups (server/backup.ts): where they go, how many are kept, hours between them (0 = no schedule). */
+	backupDir: string;
+	backupKeep: number;
+	backupHours: number;
+	/** Disk space (server/disk.ts): free percent under which the explorer warns and a `disk_low` alert is raised (0 = never). */
+	diskWarnFreePercent: number;
+	diskCriticalFreePercent: number;
 	/** Gzip body cap and inflated cap, bytes. */
 	maxBodyBytes: number;
 	maxInflateBytes: number;
@@ -465,6 +474,12 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		errorMaxKinds: num(env, "TYPETORCH_ERROR_MAX_KINDS", 5000, 10, 1_000_000),
 		errorsIpPerMinute: num(env, "TYPETORCH_ERRORS_IP_PER_MINUTE", 1200, 1, 1_000_000),
 		errorRowsPerDay: num(env, "TYPETORCH_ERROR_ROWS_PER_DAY", 2_000_000, 1000, 1_000_000_000),
+		auditKeepDays: num(env, "TYPETORCH_AUDIT_KEEP_DAYS", 365, 1, 36_500),
+		backupDir: resolve(env.TYPETORCH_BACKUP_DIR ?? resolve(dataDir, "backups")),
+		backupKeep: num(env, "TYPETORCH_BACKUP_KEEP", 3, 1, 100),
+		backupHours: num(env, "TYPETORCH_BACKUP_HOURS", 24, 0, 24 * 365),
+		diskWarnFreePercent: num(env, "TYPETORCH_DISK_WARN_PERCENT", 15, 0, 99),
+		diskCriticalFreePercent: num(env, "TYPETORCH_DISK_CRITICAL_PERCENT", 5, 0, 99),
 		maxBodyBytes: num(env, "TYPETORCH_MAX_BODY", 2 * 1024 * 1024, 1024, 64 * 1024 * 1024),
 		maxInflateBytes: num(env, "TYPETORCH_MAX_INFLATE", 16 * 1024 * 1024, 1024, 256 * 1024 * 1024),
 		ipPerMinute: num(env, "TYPETORCH_IP_PER_MINUTE", 6000, 1, 1_000_000),
@@ -540,5 +555,7 @@ export function describeConfig(config: ServerConfig): string {
 		`alert webhook=${yes(config.alertWebhookUrl)}`,
 		`duckdb memory_limit=${config.memoryLimit} threads=${config.threads}`,
 		`ad-hoc sql=${config.sql ? `on (memory_limit=${config.sqlMemoryLimit})` : "off"}`,
+		`backups=${config.backupHours ? `every ${config.backupHours} h, keep ${config.backupKeep}` : "manual only"}`,
+		`disk warning=${config.diskWarnFreePercent ? `under ${config.diskWarnFreePercent}% free (critical under ${config.diskCriticalFreePercent}%)` : "off"}`,
 	].join(", ");
 }

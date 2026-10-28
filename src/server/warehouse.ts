@@ -510,6 +510,26 @@ export class Warehouse {
 		});
 	}
 
+	/**
+	 * Runs `fn` between jobs (server/backup.ts): no load, nightly export, prune, compaction or erasure runs meanwhile, so
+	 * live.duckdb and the day files `fn` sees belong together. `copyLive(file)` writes a copy of the live database to
+	 * `file` in one transaction (DuckDB's COPY FROM DATABASE), safe while queries run.
+	 */
+	betweenJobs<T>(fn: (copyLive: (file: string) => Promise<void>) => Promise<T>): Promise<T> {
+		return this.jobs.run(() =>
+			fn(async (file) => {
+				rmSync(file, { force: true });
+				rmSync(`${file}.wal`, { force: true });
+				await this.writer.run(`ATTACH ${pathLit(file)} AS backup_copy`);
+				try {
+					await this.writer.run("COPY FROM DATABASE live TO backup_copy");
+				} finally {
+					await this.writer.run("DETACH backup_copy");
+				}
+			}),
+		);
+	}
+
 	// Queries ---------------------------------------------------------------------------------------------------------
 
 	private async connection(): Promise<DuckDBConnection> {

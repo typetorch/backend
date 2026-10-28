@@ -116,7 +116,7 @@ export interface Alert {
 	seq: number | null;
 	generation: number | null;
 	kernel: string | null;
-	/** "game" (a kernel), "cli" (e.g. auto_rollback), or "server" (server_lost, server_stuck, fleet_flood). */
+	/** "game" (a kernel), "cli" (e.g. auto_rollback), or "server" (server_lost, server_stuck, fleet_flood, disk_low). */
 	source: "game" | "cli" | "server";
 	/** Extra data, e.g. { jobs: [...] } for server_lost / server_stuck. */
 	details: Record<string, unknown> | null;
@@ -1353,6 +1353,31 @@ export class FleetService {
 			kernel: null,
 			source: "server",
 			details: { limit: info.limit, windowSeconds: info.windowSeconds, example: info.example.slice(0, JOB) },
+		});
+	}
+
+	/**
+	 * `disk_low` (source server): the disk the data folder is on is under the free-space threshold (server/disk.ts). One
+	 * open alert per level: while an un-acked `disk_low` of the same or a higher level exists, nothing new is added (a
+	 * restart must not repeat it), so the answer is null then.
+	 */
+	async diskLow(info: { level: "warning" | "critical"; freeBytes: number; totalBytes: number; freePercent: number; threshold: number }): Promise<Alert | null> {
+		const levels = info.level === "critical" ? ["critical"] : ["critical", "warning"];
+		const open = await this.db.first<{ id: number }>(`SELECT id FROM alerts WHERE code = 'disk_low' AND acked_at IS NULL AND level IN (${levels.map(() => "?").join(", ")}) LIMIT 1`, levels);
+		if (open) return null;
+		const gb = (b: number) => `${Math.round((b / 1073741824) * 10) / 10} GB`;
+		return this.addAlert({
+			level: info.level,
+			code: "disk_low",
+			message: `the data disk has ${gb(info.freeBytes)} of ${gb(info.totalBytes)} free (${info.freePercent}%, under ${info.threshold}%): make a backup, then free space (shorter retention on the Settings page, or a bigger volume), or the server stops accepting data`,
+			job: null,
+			branch: null,
+			artifact: null,
+			seq: null,
+			generation: null,
+			kernel: null,
+			source: "server",
+			details: { freeBytes: info.freeBytes, totalBytes: info.totalBytes, freePercent: info.freePercent, thresholdPercent: info.threshold },
 		});
 	}
 
