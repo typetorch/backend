@@ -1194,7 +1194,20 @@ export interface StorageReport {
 	parts: StoragePart[];
 	rows: { liveEvents: number; liveRecordings: number; parquetEvents: number; parquetRecordings: number } | null;
 	growth: { todayBytes: number; avgPerDayBytes: number | null; days: { date: string; bytes: number }[] } | null;
-	disk: { freeBytes: number; totalBytes: number } | null;
+	disk: DiskStatus | null;
+}
+
+/** The disk the data folder is on (GET /v1/storage, GET /v1/admin/backups): free space and the warning level. */
+export interface DiskStatus {
+	freeBytes: number;
+	totalBytes: number;
+	/** Free space as a percent of the disk. */
+	freePercent: number;
+	/** warning under warnFreePercent free, critical under criticalFreePercent (0 = that level is off). */
+	level: "ok" | "warning" | "critical";
+	warnFreePercent: number;
+	criticalFreePercent: number;
+	at: string;
 }
 
 // Sign-in (GET /v1/auth/check) -----------------------------------------------------------------------------------------
@@ -1567,4 +1580,62 @@ export interface BackendStats {
 	minutes: StatsBucket[];
 	window: StatsWindow;
 	routes: RouteStats[];
+}
+
+/** One entry of the audit log (GET /v1/admin/audit): who did what on the admin side. */
+export interface AuditEntry {
+	id: number;
+	at: string;
+	/** "admin token", "roblox user <id> (<name>)", "typetorch.dev user <id> (<name>)", "api key", "anonymous", "server (scheduled)". */
+	actor: string;
+	actorKind: "token" | "roblox" | "typetorch.dev" | "api-key" | "roblox-webhook" | "anonymous" | "system";
+	userId: number | null;
+	role: "admin" | "web" | "game" | "none";
+	via: "bearer" | "cookie" | "signature" | "none";
+	ip: string;
+	/** sign-in, sign-out, settings.change, access.owners, alert.ack, erasure, backup.download, ... or "<METHOD> <route>". */
+	action: string;
+	outcome: "ok" | "failed" | "refused";
+	status: number | null;
+	/** What changed (never a secret: the server redacts them). */
+	details: Record<string, unknown> | null;
+}
+
+export interface AuditPage {
+	entries: AuditEntry[];
+	/** The `before` of the next (older) page, or null. */
+	next: number | null;
+	keepDays: number;
+	facets?: { actors: { actor: string; kind: string; entries: number }[]; actions: { action: string; entries: number }[] };
+}
+
+export interface AuditFilters {
+	actor?: string;
+	action?: string;
+	outcome?: AuditEntry["outcome"];
+	before?: number;
+	limit?: number;
+}
+
+/** One local backup (GET /v1/admin/backups). */
+export interface BackupInfo {
+	name: string;
+	createdAt: string | null;
+	reason: "scheduled" | "manual" | "download" | null;
+	bytes: number | null;
+	files: number | null;
+	duckdb: boolean | null;
+}
+
+export interface BackupsStatus {
+	dir: string;
+	keep: number;
+	/** Hours between scheduled backups; 0 = none. */
+	everyHours: number;
+	running: boolean;
+	last: { at: string; ok: boolean; reason: string; name?: string; error?: string } | null;
+	next: string | null;
+	backups: BackupInfo[];
+	/** The data disk (null before the first check, or where it can't be measured). */
+	disk: DiskStatus | null;
 }

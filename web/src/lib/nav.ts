@@ -22,6 +22,7 @@ import {
 	Gauge,
 	LayoutDashboard,
 	ListFilter,
+	ScrollText,
 	Server,
 	Settings,
 	Terminal,
@@ -99,6 +100,7 @@ export const NAV_GROUPS: NavGroup[] = [
 		items: [
 			{ label: "Settings", path: "/settings", icon: Settings, noFilters: true, ownerOnly: true },
 			{ label: "Backend stats", path: "/backend", icon: Cpu, noFilters: true, ownerOnly: true },
+			{ label: "Audit log", path: "/audit", icon: ScrollText, noFilters: true, ownerOnly: true },
 		],
 	},
 ];

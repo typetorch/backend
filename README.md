@@ -30,6 +30,8 @@ is the same command.
 - [Security](#security)
 - [Routes and roles](#routes-and-roles) ([API docs for agents](#api-docs-for-agents): OpenAPI, Swagger UI, llms.txt)
 - [Deploy on Coolify](#deploy-on-coolify)
+- [Audit log](#audit-log)
+- [Backups and restore](#backups-and-restore) ([Disk space](#disk-space))
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
 - [The explorer](#the-explorer)
@@ -153,6 +155,9 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
 | `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams, and the same number of `GET /v1/fleet/stream` streams. |
 | `TYPETORCH_WEB_DIR`, `TYPETORCH_EXPLORER` | `web/dist`, `on` | Where the built explorer is; `off` serves the API only. |
+| `TYPETORCH_AUDIT_KEEP_DAYS` | `365` | Days of [audit log](#audit-log) entries kept (also on the Settings page). |
+| `TYPETORCH_BACKUP_DIR`, `TYPETORCH_BACKUP_KEEP`, `TYPETORCH_BACKUP_HOURS` | `<data dir>/backups`, `3`, `24` | [Local backups](#backups-and-restore): where, how many are kept, hours between them (`0` = no schedule). |
+| `TYPETORCH_DISK_WARN_PERCENT`, `TYPETORCH_DISK_CRITICAL_PERCENT` | `15`, `5` | [Disk space](#disk-space): free percent of the data disk under which the explorer warns and a `disk_low` alert is raised (`0` = never). |
 | `TYPETORCH_RUNTIME_SETTINGS` | `on` | `off` ignores what the Settings page saved (the file stays) and makes the page read only: the way back in after locking yourself out. |
 
 </details>
@@ -189,6 +194,7 @@ as noted for the token login).
 | Error log history (`errorKeepDays`) | `TYPETORCH_ERROR_KEEP_DAYS` | 1 to 3,650 days (pruned hourly; reads are clamped at once) |
 | Error kinds stored (`errorMaxKinds`) | `TYPETORCH_ERROR_MAX_KINDS` | 100 to 1,000,000 |
 | Error rows per day (`errorRowsPerDay`) | `TYPETORCH_ERROR_ROWS_PER_DAY` | 10,000 to 1,000,000,000 |
+| Audit log history (`auditKeepDays`) | `TYPETORCH_AUDIT_KEEP_DAYS` | 7 to 3,650 days (pruned hourly) |
 
 The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
 wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
@@ -559,6 +565,9 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `GET /v1/admin/alert-rules` | admin | the [backend alert rules](#backend-alerts)' state on the last run (404 without the fleet part) |
+| `GET /v1/admin/audit` | admin | the [audit log](#audit-log), newest first: `?actor=&action=&outcome=&since=&until=&before=&limit=&facets=1` |
+| `GET /v1/admin/backups`, `POST /v1/admin/backups` | admin | [backups](#backups-and-restore): the schedule, the local backups and the [disk](#disk-space); `POST` makes one now (2 a minute with the download) |
+| `POST /v1/admin/backups/download` | admin | a tar of a fresh backup, streamed (without the webhook URL and `instance.key`) |
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
@@ -628,7 +637,7 @@ Things to know: the container runs as the non-root `bun` user (uid 1000), so a *
 it (`chown 1000:1000`; a named volume just works). On `SIGTERM` the server closes DuckDB and SQLite and exits within
 seconds (below). Give the container at least 1 GB; DuckDB takes `TYPETORCH_MEMORY_LIMIT` (400 MB) of it. Back up the volume
 (`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `access.json`, `runtime-settings.json`: it holds the alert webhook URL,
-so keep the backup as secret as the env). Rotating the API key: put the new one in
+so keep the backup as secret as the env), or use the built-in [backups](#backups-and-restore), which are safe while the server runs. Rotating the API key: put the new one in
 `TYPETORCH_API_KEY`, the old in `TYPETORCH_API_KEY_PREVIOUS`, update the games (`typetorch backend setup`), then remove the
 old one. Locally, `docker compose -f compose.yaml -f compose.local.yaml up --build` publishes 127.0.0.1:8787.
 
@@ -661,6 +670,86 @@ retries a `5xx` from the old one after 1, 3 and 9 s.
 
 Only one server may use a data folder. A second backend on the same folder waits like the new container above; a local
 read-only store (`openDuckDbStore`) on it is refused: query the running server over HTTP, or open a copy of the folder.
+
+## Audit log
+
+Every state-changing admin action is recorded in the SQLite file (`audit_log`): sign-ins (success and failure, with the
+method: `token`, `roblox`, `typetorch.dev`, `bearer` for a wrong token on a route, `device`), sign-outs, lockouts
+(`sign-in.lockout`), settings changes (`settings.change`: each key with its old and new value and its source; the webhook
+URL only as `set` / `not set`; lists such as viewers and the allow list as added / removed), refused saves (the lockout
+guards), test alerts, the owner list (`access.owners`: seq, added, removed) and the signing keys, trusted browsers
+(`device.trust`, `device.revoke`), alert acks (`alert.ack`), erasure (`erasure`: counts only, never a pid or a UserId; the
+Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), remote debug watches and
+commands, the CLI's release starts and marks (`deploy.start`, `deploy.mark`, by the API key), and any other write by a
+signed-in caller under `<METHOD> <route>` (a write the web role tried is recorded as `refused`).
+
+Each entry has the time, the actor (`admin token`, `roblox user <id> (<name>)`, `typetorch.dev user <id> (<name>)`,
+`api key`, `anonymous`, `server (scheduled)`), the role, how (`bearer` = the CLI, `cookie` = the explorer), the client
+address, the action, the outcome (`ok`, `failed`, `refused`), the HTTP status and the details. It is written in one place
+(`handle` in `src/server/app.ts`, after the route answered), so a new admin route is recorded without code of its own.
+
+**Never a secret.** Details pass through a redactor: any string holding the admin token, an API key, the lookup token, the
+OAuth or webhook secret, the Open Cloud key or the alert webhook URL becomes `[redacted]`, as does any key named like a
+token, secret, password, cookie or signature; strings are cut to 200 characters and an entry to 4 KB. **Bounded:** kept
+`TYPETORCH_AUDIT_KEEP_DAYS` days (the `auditKeepDays` runtime setting), 200,000 rows at most, and entries nobody signed
+in caused (failed sign-ins, the erasure webhook) are capped at 120 a minute, the rest counted in one `audit.suppressed`
+entry. The explorer's **Audit log** page (owners only, under Admin) filters by actor, action and outcome. The short
+"Recent changes" list on the Settings page stays as it was.
+
+## Backups and restore
+
+A backup is safe while the server runs and consistent:
+
+- `fleet.sqlite` by `VACUUM INTO` on its own connection in a worker thread (one snapshot; the event loop and the
+  writers carry on);
+- `live.duckdb` by DuckDB's `COPY FROM DATABASE` in one transaction, and the Parquet day files (`events/`,
+  `recordings/`, `rollups/`) hard-linked (no extra space on the same disk; copied on another), both **between the
+  warehouse's jobs**: no loader tick, nightly export, prune, compaction or erasure runs meanwhile, so the two belong
+  together. Day files are never changed in place, so a link is a snapshot. DuckDB is copied first, then SQLite;
+- `access.json`, `runtime-settings.json`, `devices.json`, `bless-keys.json`, `settings.json`, `instance.key`, `erasure/`,
+  `audit/`, and a `manifest.json`.
+
+**Left out:** `raw/incoming/` (the last seconds of accepted batches: loaded at the next tick, in the next backup) and
+`raw/archive/` (the loaded batches again; their rows are in `live.duckdb` and the day files). A fleet-only server backs up
+SQLite and the files. During a deploy handover a backup answers `503` (the other server holds DuckDB).
+
+**Local backups:** every `TYPETORCH_BACKUP_HOURS` (24; `0` = only on demand) into `TYPETORCH_BACKUP_DIR`
+(`<data dir>/backups`) as `typetorch-backup-<UTC time>/`, built under a `.partial-` name and renamed when complete; the
+newest `TYPETORCH_BACKUP_KEEP` (3) are kept. The default folder is on the same volume (cheap, thanks to the links, but it
+does not survive losing the volume): mount another volume there, or download backups. **Back up now** and **Download
+backup** are on the Settings page (owners only).
+
+**The download** (`POST /v1/admin/backups/download`, admin; the cookie needs `X-TypeTorch: 1`) streams a tar of a fresh
+backup built in `<data dir>/backup-tmp` and deleted once sent. It leaves out the two secrets of the folder: the alert
+webhook URL (removed from `runtime-settings.json`) and `instance.key` (the typetorch.dev identity). For a big folder use curl:
+
+```sh
+curl -X POST -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" -o backup.tar https://backend.example.com/v1/admin/backups/download
+```
+
+**Restore:**
+
+1. Stop the app (Coolify: Stop; a rolling deploy would hand the folder to a server that is still writing).
+2. Unpack the backup: `tar -xf backup.tar` (a local one is already a folder).
+3. In the data volume, move the old `live.duckdb`, `live.duckdb.wal`, `fleet.sqlite`, `fleet.sqlite-wal`,
+   `fleet.sqlite-shm`, `events/`, `recordings/` and `rollups/` aside, and delete `lock.duckdb`, `tmp/` and `sql/`.
+4. Copy the backup's files into the volume (everything but `manifest.json`); keep the old `instance.key` if the download
+   left it out. Owned by uid 1000 on Docker: `chown -R 1000:1000 /data`.
+5. Start the app. It loads `raw/incoming` and anything else accepted after the backup that is still on the volume, and
+   finishes erasures the backup predates (`live.erased` drives the rewrite at start). Save the alert webhook again on the
+   Settings page if the backup was a download.
+
+### Disk space
+
+The server measures the disk the data folder is on every 10 minutes (and at start). Under `TYPETORCH_DISK_WARN_PERCENT`
+(15 %) free it is a **warning**, under `TYPETORCH_DISK_CRITICAL_PERCENT` (5 %) **critical** (`0` turns a level off). The
+level is in `GET /v1/storage` and `GET /v1/admin/backups` (`disk: { freeBytes, totalBytes, freePercent, level, ... }`),
+in `/healthz` for the admin token, and the explorer shows it on the Overview's Storage card and the Settings page's
+**Backups and disk** card (a red alert under the threshold). With the fleet part on, a `disk_low` alert (source `server`)
+goes out like any other fleet alert, so the alert webhook carries it: one per level until it is acked or the disk has
+room again (a restart does not repeat an open one). To make room: shorter retention on the Settings page (events,
+recordings, error logs, the audit log), fewer local backups (`TYPETORCH_BACKUP_KEEP`), or a bigger volume. The local
+backups are hard links, so they cost little until the day files they share are pruned.
 
 ## The event bus
 
@@ -1117,7 +1206,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `GET /v1/queries` | admin, web | the query list |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>?from=&to=&pid=&limit=` | admin, web | the nightly rollup tables |
 | `POST /v1/sql` | admin, web | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
-| `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), free disk space; measured at most every 30 s |
+| `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), the [disk](#disk-space) (free space and its level); measured at most every 30 s |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
 | `GET /healthz` | open / admin | `{ ok }`; with the admin role: `state`, memory, loader lag, row counts, fleet counts, the bus, error log counts |
@@ -1456,6 +1545,9 @@ API (beta: [Observability](https://create.roblox.com/docs/cloud/reference/featur
   only while the agent keeps it there.
 - **Erasure removes them**: the webhook (or `POST /v1/erasure` by pid) deletes the pid's rows everywhere, then the
   identity rows, and identity rows for an erased pid are refused afterwards. The erasure log never holds the UserId.
+- **Backups** hold what the data folder held when they were made, including players erased later: after restoring an
+  older backup, erase those players again (the erasure log in `erasure/` of the live volume lists when). Local ones rotate out after
+  `TYPETORCH_BACKUP_KEEP` backups; a downloaded copy is the owner's to delete.
 - **Remote debug answers** (player names, logs, state) stay in the backend's memory for at most 3 minutes and in the
   owner's open page; they are never stored. The audit keeps who asked what, never a player's UserId or an answer.
 - Turning it off: the framework option `identity: false` stops sending identity rows; deleting

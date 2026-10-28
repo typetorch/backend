@@ -6,7 +6,10 @@
  */
 import type {
 	AlertRulesStatus,
+	AuditFilters,
+	AuditPage,
 	AuthInfo,
+	BackupsStatus,
 	BackendStats,
 	BackfillResult,
 	BlessedDevice,
@@ -234,6 +237,29 @@ export function createApi(options: ApiOptions = {}) {
 		alertRules: (signal?: AbortSignal) => get<AlertRulesStatus>("/v1/admin/alert-rules", signal),
 		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */
 		backendStats: (window: StatsWindow, signal?: AbortSignal) => get<BackendStats>(`/v1/admin/stats${qs({ window })}`, signal),
+		/** The audit log (owners only): newest first, a page at a time; `facets` adds the actors and actions to filter by. */
+		audit: (filters: AuditFilters & { facets?: boolean } = {}, signal?: AbortSignal) =>
+			get<AuditPage>(`/v1/admin/audit${qs({ actor: filters.actor, action: filters.action, outcome: filters.outcome, before: filters.before, limit: filters.limit, facets: filters.facets ? 1 : undefined })}`, signal),
+		/** Backups (owners only): the schedule, the last outcome, the local backups. */
+		backups: (signal?: AbortSignal) => get<BackupsStatus>("/v1/admin/backups", signal),
+		/** A local backup now; answers the new status. */
+		backupNow: (signal?: AbortSignal) => post<BackupsStatus>("/v1/admin/backups", {}, signal),
+		/** A fresh backup as a tar file (the backend leaves the webhook URL and instance.key out). */
+		async downloadBackup(signal?: AbortSignal): Promise<{ name: string; blob: Blob }> {
+			const path = "/v1/admin/backups/download";
+			let response: Response;
+			try {
+				response = await doFetch(`${base}${path}`, { method: "POST", credentials: "same-origin", headers: { [CSRF_HEADER]: "1" }, ...(signal ? { signal } : {}) });
+			} catch (error) {
+				throw new ApiError(0, `cannot reach the backend: ${(error as Error).message}`, path);
+			}
+			if (!response.ok) {
+				const body = (await response.json().catch(() => undefined)) as { error?: string } | undefined;
+				throw new ApiError(response.status, body?.error ?? `HTTP ${response.status}`, path, body);
+			}
+			const name = /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? "typetorch-backup.tar";
+			return { name, blob: await response.blob() };
+		},
 		/** Sign in with typetorch.dev: the browsers trusted for full admin (owners only). */
 		devices: (signal?: AbortSignal) => get<{ devices: BlessedDevice[] }>("/v1/admin/devices", signal).then((r) => r.devices),
 		revokeDevice: (id: string, signal?: AbortSignal) =>

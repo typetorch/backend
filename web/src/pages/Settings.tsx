@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, RotateCcw, Save, Send, Undo2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { alertRulesChange, BackendAlertRules, type AlertRulesDraft } from "@/components/BackendAlertRules";
+import { BackupCard } from "@/components/BackupCard";
 import { CentralLoginSection } from "@/components/CentralLoginSection";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
@@ -509,6 +510,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 				);
 			})}
 			{data.centralLogin ? <CentralLoginSection info={data.centralLogin} /> : null}
+			<BackupCard />
 			<p className="text-xs text-muted-foreground">
 				Environment only (change these on Coolify and redeploy): <span className="font-mono">{data.envOnly.join(", ")}</span>.
 			</p>

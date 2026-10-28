@@ -2,6 +2,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { ChangeChip, InfoTip } from "@/components/ChangeChip";
+import { DiskWarning } from "@/components/DiskWarning";
 import { KeyValue, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { api } from "@/lib/api";
@@ -71,6 +72,7 @@ function Body({ r }: { r: StorageReport }) {
 	const g = r.growth;
 	return (
 		<div className="space-y-4">
+			<DiskWarning disk={r.disk} quiet />
 			<div className="flex flex-wrap gap-x-8 gap-y-2">
 				<div>
 					<div className="text-xs text-muted-foreground">On disk</div>
@@ -93,8 +95,10 @@ function Body({ r }: { r: StorageReport }) {
 				{r.disk ? (
 					<div>
 						<div className="text-xs text-muted-foreground">Disk free</div>
-						<div className="text-2xl font-semibold tabular-nums">{fmtBytes(r.disk.freeBytes)}</div>
-						<div className="text-xs text-muted-foreground">of {fmtBytes(r.disk.totalBytes)}</div>
+						<div className={`text-2xl font-semibold tabular-nums${r.disk.level === "ok" ? "" : " text-destructive"}`}>{fmtBytes(r.disk.freeBytes)}</div>
+						<div className="text-xs text-muted-foreground">
+							of {fmtBytes(r.disk.totalBytes)} ({fmtPct(r.disk.freePercent / 100)})
+						</div>
 					</div>
 				) : null}
 				{r.disk && r.disk.totalBytes > 0 ? (

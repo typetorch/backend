@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startApp, type App } from "../src/server/app.ts";
+import { startApp, type App, type AppOptions } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 
 export const API = "game-api-key-for-tests-0123456789abcdef";
@@ -24,12 +24,12 @@ export interface Harness {
 }
 
 /** Sign in with typetorch.dev is on by default; the harness turns it off (no real broker reports) unless `env` sets it. */
-export async function harness(env: Record<string, string> = {}, options: { fetch?: typeof fetch; reportSleep?: (ms: number) => Promise<void> } = {}): Promise<Harness> {
+export async function harness(env: Record<string, string> = {}, options: { fetch?: typeof fetch; reportSleep?: (ms: number) => Promise<void>; diskUsage?: AppOptions["diskUsage"] } = {}): Promise<Harness> {
 	const dir = mkdtempSync(join(tmpdir(), "tt-backend-"));
 	let now = T0;
 	const logs: string[] = [];
 	const config = loadConfig([], { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: dir, PORT: "0", TYPETORCH_MEMORY_LIMIT: "256MB", TYPETORCH_EXPLORER: "off", TYPETORCH_CENTRAL_LOGIN: "off", ...env });
-	const app = await startApp(config, { clock: () => now, manualJobs: true, log: (l) => logs.push(l), ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.reportSleep ? { reportSleep: options.reportSleep } : {}) });
+	const app = await startApp(config, { clock: () => now, manualJobs: true, log: (l) => logs.push(l), ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.reportSleep ? { reportSleep: options.reportSleep } : {}), ...(options.diskUsage ? { diskUsage: options.diskUsage } : {}) });
 	return {
 		app,
 		base: `http://127.0.0.1:${app.port}`,

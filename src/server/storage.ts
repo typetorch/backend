@@ -3,9 +3,9 @@
  * how much today added (raw archive, gzip NDJSON) against the days before, and the disk's free space.
  */
 import { existsSync, readdirSync, statSync } from "node:fs";
-import * as fs from "node:fs";
 import { join } from "node:path";
 import { dayFiles, pathLit, type DataLayout } from "../duckdb/layout.ts";
+import { diskStatus, diskUsage, type DiskStatus, type DiskThresholds, type DiskUsage } from "./disk.ts";
 
 export interface StoragePart {
 	key: "live" | "events" | "recordings" | "rawIncoming" | "rawArchive" | "rollups" | "fleet" | "sql" | "tmp";
@@ -27,7 +27,8 @@ export interface StorageReport {
 	rows: { liveEvents: number; liveRecordings: number; parquetEvents: number; parquetRecordings: number } | null;
 	/** Raw archive (gzip NDJSON) per day: today so far vs the average of the 7 days before (null without history). */
 	growth: { todayBytes: number; avgPerDayBytes: number | null; days: { date: string; bytes: number }[] } | null;
-	disk: { freeBytes: number; totalBytes: number } | null;
+	/** The disk the data folder is on, with its level (server/disk.ts); null where it can't be measured. */
+	disk: DiskStatus | null;
 }
 
 interface Size {
@@ -73,6 +74,10 @@ export interface MeasureOptions {
 	liveRows?: () => Promise<{ events: number; recordings: number }>;
 	clock: () => number;
 	cacheSeconds: number;
+	/** The warning thresholds for the disk (server/disk.ts); without them the level is always "ok". */
+	diskThresholds?: DiskThresholds;
+	/** Reads the disk (tests pass a fake). */
+	diskUsage?: (path: string) => DiskUsage | null;
 }
 
 /** Measures the data folder. Everything is best effort: a part that can't be read counts as empty. */
@@ -119,16 +124,8 @@ export async function measureStorage(o: MeasureOptions): Promise<StorageReport> 
 		};
 	}
 
-	let disk: StorageReport["disk"] = null;
-	try {
-		const statfs = (fs as unknown as { statfsSync?: (p: string) => { bavail: number; blocks: number; bsize: number } }).statfsSync;
-		if (statfs) {
-			const s = statfs(l.root);
-			disk = { freeBytes: Number(s.bavail) * Number(s.bsize), totalBytes: Number(s.blocks) * Number(s.bsize) };
-		}
-	} catch {
-		// not supported here
-	}
+	const usage = (o.diskUsage ?? diskUsage)(l.root);
+	const disk = usage ? diskStatus(usage, o.diskThresholds ?? { warnFreePercent: 0, criticalFreePercent: 0 }, o.clock()) : null;
 
 	return {
 		at: new Date(o.clock()).toISOString(),
