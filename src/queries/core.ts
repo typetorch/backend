@@ -118,6 +118,39 @@ export const SESSIONS_CTE =
 export const ENDED_AFTER_MS = 10 * 60 * 1000;
 
 /**
+ * Rows from Studio play tests (`srv = studio`) on alias `e`. Roblox's analytics only count published games (Studio
+ * sends nothing), so the Creator-Hub-style queries leave them out. Rows without `srv` count.
+ */
+export const NOT_STUDIO = "(e.srv IS NULL OR e.srv <> 'studio')";
+
+/**
+ * How far before and after a window the session queries read, so a session that crosses the window's edge keeps its
+ * real start (it isn't counted as starting at the edge) and its full length. Sessions are at most this long in the
+ * playtime funnel too (stuck or AFK servers).
+ */
+export const SESSION_SLACK_MS = 12 * 3_600_000;
+
+/**
+ * `a(pid, day)`: the UTC days on which a player started a session, from the events in [from, to). Retention counts a
+ * player as back on day N when a session *started* that day, as Roblox does ("played again after their first
+ * session ended"): a first session running past midnight is not a return. No segment filters (a player back on
+ * another device still counts); Studio sessions don't count.
+ */
+export function sessionDaysCte(ctx: QueryContext, from: number, to: number): string {
+	return (
+		`a AS (SELECT DISTINCT pid, ${dayOf("t0")} AS day FROM (SELECT e.pid AS pid, MIN(e.t) AS t0 FROM ${ctx.table("events", from, to)} e ` +
+		`WHERE e.t >= ${int(from)} AND e.t < ${int(to)} AND e.pid IS NOT NULL AND e.pid <> '' AND e.sid IS NOT NULL AND e.sid <> '' AND ${NOT_STUDIO} ` +
+		`GROUP BY e.pid, e.sid) x)`
+	);
+}
+
+/** The mean of the values that aren't null (null when there are none): Roblox's N-day averages of a daily ratio. */
+export function meanOf(values: readonly (number | null)[]): number | null {
+	const kept = values.filter((v): v is number => v !== null && Number.isFinite(v));
+	return kept.length ? kept.reduce((a, b) => a + b, 0) / kept.length : null;
+}
+
+/**
  * Revenue counts server-sent purchase rows only. Older framework engines let a client send `purchase` events
  * (src = client), so an exploiter could inflate payers and Robux; clients can't send them now and ingest refuses them
  * (SERVER_ONLY_KINDS), but rows already stored or sent to Basin may hold some. Rows from before `src` existed (NULL)
