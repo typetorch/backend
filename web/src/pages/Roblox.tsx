@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChangeChip, InfoTip } from "@/components/ChangeChip";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
@@ -17,6 +18,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { barMax, change, estimatePercentile, loadBenchmarks, saveBenchmarks, type Benchmark, type BenchmarkKey, type Benchmarks } from "@/lib/benchmarks";
 import { isoDate } from "@/lib/filters";
@@ -35,26 +37,63 @@ function useNoRange(): Filters {
 
 // Benchmark cards ----------------------------------------------------------------------------------------------------
 
-interface CardSpec {
+/** Where a number can't match Creator Hub: a short badge on the card, and why (its tooltip). */
+export interface Differs {
+	label: "Estimate" | "Ours";
+	why: string;
+}
+
+export interface CardSpec {
 	key: BenchmarkKey;
 	title: string;
 	/** Value in the unit the user types benchmarks in (minutes, percent, Robux). */
 	value(p: BenchmarkPeriod): number | null;
 	format(v: number): string;
 	unit: string;
+	/** Creator Hub's definition, then how this card computes it. */
 	info: string;
+	differs?: Differs;
 }
 
 const pct = (r: { rate: number; of: number }) => (r.of > 0 ? r.rate * 100 : null);
 
-const CARDS: CardSpec[] = [
+const REVENUE_DIFFERS: Differs = {
+	label: "Estimate",
+	why: "Revenue here is what players paid in game purchases times 70% (Roblox keeps 30%). Creator Hub also counts passes bought outside the game, commissions and avatar item sales, which the game never sees.",
+};
+
+export const CARDS: CardSpec[] = [
 	{
-		key: "playtime",
-		title: "Average playtime",
-		value: (p) => p.avgPlaytimeMinutes,
+		key: "dau",
+		title: "Daily active users",
+		value: (p) => p.dau,
+		format: (v) => fmtNum(v, 1),
+		unit: "players",
+		info: "Creator Hub: the distinct users who played on a day. Here the players who started a session that UTC day (a session running past midnight counts for its first day only), averaged over the period's days.",
+	},
+	{
+		key: "mau",
+		title: "Monthly active users",
+		value: (p) => p.mau,
+		format: (v) => fmtInt(v),
+		unit: "players",
+		info: "Creator Hub: the distinct users who played in the last 30 days. Here the distinct players with a session in the 30 UTC days ending on the period's last day (so the two periods' 30-day windows overlap).",
+	},
+	{
+		key: "newUsers",
+		title: "New users",
+		value: (p) => p.newUsers,
+		format: (v) => fmtInt(v),
+		unit: "players",
+		info: "Creator Hub: users who played the experience for the first time. Here the players whose first-ever session started in the period (the SDK marks a player's first join), summed over its days.",
+	},
+	{
+		key: "sessionTime",
+		title: "Average session time",
+		value: (p) => p.avgSessionMinutes,
 		format: (v) => fmtMinutes(v),
 		unit: "minutes",
-		info: "Session time per daily active user: all playtime in the period divided by player-days. A session runs from its first to its last event.",
+		info: "Creator Hub: total playtime divided by the number of sessions, each day. Here the same, per UTC day, averaged over the period's days. A session runs from its first to its last event and counts on the day it started.",
 	},
 	{
 		key: "d1",
@@ -62,7 +101,7 @@ const CARDS: CardSpec[] = [
 		value: (p) => pct(p.d1Retention),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
-		info: "New players who played again exactly 1 day after joining, counted on the day they came back (days that are over only).",
+		info: "Creator Hub: new users who played again the day after their first play date, by that date. Here the same: a new session must start the next UTC day (a first session running past midnight isn't a return), for the latest join days whose next day is over, averaged over those days.",
 	},
 	{
 		key: "d7",
@@ -70,7 +109,15 @@ const CARDS: CardSpec[] = [
 		value: (p) => pct(p.d7Retention),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
-		info: "New players who played again exactly 7 days after joining, counted on the day they came back (days that are over only).",
+		info: "Creator Hub: new users who played again on day 7 (the 8th day) after their first play date. Here the same rule as day 1, 7 days on, for the latest join days whose day 7 is over.",
+	},
+	{
+		key: "d30",
+		title: "Day 30 retention",
+		value: (p) => pct(p.d30Retention),
+		format: (v) => `${fmtNum(v, 1)}%`,
+		unit: "%",
+		info: "Creator Hub: new users who played again on day 30 after their first play date. Here the same rule as day 1, 30 days on, for the latest join days whose day 30 is over.",
 	},
 	{
 		key: "payer",
@@ -78,7 +125,8 @@ const CARDS: CardSpec[] = [
 		value: (p) => pct(p.payerConversion),
 		format: (v) => `${fmtNum(v, 2)}%`,
 		unit: "%",
-		info: "Players with at least one purchase, out of all players in the period.",
+		info: "Creator Hub: the share of daily active users who are also paying users. Here the same per UTC day, averaged over the period's days (not payers over the whole period).",
+		differs: { label: "Estimate", why: "Only purchases the game server logs count: a pass bought on the website, outside the game, isn't seen." },
 	},
 	{
 		key: "arppu",
@@ -86,7 +134,25 @@ const CARDS: CardSpec[] = [
 		value: (p) => p.arppu,
 		format: (v) => `${fmtNum(v, 1)} R$`,
 		unit: "Robux",
-		info: "Average revenue per paying user: Robux from purchases divided by the players who paid in the period.",
+		info: "Creator Hub: average revenue per paying user. Here revenue / paying users per UTC day, averaged over the days with a payer.",
+		differs: REVENUE_DIFFERS,
+	},
+	{
+		key: "arpdau",
+		title: "ARPDAU",
+		value: (p) => p.arpdau,
+		format: (v) => `${fmtNum(v, 2)} R$`,
+		unit: "Robux",
+		info: "Creator Hub: average revenue per daily active user. Here revenue / DAU per UTC day, averaged over the period's days.",
+		differs: REVENUE_DIFFERS,
+	},
+	{
+		key: "playtime",
+		title: "Average playtime",
+		value: (p) => p.avgPlaytimeMinutes,
+		format: (v) => fmtMinutes(v),
+		unit: "minutes",
+		info: "Creator Hub: playtime per daily active user. Here all playtime of a UTC day divided by that day's players, averaged over the period's days.",
 	},
 	{
 		key: "playThrough",
@@ -94,25 +160,53 @@ const CARDS: CardSpec[] = [
 		value: (p) => pct(p.playThrough),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
-		info: "Our version: the share of new players' first sessions (that are over) lasting at least 5 minutes, a qualified play. Creator Hub's play-through starts at the home-page impression, which games can't see.",
+		info: "Our version: the share of new players' first sessions (that are over) lasting at least 5 minutes.",
+		differs: { label: "Ours", why: "Creator Hub's play-through rate starts at the home-page impression (seen, then played), which games can't see. Don't compare it with Creator Hub's benchmark." },
 	},
 ];
 
 function sub(spec: CardSpec, p: BenchmarkPeriod): string {
 	switch (spec.key) {
+		case "dau":
+			return `${fmtInt(p.players)} players in the period`;
+		case "mau":
+			return `30 days to ${new Date(Date.parse(p.to) - 1).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
+		case "newUsers":
+			return `${fmtNum(p.newUsers / Math.max(1, Math.round((Date.parse(p.to) - Date.parse(p.from)) / 86_400_000)), 1)} per day`;
+		case "sessionTime":
+			return `${fmtInt(p.sessions)} sessions`;
 		case "playtime":
 			return `${fmtNum(p.dau, 1)} daily active users`;
 		case "d1":
 			return `${fmtInt(p.d1Retention.count)} of ${fmtInt(p.d1Retention.of)} new players`;
 		case "d7":
 			return `${fmtInt(p.d7Retention.count)} of ${fmtInt(p.d7Retention.of)} new players`;
+		case "d30":
+			return `${fmtInt(p.d30Retention.count)} of ${fmtInt(p.d30Retention.of)} new players`;
 		case "payer":
-			return `${fmtInt(p.payerConversion.count)} of ${fmtInt(p.payerConversion.of)} players`;
+			return `${fmtInt(p.payerConversion.count)} payer-days of ${fmtInt(p.payerConversion.of)} player-days`;
 		case "arppu":
-			return `${fmtInt(p.robux)} Robux in all`;
+			return `${fmtInt(p.revenue)} Robux revenue (${fmtInt(p.robux)} spent)`;
+		case "arpdau":
+			return `${fmtNum(p.dau, 1)} daily active users`;
 		case "playThrough":
 			return `${fmtInt(p.playThrough.count)} of ${fmtInt(p.playThrough.of)} first sessions`;
 	}
+}
+
+function DiffersBadge({ differs }: { differs: Differs }) {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<button type="button" aria-label={`${differs.label}: how it differs from Creator Hub`}>
+					<Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">
+						{differs.label}
+					</Badge>
+				</button>
+			</TooltipTrigger>
+			<TooltipContent className="max-w-72 text-xs leading-snug">{differs.why}</TooltipContent>
+		</Tooltip>
+	);
 }
 
 function BenchmarkBar({ value, bench, onSet }: { value: number | null; bench?: Benchmark; onSet(): void }) {
@@ -159,6 +253,7 @@ function BenchmarkCard({ spec, current, previous, bench, days, onSet }: { spec: 
 				<div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
 					{spec.title}
 					<InfoTip>{spec.info}</InfoTip>
+					{spec.differs ? <DiffersBadge differs={spec.differs} /> : null}
 				</div>
 				<div className="flex items-baseline gap-2">
 					<span className={value === null ? "text-2xl font-semibold text-muted-foreground" : "text-2xl font-semibold tracking-tight tabular-nums"}>{value === null ? "n/a" : spec.format(value)}</span>
@@ -228,12 +323,16 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 // Realtime -----------------------------------------------------------------------------------------------------------
 
 function Sparkline({ series }: { series: RealtimeResult["ccu"]["series"] }) {
-	const config: ChartConfig = { avg: { label: "Concurrent users (hourly average)", color: "var(--chart-1)" } };
+	const config: ChartConfig = {
+		peak: { label: "Peak concurrent users", color: "var(--chart-1)" },
+		avg: { label: "Hourly average", color: "var(--chart-2)" },
+	};
 	return (
 		<ChartContainer config={config} className="aspect-auto h-16 w-full">
 			<LineChart data={series} margin={{ top: 4, right: 2, bottom: 2, left: 2 }}>
-				<ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(_, p) => String(p?.[0]?.payload?.hour ?? "").replace("T", " ").slice(0, 16)} />} />
-				<Line dataKey="avg" stroke="var(--color-avg)" strokeWidth={2} dot={false} isAnimationActive={false} />
+				<ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(_, p) => `${String(p?.[0]?.payload?.hour ?? "").replace("T", " ").slice(0, 16)} UTC`} />} />
+				<Line dataKey="peak" stroke="var(--color-peak)" strokeWidth={2} dot={false} isAnimationActive={false} />
+				<Line dataKey="avg" stroke="var(--color-avg)" strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} />
 			</LineChart>
 		</ChartContainer>
 	);
@@ -268,15 +367,33 @@ function Realtime({ filters }: { filters: Filters }) {
 							<div className="flex items-center justify-between gap-2">
 								<div className="flex items-center gap-1.5 text-sm text-muted-foreground">
 									Concurrent users
-									<InfoTip>Players on live servers now (fleet API). The line is the hourly average over 7 days, from the servers' heartbeats: players per minute, summed over servers.</InfoTip>
+									<InfoTip>
+										Players on live servers now (fleet API). The line is each UTC hour's peak minute over 7 days, as Creator Hub's peak concurrent players (dashed: the hourly
+										average), from the servers' heartbeats: players per minute, summed over servers. Studio play tests don't count.
+									</InfoTip>
+									<DiffersBadge differs={{ label: "Estimate", why: "From heartbeats about once a minute per server: a player who stays under a minute, or a server that stops sending, can be missed. Creator Hub counts every connection." }} />
 								</div>
-								<ChangeChip change={change(r.ccu.currentAvg, r.ccu.previousAvg)} against="the 24 h before (hourly average)" />
+								<ChangeChip change={change(r.ccu.currentPeak, r.ccu.previousPeak)} against="the 24 h before (peak)" />
 							</div>
 							<div className="text-3xl font-semibold tabular-nums">{fmtInt(now)}</div>
 							{hasCcu ? <Sparkline series={r.ccu.series} /> : <p className="py-3 text-xs text-muted-foreground">No heartbeats with players in 7 days.</p>}
 							<RealtimeRow
+								label="Peak concurrent users"
+								info="The highest minute of the last 24 h (Creator Hub's peak concurrent players), from the servers' heartbeats."
+								value={fmtInt(r.ccu.currentPeak)}
+								current={r.ccu.currentPeak}
+								previous={r.ccu.previousPeak}
+							/>
+							<RealtimeRow
+								label="Average concurrent users"
+								info="The mean of the last 24 h's per-minute player counts (Creator Hub's average concurrent players); minutes without a heartbeat count as 0."
+								value={fmtNum(r.ccu.currentAvg, 1)}
+								current={r.ccu.currentAvg}
+								previous={r.ccu.previousAvg}
+							/>
+							<RealtimeRow
 								label="Session time"
-								info="Average length of the sessions that started in the window and are over."
+								info="Average length of the sessions that started in the window and are over (first to last event; Studio play tests left out)."
 								value={r.current.avgSessionMinutes === null ? "n/a" : fmtMinutes(r.current.avgSessionMinutes)}
 								current={r.current.avgSessionMinutes}
 								previous={r.previous.avgSessionMinutes}
@@ -315,14 +432,15 @@ function Realtime({ filters }: { filters: Filters }) {
 
 // 7-day moving averages ---------------------------------------------------------------------------------------------
 
-type TrendKey = "d1" | "newUsers" | "playtimeMinutes" | "dau" | "robux";
+type TrendKey = "d1" | "newUsers" | "sessionMinutes" | "playtimeMinutes" | "dau" | "revenue";
 
-const TRENDS: { key: TrendKey; label: string; format(v: number): string }[] = [
+export const TRENDS: { key: TrendKey; label: string; format(v: number): string }[] = [
 	{ key: "d1", label: "D1 retention", format: (v) => fmtPct(v) },
 	{ key: "newUsers", label: "New users", format: (v) => fmtNum(v, 1) },
+	{ key: "sessionMinutes", label: "Average session time", format: (v) => fmtMinutes(v) },
 	{ key: "playtimeMinutes", label: "Average playtime", format: (v) => fmtMinutes(v) },
 	{ key: "dau", label: "Daily active users", format: (v) => fmtNum(v, 1) },
-	{ key: "robux", label: "Daily revenue (Robux)", format: (v) => fmtNum(v, 0) },
+	{ key: "revenue", label: "Daily revenue (est., Robux)", format: (v) => fmtNum(v, 0) },
 ];
 
 /** Each join source keeps its color whatever the filters (the order of the categorical palette). */
@@ -336,6 +454,9 @@ const SOURCE_COLORS: Record<string, string> = {
 	unknown: "var(--chart-7)",
 	other: "var(--chart-8)",
 };
+
+const JOIN_SOURCES_DIFFER =
+	"The join sources are the game's own (direct, teleport, link, followed a friend). Creator Hub splits by discovery surface (Home recommendations, Search, Friends, Teleport from another game, ads...), which games can't see: those all count as direct here.";
 
 const SOURCE_LABELS: Record<string, string> = {
 	direct: "Direct",
@@ -352,13 +473,19 @@ function Trends({ filters }: { filters: Filters }) {
 	const [metric, setMetric] = useParam("trend", "d1");
 	const [range, setRange] = useParam("trendDays", "28");
 	const days = Number.parseInt(range, 10) || 28;
-	const from = isoDate(Date.now() - (days - 1) * 86_400_000);
+	// The last `days` full UTC days: the query leaves today out (it isn't over).
+	const from = isoDate(Date.now() - days * 86_400_000);
 	const q = useAnalytics("trends", { window: 7 }, { filters: { ...filters, from } });
 	const spec = TRENDS.find((t) => t.key === metric) ?? TRENDS[0];
 	return (
 		<Section
-			title="Snapshot of 7-day moving averages"
-			description="Total and per join source (where the session came from). Roblox's own Home / Search split isn't visible to games: those joins count as direct."
+			title={
+				<span className="flex items-center gap-1.5">
+					Snapshot of 7-day moving averages
+					<DiffersBadge differs={{ label: "Ours", why: JOIN_SOURCES_DIFFER }} />
+				</span>
+			}
+			description="Per full UTC day, total and per join source (where the player's first session that day came from). Counts are averaged over the 7 days; ratios are the mean of the 7 daily values."
 			actions={
 				<Select value={String(days)} onValueChange={setRange}>
 					<SelectTrigger size="sm" className="w-32" aria-label="Date range">
@@ -422,6 +549,42 @@ function Trends({ filters }: { filters: Filters }) {
 	);
 }
 
+// How these are calculated --------------------------------------------------------------------------------------------
+
+/** The rules the page's numbers follow (Creator Hub's definitions, create.roblox.com/docs/production/analytics). */
+export const CALCULATION_NOTES: { title: string; text: string }[] = [
+	{ title: "Days", text: "UTC, midnight to midnight, as Creator Hub's daily numbers. Only full days count: the cards and charts end yesterday, since today isn't over." },
+	{ title: "Sessions", text: "One session per join, from its first to its last event, with no minimum length. It counts on the day it started, so a player active past midnight is a daily active user of the first day only." },
+	{ title: "Who counts", text: "Players on public, private and reserved servers. Studio play tests don't count (Creator Hub only sees published games)." },
+	{ title: "Active users", text: "Daily active users are the distinct players who started a session that UTC day, averaged over the period. Monthly active users are the distinct players of the 30 days ending on the period's last day." },
+	{ title: "New users and retention", text: "A new user is a player's first-ever session. Day 1 / 7 / 30 retention is by first play date: the share of that day's new users who start a new session exactly 1 / 7 / 30 days later, over the latest join days whose day N is over." },
+	{ title: "Averages", text: "A card is the average of its daily values over the period: average session time and playtime per DAU, payer conversion, ARPPU and ARPDAU are computed each day, then averaged, as Creator Hub's 7-day averages." },
+	{ title: "Revenue", text: "Robux players paid in purchases the game server logged, times 70% (Roblox keeps 30% of developer product and pass sales). An estimate: Creator Hub also counts sales outside the game." },
+	{ title: "Concurrent users", text: "Players per minute from the servers' heartbeats, summed over servers (Studio left out): the peak minute and the average of the minutes, per hour and over the last 24 h. An estimate: a heartbeat is about once a minute." },
+	{ title: "Data delay", text: "None here: events arrive within seconds. Creator Hub's daily numbers settle a day or more after the day ends, and its last days can be marked as estimates." },
+];
+
+function HowCalculated() {
+	return (
+		<Section title="How these are calculated" description="The rules this page follows to match Creator Hub. Cards marked Estimate or Ours can't match exactly; hover the mark for why.">
+			<dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
+				{CALCULATION_NOTES.map((n) => (
+					<div key={n.title}>
+						<dt className="font-medium">{n.title}</dt>
+						<dd className="text-muted-foreground">{n.text}</dd>
+					</div>
+				))}
+			</dl>
+		</Section>
+	);
+}
+
+/** "Oct 1 - Oct 7 (UTC)" for a period's [from, to). */
+export function periodLabel(p: { from: string; to: string }): string {
+	const fmt = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+	return `${fmt(Date.parse(p.from))} - ${fmt(Date.parse(p.to) - 1)} (UTC)`;
+}
+
 // The page ------------------------------------------------------------------------------------------------------------
 
 export default function Roblox() {
@@ -439,7 +602,7 @@ export default function Roblox() {
 		<>
 			<PageHeader
 				title="Roblox overview"
-				description={`Creator Hub's overview, from your own events: ${days}-day averages against the ${days} days before. The filter bar's branch, artifact, device, players and variant apply; its date range doesn't.`}
+				description={`Creator Hub's overview, from your own events and computed the way Creator Hub defines it: the last ${days} full UTC days against the ${days} days before. The filter bar's branch, artifact, device, players and variant apply; its date range doesn't.`}
 				actions={
 					<>
 						<ToggleGroup type="single" variant="outline" size="sm" value={String(days)} onValueChange={(v) => v && setPeriod(v)} aria-label="Period">
@@ -470,18 +633,23 @@ export default function Roblox() {
 							r.current.players === 0 && r.previous.players === 0 ? (
 								<EmptyState>No players in the last {2 * days} days.</EmptyState>
 							) : (
-								<div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-									{CARDS.map((spec) => (
-										<BenchmarkCard
-											key={spec.key}
-											spec={spec}
-											current={r.current}
-											previous={r.previous}
-											days={days}
-											{...(bench[spec.key] ? { bench: bench[spec.key] } : {})}
-											onSet={() => setEditing(true)}
-										/>
-									))}
+								<div className="space-y-2">
+									<p className="text-xs text-muted-foreground tabular-nums">
+										{periodLabel(r.current)} vs {periodLabel(r.previous)}
+									</p>
+									<div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+										{CARDS.map((spec) => (
+											<BenchmarkCard
+												key={spec.key}
+												spec={spec}
+												current={r.current}
+												previous={r.previous}
+												days={days}
+												{...(bench[spec.key] ? { bench: bench[spec.key] } : {})}
+												onSet={() => setEditing(true)}
+											/>
+										))}
+									</div>
 								</div>
 							)
 						}
@@ -493,6 +661,7 @@ export default function Roblox() {
 				<Realtime filters={filters} />
 			</div>
 			<Trends filters={filters} />
+			<HowCalculated />
 		</>
 	);
 }

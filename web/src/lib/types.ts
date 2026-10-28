@@ -478,22 +478,37 @@ export interface EventsResult {
 	events: EventRow[];
 }
 
+/** The Roblox page's numbers, as Creator Hub defines them (README "Roblox parity"). */
 export interface BenchmarkPeriod {
+	/** First day 00:00 UTC, and the end of the last full day (exclusive). */
 	from: string;
 	to: string;
 	players: number;
+	newUsers: number;
 	dau: number;
+	/** Distinct players in the 30 UTC days ending on the period's last day. */
+	mau: number;
+	sessions: number;
+	/** Per day playtime / sessions, the mean of the days. */
+	avgSessionMinutes: number | null;
+	/** Per day playtime / DAU, the mean of the days. */
 	avgPlaytimeMinutes: number | null;
-	d1Retention: Rate;
-	d7Retention: Rate;
+	d1Retention: Rate & { cohortFrom: string; cohortTo: string };
+	d7Retention: Rate & { cohortFrom: string; cohortTo: string };
+	d30Retention: Rate & { cohortFrom: string; cohortTo: string };
+	/** rate = the mean of daily paying DAU / DAU; count / of = payer-days / player-days. */
 	payerConversion: Rate;
 	arppu: number | null;
+	arpdau: number | null;
+	/** Robux spent (prices); revenue = robux x creatorShare. */
 	robux: number;
+	revenue: number;
 	playThrough: Rate & { minutes: number };
 }
 
 export interface BenchmarksResult {
 	days: number;
+	creatorShare: number;
 	current: BenchmarkPeriod;
 	previous: BenchmarkPeriod;
 }
@@ -511,14 +526,16 @@ export interface RealtimeResult {
 	hours: number;
 	current: RealtimeWindow;
 	previous: RealtimeWindow;
-	ccu: { now: number; series: { hour: string; avg: number; peak: number }[]; currentAvg: number; previousAvg: number };
+	ccu: { now: number; series: { hour: string; avg: number; peak: number }[]; currentAvg: number; previousAvg: number; currentPeak: number; previousPeak: number };
 }
 
 export interface TrendValues {
 	newUsers: number;
 	dau: number;
+	sessionMinutes: number | null;
 	playtimeMinutes: number | null;
 	robux: number;
+	revenue: number;
 	d1: number | null;
 }
 
@@ -526,6 +543,7 @@ export interface TrendsResult {
 	from: string;
 	to: string;
 	window: number;
+	creatorShare: number;
 	sources: string[];
 	days: { date: string; total: TrendValues; bySource: Record<string, TrendValues> }[];
 }

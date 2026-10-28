@@ -3,7 +3,12 @@
  * 90th percentile they read on their Creator Hub page; we have no genre data), kept in localStorage.
  */
 
-export type BenchmarkKey = "playtime" | "d1" | "d7" | "payer" | "arppu" | "playThrough";
+/**
+ * One per card. `sessionTime` is Creator Hub's "Average session time" (the benchmarked engagement KPI); `playtime` is
+ * its "Average playtime" (per DAU). Creator Hub benchmarks only some of these; the others take a 50th / 90th too if the
+ * user has one from elsewhere.
+ */
+export type BenchmarkKey = "dau" | "mau" | "newUsers" | "sessionTime" | "playtime" | "d1" | "d7" | "d30" | "payer" | "arppu" | "arpdau" | "playThrough";
 
 export interface Benchmark {
 	p50: number;
