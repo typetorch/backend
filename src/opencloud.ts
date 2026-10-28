@@ -8,6 +8,8 @@
  *     Scope universe-messaging-service:publish.
  *   - Server management (v1, beta): a game server's error / warning logs, read only (server/roblox-servers.ts).
  *     Scope universe:read.
+ *   - Analytics Query API (v1): Creator Hub's acquisition numbers (impressions, play-through rate; server/roblox-analytics.ts).
+ *     Scope universe.analytics:read.
  */
 export const OPEN_CLOUD = "https://apis.roblox.com";
 
@@ -171,4 +173,71 @@ export async function listGameServerLogs(
 	const logs = (Array.isArray(body.gameServerLogs) ? body.gameServerLogs : []).filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null && !Array.isArray(e));
 	const next = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
 	return next ? { logs, nextPageToken: next } : { logs };
+}
+
+// Analytics Query API (v1) ---------------------------------------------------------------------------------------------
+
+/** The scope every analytics query needs (API system `universe-analytics`). */
+export const ANALYTICS_READ_SCOPE = "universe.analytics:read";
+
+export interface AnalyticsQuery {
+	/** A metric id from create.roblox.com/docs/cloud/guides/analytics/metrics (e.g. `DailyActiveUsers`). */
+	metric: string;
+	granularity: "OneMinute" | "HalfHour" | "OneHour" | "OneDay" | "OneWeek" | "OneMonth" | "None";
+	/** RFC 3339; the start inclusive, the end exclusive. Buckets are UTC days. */
+	startTime: string;
+	endTime: string;
+	breakdown?: string[];
+	filter?: { dimension: string; values: string[]; operation: string }[];
+	limit?: number;
+}
+
+export interface AnalyticsSeries {
+	breakdowns: { dimension: string; value: string; displayValue?: string }[];
+	dataPoints: { time: string; value: number | null; status?: string }[];
+}
+
+/**
+ * One metric over a date range: `POST /analytics-query-api/v1/universes/{u}/metrics`. Small queries answer at once;
+ * larger ones come back 202 `{ done: false, path }` and are polled on `GET /analytics-query-api/{path}` until `done`
+ * (`pollMs` apart, at most `maxPolls` times). The series come back as Roblox sent them, lightly checked: a data point
+ * whose value isn't a finite number is kept with `value: null`. Roblox allows 30 queries a minute per key owner.
+ */
+export async function queryAnalyticsMetric(
+	options: OpenCloudOptions & { universeId: number; query: AnalyticsQuery; pollMs?: number; maxPolls?: number; sleep?: (ms: number) => Promise<void> },
+): Promise<AnalyticsSeries[]> {
+	const path = `/analytics-query-api/v1/universes/${options.universeId}/metrics`;
+	let response = await call(options, "POST", path, options.query);
+	if (response.status < 200 || response.status >= 300) fail("POST", path, response.status, response.text, ANALYTICS_READ_SCOPE);
+	let body = record(response.body);
+	const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+	for (let polls = 0; body.done !== true; polls++) {
+		if (polls >= (options.maxPolls ?? 20)) throw new OpenCloudError(`POST ${path} -> the query didn't finish in time`, 504);
+		const operation = typeof body.path === "string" ? body.path.replace(/^\/+/, "") : "";
+		if (!/^v1\/universes\/\d+\/operations\/[A-Za-z0-9_/-]+$/.test(operation)) throw new OpenCloudError(`POST ${path} -> no operation path to poll`, 502);
+		await sleep(options.pollMs ?? 1000);
+		response = await call(options, "GET", `/analytics-query-api/${operation}`);
+		if (response.status < 200 || response.status >= 300) fail("GET", `/analytics-query-api/${operation}`, response.status, response.text, ANALYTICS_READ_SCOPE);
+		body = record(response.body);
+	}
+	const error = record(body.error);
+	if (typeof error.message === "string" || typeof error.code === "number") {
+		throw new OpenCloudError(`POST ${path} -> query failed (${String(error.code ?? "")}): ${String(error.message ?? "").replace(/\s+/g, " ").slice(0, 300)}`, 502);
+	}
+	const values = record(body.response).values;
+	return (Array.isArray(values) ? values : []).map((series) => {
+		const s = record(series);
+		const breakdowns = (Array.isArray(s.breakdowns) ? s.breakdowns : [])
+			.map(record)
+			.filter((b) => typeof b.dimension === "string" && typeof b.value === "string")
+			.map((b) => ({ dimension: b.dimension as string, value: b.value as string, ...(typeof b.displayValue === "string" ? { displayValue: b.displayValue } : {}) }));
+		const dataPoints = (Array.isArray(s.dataPoints) ? s.dataPoints : [])
+			.map(record)
+			.filter((p) => typeof p.time === "string" && Number.isFinite(Date.parse(p.time)))
+			.map((p) => {
+				const n = typeof p.value === "number" ? p.value : typeof p.value === "string" && p.value.trim() !== "" ? Number(p.value) : Number.NaN;
+				return { time: p.time as string, value: Number.isFinite(n) ? n : null, ...(typeof p.status === "string" ? { status: p.status } : {}) };
+			});
+		return { breakdowns, dataPoints };
+	});
 }

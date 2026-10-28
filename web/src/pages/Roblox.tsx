@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChangeChip, InfoTip } from "@/components/ChangeChip";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
+import { RobloxAcquisition } from "@/components/RobloxAcquisition";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -707,6 +708,7 @@ export default function Roblox() {
 				</div>
 				<Realtime filters={filters} />
 			</div>
+			<RobloxAcquisition days={days} {...(bench.playThrough ? { bench: bench.playThrough } : {})} onSet={() => setEditing(true)} />
 			<Trends filters={filters} />
 			<HowCalculated />
 		</>

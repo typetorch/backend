@@ -351,6 +351,15 @@ const ROUTES: Route[] = [
 		params: [JOB, q("severity", "up to 8 comma-separated words"), q("search", "text"), q("order", "asc or desc", { type: "string", enum: ["asc", "desc"] }), q("pageToken", "the next page"), q("placeId", "when the fleet doesn't know it", int()), q("placeVersion", "when the fleet doesn't know it", int())],
 	},
 
+	{
+		method: "get",
+		path: "/v1/roblox/analytics/acquisition",
+		tag: "roblox",
+		roles: ["admin", "web"],
+		summary: "Roblox's play-through rate, impressions and qualified plays (Open Cloud Analytics Query API)",
+		params: [q("days", "7, 14 or 28 (default 7)", int())],
+	},
+
 	// Live ----------------------------------------------------------------------------------------------------------------------
 	{ method: "get", path: "/v1/live", tag: "live", roles: ["admin", "web"], summary: "Server-Sent Events of the event bus", ok: { status: 200, description: "an event stream", contentType: "text/event-stream" } },
 

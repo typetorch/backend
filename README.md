@@ -124,7 +124,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
 | `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) and Roblox's discovery document from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
-| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId |
+| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId; with `universe.analytics:read` (and `TYPETORCH_UNIVERSE_ID`) the Roblox page shows Roblox's own [play-through rate and impressions](#roblox-acquisition-numbers) |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
 | `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
@@ -547,6 +547,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
+| `GET /v1/roblox/analytics/acquisition?days=7` | admin, web | Roblox's own play-through rate, impressions and qualified plays ([Roblox acquisition numbers](#roblox-acquisition-numbers), Open Cloud) |
 | `GET /v1/identity/resolve` | admin, lookup | `?pid=a,b&uid=1,2` (<= 100): `{ byPid: [{ pid, uid \| null }], byUid: [{ uid, pids }] }`; the [lookup token](#the-lookup-token-for-scripts-and-llm-agents)'s only route |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
@@ -1286,6 +1287,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `GET /v1/place` | admin, web | `{ configured: false }` while neither `TYPETORCH_UNIVERSE_ID` is set nor a heartbeat carried a PlaceId; else `{ configured: true, roblox: "ok" \| "partial" \| "unavailable", cached, placeId, universeId, name, playing, icon, url }` (null when Roblox didn't say). The server asks Roblox's public games and thumbnails APIs without credentials (never the Open Cloud key), caches 60 s, keeps an older answer while Roblox is down; the icon is only an https URL on `*.rbxcdn.com`. 120 a minute per address |
 | `GET /v1/roblox/products?gamepass=1,2&product=3` | admin, web | `{ items: [{ type: "gamepass" \| "product", id, status: "ok" \| "not_found" \| "unavailable", name, price, forSale, icon }] }` in request order (duplicates dropped). Ids are comma-separated positive integers, at most 50 in all; anything else is a 400 before Roblox is asked. The server asks Roblox's public APIs without credentials (never the Open Cloud key): `apis.roblox.com/game-passes/v1/game-passes/<id>/product-info`, `apis.roblox.com/developer-products/v1/developer-products/<id>/details`, and `thumbnails.roblox.com` (`/v1/game-passes`, `/v1/developer-products/icons` by the product's TargetId) for 150x150 icons, only https URLs on `*.rbxcdn.com`. Cached 1 h (not found 10 min, Roblox down 1 min, an older good answer kept while down), one lookup per item at a time, at most 240 Roblox calls a minute and 6 at once. 120 requests a minute per address |
 | `GET /v1/roblox/servers/<job>/logs?severity=&search=&order=&pageToken=&placeId=&placeVersion=` | admin, web | one page of the errors and warnings Roblox kept for a game server: `{ jobId, placeId, placeVersion, logs: [{ time, severity, message, count, stack, placeVersion, fields }], nextPageToken, cached }` ([below](#roblox-server-logs)) |
+| `GET /v1/roblox/analytics/acquisition?days=7\|14\|28` | admin, web | `{ source: "roblox", days, metrics, current, previous, daily, sources, fetchedAt, cached }`: Creator Hub's play-through rate, users with impressions and users with qualified plays for the last `days` full UTC days and the `days` before, from Roblox's Analytics Query API ([Roblox acquisition numbers](#roblox-acquisition-numbers)); 409 until `OPENCLOUD_API_KEY` has `universe.analytics:read` |
 | `POST /v1/identity/backfill` | admin | `{ pageToken?, maxEntries? }` -> `{ scanned, added, known, nextPageToken? }`: pid <-> UserId from the game's DataStore links, for players who joined before identity rows existed (needs `OPENCLOUD_API_KEY` with `universe-datastores.objects:list` and `:read`) |
 
 How it works:
@@ -1632,6 +1634,32 @@ API (beta: [Observability](https://create.roblox.com/docs/cloud/reference/featur
   at most 60 calls a minute leave the backend (an older answer is served past that), and each address
   may ask 120 times a minute. A refused key is a 502 naming the scope; a filter Roblox refuses is a 400. The route
   answers 409 while the key or the universe isn't set.
+
+### Roblox acquisition numbers
+
+Creator Hub's **play-through rate** (PTR) starts at the Home impression: the share of users shown the game's tile who
+went on to play. A game server never sees impressions, so our own events can't produce it (the Roblox page's
+play-through card is a stand-in). Roblox's [Analytics Query API](https://create.roblox.com/docs/cloud/guides/analytics)
+(Open Cloud, announced August 2026) serves Creator Hub's own numbers: with `OPENCLOUD_API_KEY` given the
+**`universe.analytics:read`** operation of the **universe-analytics** API system on the game and `TYPETORCH_UNIVERSE_ID`,
+the backend reads them for the Roblox page's **Acquisition, from Roblox** section (`GET /v1/roblox/analytics/acquisition`).
+
+- Per metric one query, `POST https://apis.roblox.com/analytics-query-api/v1/universes/<universe>/metrics` at one-day
+  buckets over the last 2 x `days` full UTC days, split into the period and the period before like the `benchmarks`
+  query: `RFYPlayThroughRate` ("Play through rate (home recommendations)", Creator Hub's PTR chart),
+  `QualifiedEndToEndCVR` ("Qualified play through rate per user", every source), `UniqueUsersWithImpressions` and
+  `QualifiedUniqueUsersWithPlaySessions` (users per day; also broken down by `AcquisitionSource` for the per-source
+  table). A slow query answers 202 and is polled on the operation path Roblox returns. A rate over the period is the
+  mean of its daily values (Creator Hub's moving average); a count the sum of the days.
+- Roblox doesn't document a rate's scale: a series is read as fractions unless a day's value is above 1 (then percent).
+  The genre benchmarks (50th / 90th percentile) aren't in the API; type them under **Set benchmarks** (play-through)
+  and the card marks where the rate sits. The API is read-only and has 4 years of history for these metrics.
+- Roblox allows 30 analytics queries a minute per key owner, shared with every other use of the key: a refresh is 6
+  queries, the answer is cached an hour (the data is daily), one refresh runs at a time, at most 12 queries a minute
+  leave the backend (an older answer is served past that), and each address may ask 120 times a minute. A refused key
+  is a 502 naming the scope; a query Roblox refuses is a 400; a query that doesn't finish is a 504. The route answers
+  409 while the key or the universe isn't set. OAuth 2.0 apps can't ask for this scope yet (Roblox, August 2026), so
+  the signed-in owner's token isn't used; only the API key.
 
 ## Privacy
 

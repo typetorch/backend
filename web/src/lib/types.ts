@@ -1578,6 +1578,49 @@ export interface RobloxServerLogs {
 	cached: boolean;
 }
 
+/** GET /v1/roblox/analytics/acquisition: Creator Hub's acquisition numbers from Roblox's Analytics Query API (cached 1 h). */
+export interface RobloxAcquisitionPeriod {
+	from: string;
+	to: string;
+	daysWithData: number;
+	/** "Play through rate (home recommendations)", mean of the days, a fraction; null without data. */
+	playThroughHome: number | null;
+	/** "Qualified play through rate per user" (every source), mean of the days, a fraction. */
+	qualifiedPlayThrough: number | null;
+	/** Users who saw the game's tile (unique per day), summed over the days. */
+	impressions: number;
+	/** Users with a qualified play (unique per day), summed over the days. */
+	qualifiedPlays: number;
+}
+
+export interface RobloxAcquisitionDay {
+	day: string;
+	playThroughHome: number | null;
+	qualifiedPlayThrough: number | null;
+	impressions: number | null;
+	qualifiedPlays: number | null;
+}
+
+export interface RobloxAcquisitionSource {
+	source: string;
+	label: string;
+	impressions: number;
+	qualifiedPlays: number;
+	rate: number | null;
+}
+
+export interface RobloxAcquisition {
+	source: "roblox";
+	days: number;
+	metrics: Record<"playThroughHome" | "qualifiedPlayThrough" | "impressions" | "qualifiedPlays", string>;
+	current: RobloxAcquisitionPeriod;
+	previous: RobloxAcquisitionPeriod;
+	daily: RobloxAcquisitionDay[];
+	sources: RobloxAcquisitionSource[];
+	fetchedAt: string;
+	cached: boolean;
+}
+
 /** GET /v1/roblox/products: a game pass or developer product, asked from Roblox by the backend (cached 1 h). */
 export interface RobloxProductInfo {
 	type: "gamepass" | "product";

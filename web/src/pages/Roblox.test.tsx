@@ -4,7 +4,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type { BenchmarkPeriod, BenchmarksResult, Filters, RealtimeResult, TrendsResult, TrendValues } from "@/lib/types";
 import Roblox, { BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, retentionSub, TRENDS } from "./Roblox";
 
@@ -82,6 +82,7 @@ function mount() {
 		if (name === "trends") return trends;
 		throw new Error(`unexpected query ${name}`);
 	}) as typeof api.query);
+	vi.spyOn(api, "robloxAcquisition").mockRejectedValue(new ApiError(409, "Roblox analytics are off", "/v1/roblox/analytics/acquisition"));
 	vi.spyOn(api, "fleetServers").mockResolvedValue({ servers: [], players: 9 } as unknown as Awaited<ReturnType<typeof api.fleetServers>>);
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	render(
