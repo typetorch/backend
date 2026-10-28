@@ -1,8 +1,9 @@
 /**
  * A small per-day bar chart (one series; the card title names it). Days without data show as zero. Windows of a day or
  * less use the same chart per step (1 min, 5 min, 1 h): labels are "YYYY-MM-DD hh:mm" and the axis shows the time.
+ * `previous` adds the period before as a dashed line, step by step (its first step over the first bar, and so on).
  */
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Line, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
 export interface DayPoint {
@@ -42,11 +43,32 @@ export function fillSteps(points: { t: number; value: number }[], fromMs: number
 /** "10-05" for a day, "17:05" for a step inside a day. */
 const tick = (d: string) => (d.length > 10 ? d.slice(11) : d.slice(5));
 
-export function DayBars({ data, label, decimals = 0, color = "var(--chart-1)" }: { data: DayPoint[]; label: string; decimals?: number; color?: string }) {
-	const config: ChartConfig = { value: { label, color } };
+/** The bars' rows with the previous period's values by position (`prev`; null past its end). */
+export function withPreviousBars(data: DayPoint[], previous: number[] | undefined): (DayPoint & { prev?: number | null })[] {
+	return previous ? data.map((d, i) => ({ ...d, prev: previous[i] ?? null })) : data;
+}
+
+export function DayBars({
+	data,
+	label,
+	decimals = 0,
+	color = "var(--chart-1)",
+	previous,
+	previousLabel = "Previous period",
+}: {
+	data: DayPoint[];
+	label: string;
+	decimals?: number;
+	color?: string;
+	/** The period before, one value per step, drawn as a dashed line. */
+	previous?: number[];
+	previousLabel?: string;
+}) {
+	const config: ChartConfig = { value: { label, color }, prev: { label: previousLabel, color: "var(--muted-foreground)" } };
+	const rows = withPreviousBars(data, previous);
 	return (
 		<ChartContainer config={config} className="aspect-auto h-40 w-full">
-			<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={2}>
+			<BarChart data={rows} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={2}>
 				<CartesianGrid vertical={false} />
 				<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={tick} />
 				<YAxis
@@ -58,6 +80,7 @@ export function DayBars({ data, label, decimals = 0, color = "var(--chart-1)" }:
 				/>
 				<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(d) => String(d)} />} />
 				<Bar dataKey="value" fill="var(--color-value)" radius={[4, 4, 0, 0]} maxBarSize={28} isAnimationActive={false} />
+				{previous ? <Line dataKey="prev" type="monotone" stroke="var(--color-prev)" strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} connectNulls={false} /> : null}
 			</BarChart>
 		</ChartContainer>
 	);

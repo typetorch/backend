@@ -109,7 +109,17 @@ export function PerfChart({ label, rows, series, fromMs, toMs, format, marks = [
 					/>
 					{legend && series.length > 1 ? <ChartLegend content={<ChartLegendContent />} /> : null}
 					{series.map((s) => (
-						<Line key={s.id} dataKey={s.id} name={s.id} stroke={`var(--color-${s.id})`} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
+						<Line
+							key={s.id}
+							dataKey={s.id}
+							name={s.id}
+							stroke={`var(--color-${s.id})`}
+							strokeWidth={s.dashed ? 1.5 : 2}
+							{...(s.dashed ? { strokeDasharray: "4 3" } : {})}
+							dot={false}
+							isAnimationActive={false}
+							connectNulls={false}
+						/>
 					))}
 					{visible.map((m) => (
 						<ReferenceLine

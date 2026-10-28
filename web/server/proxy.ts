@@ -98,6 +98,10 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	// Who am I: the proxy's token makes the answer "admin", so the explorer skips its login page.
 	{ method: "GET", path: /^\/v1\/auth\/check$/ },
 	{ method: "GET", path: /^\/v1\/errors(\/[A-Za-z0-9_.:-]{1,64})?$/ },
+	// The server page's error kinds, and the saved queries (read only through the proxy, like the Settings page: save,
+	// edit and delete them on the backend's own explorer).
+	{ method: "GET", path: /^\/v1\/servers\/[A-Za-z0-9_.:{}%-]{1,200}\/errors$/ },
+	{ method: "GET", path: /^\/v1\/saved-queries(\/[1-9][0-9]{0,9})?$/ },
 	{ method: "GET", path: /^\/v1\/live$/ },
 	{ method: "GET", path: /^\/v1\/queries$/ },
 	{ method: "GET", path: /^\/v1\/storage$/ },

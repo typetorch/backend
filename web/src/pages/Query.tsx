@@ -1,8 +1,14 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { Play } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+/**
+ * The Query page: a named query with JSON options, or read-only SQL. SQL can be saved (server-side, for everyone signed
+ * in): pick one to load and run it (`?saved=<id>`), and owners save, rename, chart, pin to the Overview and delete them.
+ * The read-only web role lists and runs saved queries; its own edits stay in the page.
+ */
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Pin, Play, Save, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { ErrorState, JsonBlock, PageHeader, Section } from "@/components/common";
-import { DataTable, typeFromSql, type DataColumn } from "@/components/data-table";
+import { ResultChart, ResultTable, sqlColumns } from "@/components/SavedQueryView";
+import { ToggleChip } from "@/components/ToggleChip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,9 +16,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { fmtInt } from "@/lib/format";
+import { isReadOnly, useAuth } from "@/lib/auth";
+import { fmtInt, fmtTime } from "@/lib/format";
 import { useFilters, useParam } from "@/lib/hooks";
-import type { SqlResult } from "@/lib/types";
+import { SAVED_QUERY_CHARTS, type SavedQuery, type SavedQueryChart, type SqlResult } from "@/lib/types";
+
+export { sqlColumns };
 
 /** Ctrl/Cmd+Enter runs. */
 const runKey = (run: () => void) => (e: React.KeyboardEvent) => {
@@ -107,67 +116,165 @@ WHERE t >= epoch_ms(now() - INTERVAL 7 DAY)
 GROUP BY kind, name
 ORDER BY n DESC`;
 
-function cell(value: unknown): string {
-	if (value === null || value === undefined) return "";
-	return typeof value === "object" ? JSON.stringify(value) : String(value);
-}
+const CHART_LABELS: Record<SavedQueryChart, string> = { table: "Table", bar: "Bar chart", line: "Line chart" };
+const NEW = "__new";
 
-/** One column per result column. Ids are the column names (made unique), so a sort or filter on `n` carries to the next query that has an `n`. */
-export function sqlColumns(columns: SqlResult["columns"]): DataColumn<unknown[]>[] {
-	const used = new Map<string, number>();
-	return columns.map((c, i) => {
-		const seen = used.get(c.name) ?? 0;
-		used.set(c.name, seen + 1);
-		const mapped = typeFromSql(c.type);
-		// t is unix ms in every table here: sort and filter it as a time, but show and export the number as it is.
-		const isTime = c.name === "t" && mapped === "number";
-		return {
-			id: seen ? `${c.name}_${seen + 1}` : c.name,
-			header: c.name,
-			hint: c.type,
-			title: c.type,
-			...(isTime ? { type: "date" as const, exportValue: (row: unknown[]) => row[i] } : mapped ? { type: mapped } : {}),
-			accessor: (row: unknown[]) => row[i],
-			cell: (row: unknown[]) => {
-				const text = cell(row[i]);
-				return <span title={text}>{text}</span>;
-			},
-			format: (value: unknown) => cell(value),
-			// Numbers get a range, times a "last 24 hours" choice, text a "contains" box.
-			filter: mapped || isTime ? undefined : "text",
-			className: mapped === "number" ? "font-mono text-xs" : "max-w-96 truncate font-mono text-xs",
-		} satisfies DataColumn<unknown[]>;
-	});
-}
-
-function SqlTable({ data }: { data: SqlResult }) {
-	const columns = useMemo(() => sqlColumns(data.columns), [data.columns]);
-	const names = data.columns.map((c) => c.name);
+function SqlResultView({ data, chart }: { data: SqlResult; chart: SavedQueryChart | null }) {
 	return (
 		<Section
 			title={`${fmtInt(data.rows.length)} row${data.rows.length === 1 ? "" : "s"}${data.truncated ? " (more exist: raise the limit or narrow the query)" : ""}`}
 			description={`${data.ms} ms on the server`}
+			contentClassName="space-y-4"
 		>
-			<DataTable
-				id="query-sql"
-				label="SQL result"
-				columns={columns}
-				data={data.rows}
-				pageSize={100}
-				maxHeight="60vh"
-				search
-				rowJson={(row) => Object.fromEntries(names.map((name, i) => [name, row[i]]))}
-				empty={<p className="text-sm text-muted-foreground">The query returned no rows.</p>}
-			/>
+			{chart && chart !== "table" ? <ResultChart result={data} chart={chart} /> : null}
+			<ResultTable result={data} id="query-sql" />
 		</Section>
 	);
 }
 
+/** The form state of the saved-query bar: what would be saved. */
+interface Draft {
+	name: string;
+	chart: SavedQueryChart | null;
+	pinned: boolean;
+}
+
+const draftOf = (q: SavedQuery | undefined): Draft => ({ name: q?.name ?? "", chart: q?.chart ?? null, pinned: q?.pinned ?? false });
+
+/** Whether the editor differs from the saved query (the Save button's state). */
+export function isDirty(saved: SavedQuery | undefined, sql: string, draft: Draft): boolean {
+	if (!saved) return true;
+	return saved.sql.trim() !== sql.trim().replace(/;\s*$/, "").trimEnd() || saved.name !== draft.name.trim() || saved.chart !== draft.chart || saved.pinned !== draft.pinned;
+}
+
+function SavedBar({
+	list,
+	selected,
+	onPick,
+	draft,
+	setDraft,
+	sql,
+	readOnly,
+}: {
+	list: SavedQuery[] | undefined;
+	selected: SavedQuery | undefined;
+	onPick(id: string): void;
+	draft: Draft;
+	setDraft(d: Draft): void;
+	sql: string;
+	readOnly: boolean;
+}) {
+	const client = useQueryClient();
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	useEffect(() => setConfirmDelete(false), [selected?.id]);
+	const done = (q?: SavedQuery) => {
+		void client.invalidateQueries({ queryKey: ["saved-queries"] });
+		if (q) onPick(String(q.id));
+	};
+	const fields = { name: draft.name.trim(), sql, chart: draft.chart, pinned: draft.pinned };
+	const save = useMutation({ mutationFn: () => (selected ? api.updateSavedQuery(selected.id, fields) : api.createSavedQuery(fields)), onSuccess: (q) => done(q) });
+	const saveNew = useMutation({ mutationFn: () => api.createSavedQuery(fields), onSuccess: (q) => done(q) });
+	const remove = useMutation({
+		mutationFn: () => api.deleteSavedQuery((selected as SavedQuery).id),
+		onSuccess: () => {
+			onPick("");
+			done();
+		},
+	});
+	const failed = save.error ?? saveNew.error ?? remove.error;
+	const busy = save.isPending || saveNew.isPending || remove.isPending;
+	const named = draft.name.trim().length > 0;
+	return (
+		<div className="space-y-2">
+			<div className="flex flex-wrap items-center gap-2">
+				<Select value={selected ? String(selected.id) : NEW} onValueChange={(v) => onPick(v === NEW ? "" : v)}>
+					<SelectTrigger size="sm" className="w-56" aria-label="Saved query">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						<SelectItem value={NEW}>{readOnly ? "Saved queries..." : "New query"}</SelectItem>
+						{(list ?? []).map((q) => (
+							<SelectItem key={q.id} value={String(q.id)}>
+								{q.name}
+								{q.pinned ? " (pinned)" : ""}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
+				<Select value={draft.chart ?? "table"} onValueChange={(v) => setDraft({ ...draft, chart: v === "table" ? null : (v as SavedQueryChart) })}>
+					<SelectTrigger size="sm" className="w-36" aria-label="Show as">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						{SAVED_QUERY_CHARTS.map((c) => (
+							<SelectItem key={c} value={c}>
+								{CHART_LABELS[c]}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
+				{readOnly ? null : (
+					<>
+						<Input aria-label="Name" placeholder="Name to save it under" className="h-8 w-56" maxLength={100} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+						<ToggleChip pressed={draft.pinned} onClick={() => setDraft({ ...draft, pinned: !draft.pinned })} title="Show it as a tile on the Overview">
+							<Pin data-icon="inline-start" />
+							Pin to Overview
+						</ToggleChip>
+						<Button size="sm" variant="outline" disabled={busy || !named || !isDirty(selected, sql, draft)} onClick={() => save.mutate()}>
+							<Save />
+							{selected ? "Save" : "Save query"}
+						</Button>
+						{selected ? (
+							<>
+								<Button size="sm" variant="outline" disabled={busy || !named || draft.name.trim().toLowerCase() === selected.name.toLowerCase()} onClick={() => saveNew.mutate()} title="Save a copy under the new name">
+									Save as new
+								</Button>
+								<Button size="sm" variant={confirmDelete ? "destructive" : "ghost"} disabled={busy} onClick={() => (confirmDelete ? remove.mutate() : setConfirmDelete(true))}>
+									<Trash2 />
+									{confirmDelete ? "Delete for everyone?" : "Delete"}
+								</Button>
+							</>
+						) : null}
+					</>
+				)}
+			</div>
+			{selected ? (
+				<p className="text-xs text-muted-foreground">
+					Saved by {selected.createdBy} {fmtTime(selected.createdAt)}
+					{selected.updatedAt !== selected.createdAt ? `, changed by ${selected.updatedBy} ${fmtTime(selected.updatedAt)}` : ""}.{readOnly ? " Read-only: your edits stay on this page." : ""}
+				</p>
+			) : null}
+			{failed ? <ErrorState error={failed} title="Could not save" /> : null}
+		</div>
+	);
+}
+
 function AdHocSql() {
+	const readOnly = isReadOnly(useAuth());
+	const [savedParam, setSaved] = useParam("saved");
+	const list = useQuery({ queryKey: ["saved-queries"], queryFn: ({ signal }) => api.savedQueries(signal), retry: false, staleTime: 30_000 });
+	const selected = list.data?.find((q) => String(q.id) === savedParam);
 	const [sql, setSql] = useState(SAMPLE);
+	const [draft, setDraft] = useState<Draft>(draftOf(undefined));
 	const [limit, setLimit] = useState(1000);
-	const run = useMutation({ mutationFn: () => api.sql(sql, limit) });
-	const go = () => run.mutate();
+	const run = useMutation({ mutationFn: (text: string) => api.sql(text, limit) });
+	const go = () => run.mutate(sql);
+	// Picking a saved query (or opening its link) loads it into the editor and runs it, once per pick.
+	const loaded = useRef<number | undefined>(undefined);
+	useEffect(() => {
+		if (!selected || loaded.current === selected.id) return;
+		loaded.current = selected.id;
+		setSql(selected.sql);
+		setDraft(draftOf(selected));
+		run.mutate(selected.sql);
+	}, [selected, run]);
+	const pick = (id: string) => {
+		if (!id) {
+			loaded.current = undefined;
+			setDraft(draftOf(undefined));
+		}
+		setSaved(id);
+	};
 	return (
 		<div className="space-y-4">
 			<Section
@@ -193,6 +300,9 @@ function AdHocSql() {
 					</>
 				}
 			>
+				<div className="mb-3">
+					<SavedBar list={list.data} selected={selected} onPick={pick} draft={draft} setDraft={setDraft} sql={sql} readOnly={readOnly} />
+				</div>
 				<Textarea
 					className="h-48 font-mono text-xs"
 					value={sql}
@@ -206,7 +316,7 @@ function AdHocSql() {
 				</p>
 			</Section>
 			{run.isError ? <ErrorState error={run.error} title="Query failed" /> : null}
-			{run.data ? <SqlTable data={run.data} /> : null}
+			{run.data ? <SqlResultView data={run.data} chart={draft.chart} /> : null}
 		</div>
 	);
 }

@@ -1,6 +1,7 @@
 /**
  * Error logs in the backend's SQLite file: one row per error kind (fingerprint: template, first and last seen, one sample
- * stack), counts per minute (by branch, build and realm) and the analytics ids (`pid`) affected per day. Bounded: at most
+ * stack), counts per minute (by branch, build and realm), the analytics ids (`pid`) affected per day and the game servers
+ * (JobIds) that reported it. Bounded: at most
  * `maxKinds` kinds (more are dropped and counted), a few new kinds per sender per hour, 2,000 pids per kind and day, a
  * daily budget of new rows, counts older than `keepDays` are pruned. Batches are stored one at a time, each in one
  * transaction, behind a bounded queue (full = 429), so a flood can't hold the event loop.
@@ -26,6 +27,12 @@ CREATE TABLE IF NOT EXISTS error_pids (
 	PRIMARY KEY (fp, day, realm, branch, build, pid)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS error_pids_day ON error_pids (day);
 CREATE INDEX IF NOT EXISTS error_pids_pid ON error_pids (pid, day);
+CREATE TABLE IF NOT EXISTS error_jobs (
+	fp TEXT NOT NULL, job TEXT NOT NULL, realm TEXT NOT NULL, branch TEXT NOT NULL, build TEXT NOT NULL,
+	n INTEGER NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL,
+	PRIMARY KEY (fp, job, realm, branch, build)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS error_jobs_job ON error_jobs (job, last_at);
+CREATE INDEX IF NOT EXISTS error_jobs_last ON error_jobs (last_at);
 `;
 
 export interface ErrorWindow {
@@ -81,6 +88,37 @@ export interface ErrorDetail {
 	byBuild: { build: string; n: number }[];
 	byBranch: { branch: string; n: number }[];
 	byRealm: { realm: string; n: number }[];
+	/**
+	 * The game servers (JobIds) that reported it, most occurrences first, at most ERROR_JOBS_LISTED: each server's
+	 * occurrences over its rows that touch the window (a server's row spans its life, so this is not cut at the window).
+	 */
+	byJob: { job: string; n: number; branch: string; build: string; lastAt: string }[];
+}
+
+/** Servers listed per kind in its detail, and kinds per server (GET /v1/servers/<job>/errors). */
+export const ERROR_JOBS_LISTED = 20;
+export const SERVER_ERRORS_MAX = 200;
+
+export interface ServerError {
+	fp: string;
+	template: string;
+	topFrame: string | null;
+	realms: string[];
+	/** Occurrences this server reported (over its rows that touch the window). */
+	count: number;
+	firstAt: string;
+	lastAt: string;
+	/** All-time occurrences of the kind, every server. */
+	total: number;
+}
+
+export interface ServerErrors {
+	job: string;
+	window: { from: string; to: string };
+	/** Most occurrences first, then the most recently seen; at most `limit`. */
+	errors: ServerError[];
+	total: number;
+	more: number;
 }
 
 /** Players listed for one kind at most (GET /v1/errors/<fp>/players). */
@@ -436,6 +474,14 @@ export class ErrorStore {
 			tx.run("INSERT INTO error_counts (fp, minute, branch, build, realm, n, anon) VALUES (?, ?, ?, ?, ?, ?, ?)", [...key, n, anon]);
 			this.counters.rowsToday++;
 		}
+		// Which server reported it: one row per kind and server (and side, branch, build), counted up while the server runs.
+		const jobKey: SqlValue[] = [item.fp, job, item.realm, branch, build];
+		if (!tx.run("UPDATE error_jobs SET n = n + ?, first_at = MIN(first_at, ?), last_at = MAX(last_at, ?) WHERE fp = ? AND job = ? AND realm = ? AND branch = ? AND build = ?", [item.count, item.firstAt, item.lastAt, ...jobKey]).changes) {
+			if (this.rowRoom() > 0) {
+				tx.run("INSERT INTO error_jobs (fp, job, realm, branch, build, n, first_at, last_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [...jobKey, item.count, item.firstAt, item.lastAt]);
+				this.counters.rowsToday++;
+			} else this.counters.droppedRows++;
+		}
 		if (item.pids.length) {
 			const day = Math.floor(item.lastAt / DAY);
 			const held = Number(tx.first<{ n: number }>("SELECT COUNT(*) AS n FROM error_pids WHERE fp = ? AND day = ?", [item.fp, day])?.n ?? 0);
@@ -471,6 +517,7 @@ export class ErrorStore {
 		let removed = 0;
 		removed += (await this.db.run("DELETE FROM error_counts WHERE minute < ?", [Math.floor(cutoff / MINUTE)])).changes;
 		removed += (await this.db.run("DELETE FROM error_pids WHERE day < ?", [Math.floor(cutoff / DAY)])).changes;
+		removed += (await this.db.run("DELETE FROM error_jobs WHERE last_at < ?", [cutoff])).changes;
 		const gone = (await this.db.run("DELETE FROM error_kinds WHERE last_at < ?", [cutoff])).changes;
 		removed += gone;
 		if (gone) {
@@ -690,6 +737,51 @@ export class ErrorStore {
 			byBuild: (await group("build")).map((r) => ({ build: r.k || "(unknown)", n: Number(r.n) })),
 			byBranch: (await group("branch")).map((r) => ({ branch: r.k || "(unknown)", n: Number(r.n) })),
 			byRealm: (await group("realm")).map((r) => ({ realm: r.k, n: Number(r.n) })),
+			byJob: (
+				await this.db.all<{ job: string; n: number; branch: string; build: string; last_at: number }>(
+					`SELECT j.job, SUM(j.n) AS n, MAX(j.branch) AS branch, MAX(j.build) AS build, MAX(j.last_at) AS last_at FROM error_jobs j WHERE j.fp = ? AND j.last_at >= ? AND j.first_at < ?${this.where(filter, "j").sql} ` +
+						"GROUP BY j.job ORDER BY n DESC, last_at DESC, j.job LIMIT ?",
+					[fp, w.from, w.to, ...this.where(filter, "j").params, ERROR_JOBS_LISTED],
+				)
+			).map((r) => ({ job: r.job, n: Number(r.n), branch: r.branch || "(unknown)", build: r.build || "(unknown)", lastAt: iso(Number(r.last_at)) })),
+		};
+	}
+
+	/**
+	 * The error kinds one game server reported, over its rows that touch the window, under the branch / build / realm
+	 * filter: most occurrences first, then the most recently seen, at most `limit` (1-200).
+	 */
+	async serverErrors(job: string, w: ErrorWindow, filter: ErrorFilter = {}, limit: number = SERVER_ERRORS_MAX): Promise<ServerErrors> {
+		const cap = Math.min(Math.max(1, Math.floor(limit)), SERVER_ERRORS_MAX);
+		const jf = this.where(filter, "j");
+		const base: SqlValue[] = [job, w.from, w.to, ...jf.params];
+		const rows = await this.db.all<{ fp: string; n: number; first_at: number; last_at: number; realms: string; template: string; stack: string | null; total: number }>(
+			"SELECT j.fp, SUM(j.n) AS n, MIN(j.first_at) AS first_at, MAX(j.last_at) AS last_at, GROUP_CONCAT(DISTINCT j.realm) AS realms, " +
+				"MAX(k.template) AS template, MAX(k.stack) AS stack, MAX(k.total) AS total " +
+				`FROM error_jobs j JOIN error_kinds k ON k.fp = j.fp WHERE j.job = ? AND j.last_at >= ? AND j.first_at < ?${jf.sql} GROUP BY j.fp ORDER BY n DESC, last_at DESC, j.fp LIMIT ?`,
+			[...base, cap],
+		);
+		const total = Number(
+			(await this.db.first<{ n: number }>(`SELECT COUNT(DISTINCT j.fp) AS n FROM error_jobs j JOIN error_kinds k ON k.fp = j.fp WHERE j.job = ? AND j.last_at >= ? AND j.first_at < ?${jf.sql}`, base))?.n ?? 0,
+		);
+		return {
+			job,
+			window: { from: iso(w.from), to: iso(w.to) },
+			errors: rows.map((r) => ({
+				fp: r.fp,
+				template: r.template,
+				topFrame: r.stack ? (r.stack.split("\n")[0] ?? "").slice(0, 300) || null : null,
+				realms: String(r.realms ?? "")
+					.split(",")
+					.filter(Boolean)
+					.sort(),
+				count: Number(r.n),
+				firstAt: iso(Number(r.first_at)),
+				lastAt: iso(Number(r.last_at)),
+				total: Number(r.total),
+			})),
+			total,
+			more: Math.max(0, total - rows.length),
 		};
 	}
 }

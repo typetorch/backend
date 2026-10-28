@@ -30,6 +30,8 @@
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/players/<pid>/errors?window=..  the error kinds one player hit (at most 200), most occurrences first
+ *   GET  /v1/servers/<job>/errors?window=..  the error kinds one game server reported (at most 200)
+ *   GET  /v1/saved-queries[/<id>]   the Query page's saved queries; POST, PATCH /<id>, DELETE /<id> for admins (saved-queries.ts)
  *   GET  /v1/experiments/<key>/players?variant=&from=&to=|window=&limit=..  the players in one experiment (at most 200):
  *        variant, random or forced, assigned / first / last seen, UserId and Roblox name (experiment-players.ts)
  *   GET  /v1/experiments            the experiment overrides this server knows (data/settings.json: active, weights,
@@ -72,7 +74,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { EventBus } from "../bus.ts";
 import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
-import { handleErrorReads, handlePlayerErrors, type PlayerIdentity } from "../errors/http.ts";
+import { handleErrorReads, handlePlayerErrors, handleServerErrors, type PlayerIdentity } from "../errors/http.ts";
 import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import type { FunnelPlayersResult } from "../queries/funnel.ts";
@@ -119,6 +121,7 @@ import { RobloxServers, RobloxServersError, SEARCH_MAX, SEVERITY_PATTERN } from 
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
+import { handleSavedQueries, SavedQueryStore, WRITES_PER_MINUTE as SAVED_QUERY_WRITES_PER_MINUTE } from "./saved-queries.ts";
 import { StaticSite } from "./static.ts";
 import { measureStorage, type StorageReport } from "./storage.ts";
 import type { BackendBus, BackendTopics } from "./topics.ts";
@@ -319,6 +322,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		keepDays: () => runtime.get("auditKeepDays"),
 		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl")],
 	});
+	const savedQueries = await SavedQueryStore.open(sqlite, clock);
+	const savedQueryLimiter = new RateLimiter(SAVED_QUERY_WRITES_PER_MINUTE, clock);
 	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
 	// Backend alerts: once a minute, rules over the error tables, the fleet, ingest, these metrics and the disk, raised
@@ -2058,6 +2063,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (!PID_PATTERN.test(pid)) return json(400, { error: "bad pid" });
 				if (warehouse?.isErased(pid)) return json(404, { error: "no such player" });
 				return handlePlayerErrors(errors, pid, url, { now: clock(), keepDays: runtime.get("errorKeepDays") });
+			}
+			const serverErrors = /^\/v1\/servers\/([^/]+)\/errors$/.exec(path);
+			if (serverErrors) return method === "GET" ? handleServerErrors(errors, serverErrors[1] as string, url, { now: clock(), keepDays: runtime.get("errorKeepDays") }) : json(405, { error: "GET only" });
+			// Saved queries: every signed-in role lists them (and runs them through /v1/sql); admins change them.
+			if (path === "/v1/saved-queries" || path.startsWith("/v1/saved-queries/")) {
+				return handleSavedQueries(req, path, {
+					store: savedQueries,
+					writer: () => {
+						const admin = manage();
+						return admin instanceof Response ? admin : actorOf(admin).who;
+					},
+					allowWrite: () => savedQueryLimiter.take(ip),
+				});
 			}
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
 			if (path === "/v1/admin/settings") {

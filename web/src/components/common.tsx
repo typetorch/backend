@@ -49,13 +49,16 @@ export function Section({
 	);
 }
 
-/** A stat tile: label, big value, one muted line under it. */
-export function Metric({ label, value, sub, hint, tone }: { label: ReactNode; value: ReactNode; sub?: ReactNode; hint?: ReactNode; tone?: "muted" }) {
+/** A stat tile: label, big value, one muted line under it; `delta` (a ChangeChip) sits next to the value. */
+export function Metric({ label, value, sub, hint, tone, delta }: { label: ReactNode; value: ReactNode; sub?: ReactNode; hint?: ReactNode; tone?: "muted"; delta?: ReactNode }) {
 	return (
 		<Card className="gap-1 py-4">
 			<CardContent className="space-y-1">
 				<div className="text-xs font-medium text-muted-foreground">{label}</div>
-				<div className={cn("text-2xl font-semibold tracking-tight tabular-nums", tone === "muted" && "text-muted-foreground")}>{value}</div>
+				<div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+					<div className={cn("text-2xl font-semibold tracking-tight tabular-nums", tone === "muted" && "text-muted-foreground")}>{value}</div>
+					{delta}
+				</div>
 				{sub ? <div className="text-xs text-muted-foreground tabular-nums">{sub}</div> : null}
 				{hint ? <div className="pt-1 text-xs leading-snug text-muted-foreground">{hint}</div> : null}
 			</CardContent>

@@ -32,6 +32,7 @@ import { AuditTab, BudgetTab, BuildsTab, ErrorsTab, ModulesTab, NetworkTab } fro
 import { LogsTab, type PlayerLogRequest } from "./server/LogsTab";
 import { PlayersTab } from "./server/PlayersTab";
 import { RobloxLogs } from "./server/RobloxLogs";
+import { ServerErrors } from "./server/ServerErrors";
 import { DebugBundles } from "./server/Bundles";
 import { isBundleId, lifeStart, lifetimeMs, offlineText } from "./server/history";
 import { DebugContext, type DebugContextValue, Tone, useFirstFetch } from "./server/shared";
@@ -261,6 +262,8 @@ function ServerView({ job }: { job: string }) {
 	// Roblox's own logs for this JobId: for a live server and a gone one alike (no debug session needed).
 	const placeVersion = data.server?.placeVersion ?? status.data?.status?.placeVersion;
 	const robloxLogs = data.state !== "unknown" ? <RobloxLogs job={job} placeVersion={placeVersion} /> : null;
+	// What it sent to the error log (any state: the error log keeps 30 days, like the fleet's gone servers).
+	const errorLog = <ServerErrors job={job} build={data.server?.artifact} branch={data.server?.branch} />;
 	return (
 		<DebugContext.Provider value={context}>
 			<Header job={job} detail={data} placeVersion={placeVersion ?? undefined} />
@@ -273,6 +276,7 @@ function ServerView({ job }: { job: string }) {
 						</Section>
 					) : null}
 					{data.state !== "unknown" ? bundles : null}
+					{errorLog}
 					{robloxLogs}
 					{data.server || since !== undefined ? (
 						<Section title="Its whole life" description="TPS, memory and players from its heartbeats (5-minute averages past the last 2 hours; kept 30 days).">
@@ -337,6 +341,7 @@ function ServerView({ job }: { job: string }) {
 						</TabsContent>
 					</Tabs>
 					{bundles}
+					{errorLog}
 					{robloxLogs}
 				</>
 			)}

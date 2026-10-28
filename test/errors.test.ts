@@ -394,6 +394,61 @@ describe("error kinds, counts and the admin reads", () => {
 	});
 });
 
+describe("error kinds <-> game servers", () => {
+	let h: Harness;
+	const get = async (path: string) => asJson(await h.call(path, { headers: bearer(ADMIN) }));
+	const send = async (job: string, ...items: Record<string, unknown>[]) => expect((await h.call("/v1/errors", post(API, { j: job, errors: items }))).status).toBe(202);
+	const JOB_A = "0b5c7d9e-1111-4a2b-9c3d-123456789abc";
+	beforeAll(async () => {
+		h = await harness();
+		await send(JOB_A, item({ count: 4, firstAt: T0 - 3 * MIN, lastAt: T0 - 3 * MIN }), item({ fp: "fp-two", template: "HTTP 429 from <url>", count: 1, firstAt: T0 - 2 * MIN, lastAt: T0 - 2 * MIN }));
+		await send(JOB_A, item({ count: 2, firstAt: T0 - MIN, lastAt: T0 - MIN }));
+		await send("job-b", item({ count: 1, firstAt: T0 - 2 * MIN, lastAt: T0 - 2 * MIN, branch: "dev", build: "b2-000043", realm: "client" }));
+		// Two days ago, on a server that is long gone.
+		await send("job-old", item({ count: 9, firstAt: T0 - 2 * 86_400_000, lastAt: T0 - 2 * 86_400_000 }));
+		await h.app.bus.idle();
+	});
+	afterAll(() => h.close());
+
+	test("a kind's detail lists the servers that reported it in the window, most occurrences first", async () => {
+		const d = await get("/v1/errors/fp-boom?window=1h");
+		expect(d.byJob).toEqual([
+			{ job: JOB_A, n: 6, branch: "prod", build: "a1b2c3d-000042", lastAt: new Date(T0 - MIN).toISOString() },
+			{ job: "job-b", n: 1, branch: "dev", build: "b2-000043", lastAt: new Date(T0 - 2 * MIN).toISOString() },
+		]);
+		expect((await get("/v1/errors/fp-boom?window=1h&realm=client")).byJob.map((j: { job: string }) => j.job)).toEqual(["job-b"]);
+		expect((await get("/v1/errors/fp-boom?window=7d")).byJob.map((j: { job: string }) => j.job)).toEqual(["job-old", JOB_A, "job-b"]);
+	});
+
+	test("GET /v1/servers/<job>/errors: the kinds one server reported, filtered, capped, behind the read gate", async () => {
+		const a = await get(`/v1/servers/${JOB_A}/errors?window=1h`);
+		expect(a).toMatchObject({ job: JOB_A, total: 2, more: 0 });
+		expect(a.errors.map((e: { fp: string; count: number }) => [e.fp, e.count])).toEqual([
+			["fp-boom", 6],
+			["fp-two", 1],
+		]);
+		expect(a.errors[0]).toMatchObject({ topFrame: "Workspace.Game.Round:42", realms: ["server"], firstAt: new Date(T0 - 3 * MIN).toISOString(), total: 16 });
+		expect(await get(`/v1/servers/${JOB_A}/errors?window=1h&limit=1`)).toMatchObject({ total: 2, more: 1 });
+		expect((await get(`/v1/servers/${JOB_A}/errors?window=1h&realm=client`)).errors).toEqual([]);
+		expect((await get("/v1/servers/job-old/errors?window=1h")).errors).toEqual([]);
+		expect((await get("/v1/servers/job-old/errors?window=7d")).errors.map((e: { count: number }) => e.count)).toEqual([9]);
+		expect(await get("/v1/servers/nobody/errors")).toMatchObject({ errors: [], total: 0 });
+		for (const q of ["limit=0", "limit=201", "window=5x", "realm=moon"]) expect([q, (await h.call(`/v1/servers/${JOB_A}/errors?${q}`, { headers: bearer(ADMIN) })).status]).toEqual([q, 400]);
+		expect((await h.call(`/v1/servers/${"x".repeat(65)}/errors`, { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/servers/a%0Ab/errors", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/servers/%E0%A4%A/errors", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call(`/v1/servers/${JOB_A}/errors`, { headers: bearer(API) })).status).toBe(401);
+		expect((await h.call(`/v1/servers/${JOB_A}/errors`)).status).toBe(401);
+		expect((await h.call(`/v1/servers/${JOB_A}/errors`, post(ADMIN, {}))).status).toBe(405);
+	});
+
+	test("server rows go with the keep window", async () => {
+		h.setNow(T0 + 31 * 86_400_000);
+		await h.app.errors.prune();
+		expect(await get(`/v1/servers/${JOB_A}/errors?window=30d`)).toMatchObject({ errors: [], total: 0 });
+	});
+});
+
 describe("error -> players in the store", () => {
 	test("rows written before per-player counts count once in their day; new reports add to them", async () => {
 		const db = await openSqlite(":memory:");
@@ -619,7 +674,7 @@ describe("POST /v1/errors under a flood (one API key holder)", () => {
 		}
 	});
 
-	test("one item is bounded work: at most 11 count rows and 10 pids", async () => {
+	test("one item is bounded work: at most 11 count rows, 10 pids and one server row", async () => {
 		const h = await harness();
 		try {
 			const pids = Array.from({ length: 50 }, (_, i) => `p${i}`);
@@ -629,7 +684,7 @@ describe("POST /v1/errors under a flood (one API key holder)", () => {
 			expect(d.players).toBe(10);
 			const ten = await asJson(await h.call("/v1/errors/fp-ten?window=1h", { headers: bearer(ADMIN) }));
 			expect(ten.series.filter((p: { n: number }) => p.n > 0).length).toBe(11);
-			expect(h.app.errors.stats.rowsToday).toBe(1 + 10 + 11);
+			expect(h.app.errors.stats.rowsToday).toBe(1 + 10 + 11 + 2);
 		} finally {
 			await h.close();
 		}

@@ -1,12 +1,16 @@
 /**
  * Error logs from game servers and clients: kinds with counts, a trend line, players affected, and a sample stack. A row
  * opens the kind in a side sheet (`?fp=` in the URL, so the link is shareable): where it happens, its stack, and the
- * players who hit it, each linking to their page.
+ * players who hit it, each linking to their page, the servers that reported it (their pages) and its builds (the Errors
+ * page filtered to one, and the Performance page with its deploy marks). "vs previous period" adds change chips to the tiles.
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { cn } from "cn";
+import { ChangeChip } from "@/components/ChangeChip";
+import { CompareToggle } from "@/components/CompareToggle";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
@@ -18,9 +22,12 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { api, type ErrorParams } from "@/lib/api";
+import { change } from "@/lib/benchmarks";
+import { previousWindow, useCompare } from "@/lib/compare";
 import { fmtAgo, fmtInt, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
 import type { ErrorDetail, ErrorKind, ErrorList, ErrorPlayer, ErrorPlayers } from "@/lib/types";
+import { JobLink } from "./server/shared";
 
 const WINDOWS = [
 	{ value: "1h", label: "Last hour" },
@@ -154,7 +161,7 @@ function Kinds({ data, selected, onSelect }: { data: ErrorList; selected: string
 	);
 }
 
-function Breakdown({ title, rows }: { title: string; rows: { label: string; n: number }[] }) {
+function Breakdown({ title, rows, link }: { title: string; rows: { label: string; n: number }[]; link?: (label: string) => ReactNode }) {
 	if (!rows.length) return null;
 	const total = rows.reduce((s, r) => s + r.n, 0) || 1;
 	return (
@@ -163,8 +170,8 @@ function Breakdown({ title, rows }: { title: string; rows: { label: string; n: n
 			<ul className="space-y-0.5 text-sm">
 				{rows.map((r) => (
 					<li key={r.label} className="flex items-baseline justify-between gap-3">
-						<span className="truncate font-mono text-xs" title={r.label}>
-							{r.label}
+						<span className="min-w-0 truncate font-mono text-xs" title={r.label}>
+							{link ? link(r.label) : r.label}
 						</span>
 						<span className="tabular-nums text-muted-foreground">
 							{fmtInt(r.n)} <span className="text-xs">({Math.round((r.n / total) * 100)}%)</span>
@@ -190,6 +197,44 @@ function SeriesBars({ detail }: { detail: ErrorDetail }) {
 				<Bar dataKey="n" fill="var(--color-n)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
 			</BarChart>
 		</ChartContainer>
+	);
+}
+
+/** A build in a kind's breakdown: the Errors page filtered to it, and the Performance page for its deploy marks. */
+export function BuildLinks({ build, window }: { build: string; window: string }) {
+	if (build === "(unknown)") return <>{build}</>;
+	const errors = new URLSearchParams({ build, ...(window !== "24h" ? { window } : {}) });
+	return (
+		<span className="inline-flex min-w-0 items-baseline gap-2">
+			<Link to={{ pathname: "/errors", search: `?${errors.toString()}` }} className="truncate underline-offset-2 hover:underline" title={`Only build ${build} on this page`}>
+				{build}
+			</Link>
+			<Link to={{ pathname: "/performance", search: `?${new URLSearchParams({ art: build }).toString()}` }} className="shrink-0 font-sans text-[11px] text-muted-foreground underline-offset-2 hover:underline" title={`Performance and deploy marks of ${build}`}>
+				perf
+			</Link>
+		</span>
+	);
+}
+
+/** The game servers that reported a kind (newer backends), each opening its server page. */
+function KindServers({ servers }: { servers: NonNullable<ErrorDetail["byJob"]> }) {
+	if (!servers.length) return <p className="text-sm text-muted-foreground">No server reported it in this window.</p>;
+	return (
+		<ul className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+			{servers.map((s) => (
+				<li key={s.job} className="flex min-w-0 items-baseline justify-between gap-3">
+					<span className="min-w-0 truncate">
+						<JobLink job={s.job} />
+						<span className="ml-2 font-mono text-[11px] text-muted-foreground" title={`${s.branch} / ${s.build}`}>
+							{s.build}
+						</span>
+					</span>
+					<span className="shrink-0 tabular-nums text-muted-foreground" title={`last ${fmtTime(s.lastAt)}`}>
+						{fmtInt(s.n)}
+					</span>
+				</li>
+			))}
+		</ul>
 	);
 }
 
@@ -260,6 +305,7 @@ function KindPlayers({ fp, params }: { fp: string; params: ErrorParams }) {
 }
 
 function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
+	const window = params.window ?? "24h";
 	const query = useQuery({ queryKey: ["errors", "kind", fp, params], queryFn: ({ signal }) => api.errorKind(fp, params, signal), refetchInterval: 30_000 });
 	return (
 		<QueryState query={query} loadingRows={4}>
@@ -281,8 +327,14 @@ function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
 						<div className="text-xs font-medium text-muted-foreground">Players who hit it</div>
 						<KindPlayers fp={fp} params={params} />
 					</div>
+					{d.byJob ? (
+						<div className="space-y-1">
+							<div className="text-xs font-medium text-muted-foreground">Servers that reported it</div>
+							<KindServers servers={d.byJob} />
+						</div>
+					) : null}
 					<div className="grid gap-4 md:grid-cols-3">
-						<Breakdown title="By build" rows={d.byBuild.map((r) => ({ label: r.build, n: r.n }))} />
+						<Breakdown title="By build" rows={d.byBuild.map((r) => ({ label: r.build, n: r.n }))} link={(b) => <BuildLinks build={b} window={window} />} />
 						<Breakdown title="By branch" rows={d.byBranch.map((r) => ({ label: r.branch, n: r.n }))} />
 						<Breakdown title="By side" rows={d.byRealm.map((r) => ({ label: r.realm, n: r.n }))} />
 					</div>
@@ -309,6 +361,16 @@ export default function Errors() {
 	const { q: _search, ...kindParams } = params;
 	const list = useQuery({ queryKey: ["errors", "list", params], queryFn: ({ signal }) => api.errors({ ...params, limit: 200 }, signal), refetchInterval: 30_000 });
 	const artifacts = artifactOptions(list.data?.builds, build);
+	const [compare] = useCompare();
+	const before = list.data ? previousWindow(list.data.window) : undefined;
+	const { window: _window, ...withoutWindow } = params;
+	const prev = useQuery({
+		queryKey: ["errors", "list", "previous", withoutWindow, before],
+		queryFn: ({ signal }) => api.errors({ ...withoutWindow, ...(before as { from: number; to: number }), limit: 1 }, signal),
+		enabled: compare && before !== undefined,
+	});
+	const vs = compare && prev.data ? prev.data.totals : undefined;
+	const chip = (now: number, then: number | undefined) => (then === undefined ? undefined : <ChangeChip change={change(now, then, true)} against="the window before" />);
 	const stream = useErrorStream();
 	const streamTone = stream === "live" ? "bg-[var(--status-good)]" : stream === "retrying" ? "bg-[var(--status-critical)]" : "bg-[var(--status-warning)]";
 	return (
@@ -355,6 +417,7 @@ export default function Errors() {
 							</SelectContent>
 						</Select>
 						<TextFilter value={q} onCommit={setQ} placeholder="search text" label="Search" className="w-40" />
+						<CompareToggle title="Show the change against the window before, of the same length" />
 						<Status tone={streamTone}>{stream === "live" ? "live" : stream === "retrying" ? "stream lost, retrying" : "connecting"}</Status>
 					</>
 				}
@@ -363,9 +426,9 @@ export default function Errors() {
 				{(data) => (
 					<>
 						<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-							<Metric label="Errors" value={fmtInt(data.totals.count)} sub={`in the ${WINDOWS.find((w) => w.value === window)?.label.toLowerCase() ?? window}`} />
-							<Metric label="Kinds" value={fmtInt(data.totals.kinds)} sub={data.more ? `${fmtInt(data.more)} more not shown` : undefined} />
-							<Metric label="Players affected" value={fmtInt(data.totals.players)} sub="by days touched" />
+							<Metric label="Errors" value={fmtInt(data.totals.count)} sub={`in the ${WINDOWS.find((w) => w.value === window)?.label.toLowerCase() ?? window}`} delta={chip(data.totals.count, vs?.count)} />
+							<Metric label="Kinds" value={fmtInt(data.totals.kinds)} sub={data.more ? `${fmtInt(data.more)} more not shown` : undefined} delta={chip(data.totals.kinds, vs?.kinds)} />
+							<Metric label="Players affected" value={fmtInt(data.totals.players)} sub="by days touched" delta={chip(data.totals.players, vs?.players)} />
 							<Metric label="Trend step" value={bucketLabel(data.window.bucketSeconds)} sub={`${data.window.buckets} steps`} />
 						</div>
 						<Section title="Error kinds" description="Most frequent first. Open a row for its stack, where it happens and the players who hit it.">

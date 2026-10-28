@@ -5,6 +5,7 @@
 import type { ReactNode } from "react";
 import { EmptyState } from "@/components/common";
 import { ProductId } from "@/components/ProductId";
+import { JobLink } from "@/pages/server/shared";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { fmtInt, fmtMinutes, fmtNum, fmtTime, shortId } from "@/lib/format";
@@ -125,6 +126,16 @@ const SESSION_COLUMNS: DataColumn<PlayerSessionRow>[] = [
 	{ id: "events", header: "Events", type: "number", accessor: (s) => s.events, cell: (s) => fmtInt(s.events), align: "right" },
 	{ id: "dev", header: "Device", type: "enum", accessor: (s) => s.dev },
 	{ id: "first", header: "First", type: "boolean", accessor: (s) => s.firstSession, cell: (s) => (s.firstSession ? <Badge variant="secondary">first session</Badge> : null) },
+	{
+		id: "server",
+		header: "Server",
+		type: "text",
+		title: "The game server it ran on: opens its page (its heartbeats, the errors it reported)",
+		accessor: (s) => s.job ?? null,
+		// The row opens the session's timeline; the link opens the server instead.
+		cell: (s) => (s.job ? <span onClick={(e) => e.stopPropagation()}><JobLink job={s.job} /></span> : "–"),
+		className: "font-mono text-xs",
+	},
 	{ id: "art", header: "Artifact", type: "text", accessor: (s) => s.art, className: "font-mono text-xs", defaultHidden: true },
 	{ id: "sid", header: "sid", type: "text", accessor: (s) => s.sid, cell: (s) => shortId(s.sid), className: "font-mono text-xs", defaultHidden: true },
 ];

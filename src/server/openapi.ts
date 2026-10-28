@@ -8,6 +8,7 @@
 import { FLEET_LIMITS } from "../fleet/http.ts";
 import { QUERIES, QUERY_NAMES } from "../queries/index.ts";
 import { PACKAGE } from "../version.ts";
+import { NAME_MAX as SAVED_QUERY_NAME_MAX, PINNED_MAX, SAVED_QUERIES_MAX, SAVED_QUERY_CHARTS, WRITES_PER_MINUTE as SAVED_QUERY_WRITES } from "./saved-queries.ts";
 
 /** Who may call a route: the roles of README "Routes and roles". */
 type Role = "game" | "admin" | "web" | "lookup" | "open" | "adminToken";
@@ -54,6 +55,9 @@ const WINDOW: Param[] = [
 	q("realm", "server or client", { type: "string", enum: ["server", "client"] }),
 ];
 const JOB = p("jobId", "a game server's JobId");
+const SAVED_ID = p("id", "the saved query's id", int());
+const SAVED_QUERY_BODY = (required: string[]): Schema =>
+	obj({ name: str(`1 to ${SAVED_QUERY_NAME_MAX} characters`), sql: str("one SELECT or WITH"), chart: { type: ["string", "null"], enum: [...SAVED_QUERY_CHARTS, null] }, pinned: { type: "boolean" } }, required);
 
 const QUERY_TABLE = QUERY_NAMES.map((name) => `- \`${name}\`: ${QUERIES[name].summary} (default ${QUERIES[name].defaultDays} days)`).join("\n");
 
@@ -199,6 +203,27 @@ const ROUTES: Route[] = [
 	},
 	{
 		method: "get",
+		path: "/v1/saved-queries",
+		tag: "analytics",
+		roles: ["admin", "web"],
+		summary: "Saved queries",
+		description: "`{ queries: [{ id, name, sql, chart, pinned, createdBy, createdAt, updatedBy, updatedAt }] }` by name. Run one with `POST /v1/sql` (its SQL); `pinned` ones are the Overview's tiles.",
+	},
+	{
+		method: "post",
+		path: "/v1/saved-queries",
+		tag: "analytics",
+		roles: ["admin"],
+		summary: "Save a query",
+		description: `Checked like \`POST /v1/sql\`'s text (one SELECT / WITH), never run. At most ${SAVED_QUERIES_MAX} queries and ${PINNED_MAX} pinned; names unique ignoring case (409); ${SAVED_QUERY_WRITES} changes a minute per address.`,
+		body: SAVED_QUERY_BODY(["name", "sql"]),
+		ok: { status: 201, description: "`{ query }`" },
+	},
+	{ method: "get", path: "/v1/saved-queries/{id}", tag: "analytics", roles: ["admin", "web"], summary: "One saved query", params: [SAVED_ID] },
+	{ method: "patch", path: "/v1/saved-queries/{id}", tag: "analytics", roles: ["admin"], summary: "Change a saved query (the fields given)", params: [SAVED_ID], body: SAVED_QUERY_BODY([]) },
+	{ method: "delete", path: "/v1/saved-queries/{id}", tag: "analytics", roles: ["admin"], summary: "Delete a saved query", params: [SAVED_ID] },
+	{
+		method: "get",
 		path: "/v1/experiments",
 		tag: "analytics",
 		roles: ["admin", "web"],
@@ -259,6 +284,7 @@ const ROUTES: Route[] = [
 	{ method: "get", path: "/v1/errors/{fp}", tag: "errors", roles: ["admin", "web"], summary: "One error kind", params: [p("fp", "the fingerprint"), ...WINDOW, q("bucket", "seconds, 60 to 86400", int())] },
 	{ method: "get", path: "/v1/errors/{fp}/players", tag: "errors", roles: ["admin", "web"], summary: "The players who hit an error kind", params: [p("fp", "the fingerprint"), ...WINDOW, q("limit", "at most 200", int())] },
 	{ method: "get", path: "/v1/players/{pid}/errors", tag: "errors", roles: ["admin", "web"], summary: "The error kinds one player hit", params: [p("pid", "a pid"), ...WINDOW, q("limit", "at most 200", int())] },
+	{ method: "get", path: "/v1/servers/{jobId}/errors", tag: "errors", roles: ["admin", "web"], summary: "The error kinds one game server reported", params: [JOB, ...WINDOW, q("limit", "at most 200", int())] },
 
 	// Fleet -----------------------------------------------------------------------------------------------------------------
 	{
