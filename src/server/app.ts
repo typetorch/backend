@@ -27,6 +27,9 @@
  *                                   the errors and warnings Roblox kept for one game server (Open Cloud server management;
  *                                   OPENCLOUD_API_KEY with universe:read and TYPETORCH_UNIVERSE_ID; the place and version
  *                                   come from the server's heartbeats, the query can name them; cached 20 s)
+ *   GET  /v1/roblox/analytics/acquisition?days=7|14|28  Creator Hub's play-through rate, impressions and qualified plays
+ *                                   from Roblox's Analytics Query API (OPENCLOUD_API_KEY with universe.analytics:read
+ *                                   and TYPETORCH_UNIVERSE_ID; cached 1 h)
  *   GET  /v1/errors?window=..       error kinds with counts, players, sparkline;  GET /v1/errors/<fp>: one kind;
  *        GET /v1/errors/<fp>/players: the players who hit it (at most 200)
  *   GET  /v1/players/<pid>/errors?window=..  the error kinds one player hit (at most 200), most occurrences first
@@ -118,6 +121,7 @@ import { InstanceKey } from "./instance-key.ts";
 import { RobloxPlace } from "./roblox-place.ts";
 import { MAX_PRODUCT_IDS, parseIdList, RobloxProducts } from "./roblox-products.ts";
 import { RobloxServers, RobloxServersError, SEARCH_MAX, SEVERITY_PATTERN } from "./roblox-servers.ts";
+import { ACQUISITION_DAYS, OFF_MESSAGE as ANALYTICS_OFF, RobloxAnalytics, RobloxAnalyticsError } from "./roblox-analytics.ts";
 import { RobloxProfiles } from "./roblox-profiles.ts";
 import { ENV_ONLY, RuntimeSettings, SETTINGS, SETTINGS_BODY_MAX, SettingsError, type SettingsActor } from "./runtime-settings.ts";
 import { SqlInputError, SqlSandbox } from "./sql.ts";
@@ -469,6 +473,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		...(options.fetch ? { fetch: options.fetch } : {}),
 	});
 	const serversLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	// Creator Hub's acquisition numbers (server/roblox-analytics.ts: Open Cloud's Analytics Query API with
+	// OPENCLOUD_API_KEY, a 1 h cache, a cap under Roblox's 30 queries a minute), and a per-IP cap on the requests.
+	const robloxAnalytics = new RobloxAnalytics({
+		...(config.openCloudKey ? { apiKey: config.openCloudKey } : {}),
+		...(config.universeId ? { universeId: config.universeId } : {}),
+		clock,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+	});
+	const analyticsLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Plans/25 remote debug: the kernel's polls and result posts per JobId, the explorer's commands and watches.
 	const debugLimiters = {
 		poll: new RateLimiter(90, clock),
@@ -872,6 +885,29 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(200, { jobId: job, placeId, placeVersion, ...page });
 		} catch (error) {
 			return robloxServersFailure(error);
+		}
+	}
+
+	/**
+	 * GET /v1/roblox/analytics/acquisition?days=7|14|28 (every signed-in role): Roblox's own play-through rate, users with
+	 * impressions and users with qualified plays for the last `days` full UTC days and the `days` before, per day and per
+	 * acquisition source. The numbers a game can't compute (they start at the Home impression); cached an hour.
+	 */
+	async function acquisition(url: URL, ip: string): Promise<Response> {
+		for (const key of url.searchParams.keys()) {
+			if (key !== "days") return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
+		}
+		if (url.searchParams.getAll("days").length > 1) return json(400, { error: "one days" });
+		const raw = url.searchParams.get("days") ?? "7";
+		const days = Number(raw);
+		if (!/^[1-9]\d?$/.test(raw) || !(ACQUISITION_DAYS as readonly number[]).includes(days)) return json(400, { error: `days: one of ${ACQUISITION_DAYS.join(", ")}` });
+		if (!robloxAnalytics.configured) return json(409, { error: ANALYTICS_OFF });
+		if (!analyticsLimiter.take(ip)) return tooMany(analyticsLimiter.retryAfter(ip));
+		try {
+			return json(200, { source: "roblox", ...(await robloxAnalytics.acquisition(days)) });
+		} catch (error) {
+			if (error instanceof RobloxAnalyticsError) return error.status === 429 ? tooMany(60) : json(error.status, { error: error.message });
+			return json(502, { error: "Roblox analytics failed" });
 		}
 	}
 
@@ -2052,6 +2088,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
+			if (path === "/v1/roblox/analytics/acquisition") return method === "GET" ? acquisition(url, ip) : json(405, { error: "GET only" });
 			const logs = /^\/v1\/roblox\/servers\/([^/]+)\/logs$/.exec(path);
 			if (logs) return method === "GET" ? serverLogs(logs[1] as string, url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });

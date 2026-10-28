@@ -30,6 +30,7 @@ import type {
 	Health,
 	Identity,
 	PlaceCardInfo,
+	RobloxAcquisition,
 	RobloxProductInfo,
 	RobloxServerLogs,
 	PlayerProfile,
@@ -227,6 +228,11 @@ export function createApi(options: ApiOptions = {}) {
 		 * One page of the errors and warnings Roblox kept for a game server (the backend asks Open Cloud). The place and
 		 * version come from the server's heartbeats; a 409 with `placeVersion: null` means it must be given here.
 		 */
+		/**
+		 * Roblox's own play-through rate, impressions and qualified plays for the last `days` full UTC days and the days
+		 * before (the backend asks Open Cloud's Analytics Query API; 409 while the key lacks universe.analytics:read).
+		 */
+		robloxAcquisition: (days: number, signal?: AbortSignal) => get<RobloxAcquisition>(`/v1/roblox/analytics/acquisition${qs({ days })}`, signal),
 		robloxServerLogs: (job: string, params: { search?: string; order?: "asc" | "desc"; pageToken?: string; placeId?: number; placeVersion?: number } = {}, signal?: AbortSignal) =>
 			get<RobloxServerLogs>(`/v1/roblox/servers/${encodeURIComponent(job)}/logs${qs(params)}`, signal),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
