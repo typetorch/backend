@@ -889,9 +889,9 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `players` | players seen in the range, most recent first or `sort: "robux"` for top spenders (pid, sessions, events, playtime, `robux` = Robux spent: distinct server-sent purchase rows, 0 for none); `search` = part of a pid | 30 days |
 | `values` | the branches, artifacts (newest first), channels and devices seen in the range, for filter pickers | 30 days |
 | `events` | the newest rows, optionally of one `kind` / `name` / `pid` (`limit` up to 1,000); `fleet` rows come without props | 7 days |
-| `benchmarks` | the last `days` (7) vs the `days` before: playtime per daily active user, D1/D7 (counted on the return day, days fully over), payer conversion, ARPPU, after-join play-through (first sessions reaching `qualifiedMinutes`) | ends at `to` |
-| `realtime` | concurrent users per hour from fleet heartbeats (per minute, summed over servers; `ccuDays` 7) and now; session time, client errors per session (tech/error from clients), client fps, server memory: the last `hours` (24) vs the hours before | 7 days |
-| `trends` | per day, `window`-day (7) moving averages of new users, DAU, playtime per DAU, Robux and D1, in total and per join source (session/join `from`; past `maxSources` folded into `other`) | 28 days |
+| `benchmarks` | the last `days` (7) full UTC days vs the `days` before, as Creator Hub defines them ([Roblox parity](#roblox-parity)): DAU, MAU (the 30 days ending on the period's last day), new users, average session time, playtime per DAU, D1/D7/D30 (cohorts by first play date, the latest `days` whose day 1 / 7 / 30 is over), payer conversion, ARPPU, ARPDAU, Robux spent and revenue (`creatorShare`, 0.7), after-join play-through (ours: first sessions reaching `qualifiedMinutes`) | ends at `to` |
+| `realtime` | concurrent users per hour from fleet heartbeats (per minute, summed over servers, Studio left out; `ccuDays` 7): the peak minute and the average, and now; session time, client errors per session (tech/error from clients), client fps, server memory: the last `hours` (24) vs the hours before | 7 days |
+| `trends` | per full UTC day, `window`-day (7) moving averages of new users, DAU, session time, playtime per DAU, Robux, revenue and D1 (ratios: the mean of the daily values), in total and per join source (session/join `from`; past `maxSources` folded into `other`) | 28 days |
 | `perf-client` | client fps, memory and ping (tech/client) over time and per group: `by` = `none`, `dev` (device class), `input`, `screen` (viewport short side: `<400`, `400-599`, `600-799`, `800-1079`, `1080+`), `branch`, `art`; p10 (the plain 10th percentile), p50, p90 / p99 on the bad side, avg, n; the busiest `maxGroups` (8, at most 20). Step: the window's (`windowBucketMs`), or `bucketMinutes` (1-1440), or about `buckets` (10-400). At most 92 days and 400 steps | 7 days |
 | `perf-server` | server TPS (`hb`), physics FPS, memory (tech/server) and players (each server's average per step, summed), the same way; `by` = `none`, `branch`, `art` (server rows have no player: device, new/returning and variant filters don't apply) | 7 days |
 | `perf-compare` | the client and server numbers side by side: `mode: "builds"` (`arts`, at most 6; default the 4 busiest) or `mode: "around"` (`at`, unix ms or ISO, e.g. a mark's time: before vs after over two windows of `hours` (1-168, 24), shortened to the time since `at`) | 7 days |
@@ -904,6 +904,23 @@ count a resent batch twice (only after a hot swap during a request). Graph optio
 true: each node's `events`, its top 5 custom / purchase / currency names, and `steps`, the funnel steps logged in it).
 `player-graph` takes `sid` for one session; it then also returns `path` (the visits in order with the time in each)
 and `ended`. Retention, bounce and "left the game" ignore sessions and days that aren't over yet.
+
+### Roblox parity
+
+`benchmarks`, `realtime` and `trends` (the Roblox page) follow Creator Hub's definitions (create.roblox.com/docs/production/analytics):
+UTC days, full days only (today isn't over); a session (one `sid`, first to last event, no minimum length) counts on the
+day it started, DAU is the players who started one that day, MAU the distinct players of the 30 days ending on the
+period's last day, and a new user is a first-ever session (`newp`); Studio play tests (`srv = studio`, heartbeat
+`t = studio`) don't count, private and reserved servers do; a ratio over several days (session time, playtime per DAU,
+payer conversion = paying DAU / DAU, ARPPU, ARPDAU, D1/D7/D30) is the mean of its daily values; CCU is the peak minute
+(per hour and over the window) and the mean of the minutes. Retention (here, in `retention` and in `roblox`) is by
+first play date, and a player is back on day N only when a later session *started* that day (a first session running
+past midnight isn't a return); `retention` and `roblox` leave Studio out too.
+What can't match, marked on the page: revenue is an estimate (logged purchase prices times `creatorShare`, 0.7; Creator Hub
+also counts passes bought outside the game, commissions and avatar items), payer conversion misses purchases made outside
+the game, CCU comes from heartbeats about once a minute, join sources are the game's own (no Home / Search split), and the
+play-through rate is ours (Creator Hub's starts at the impression). Creator Hub's own numbers settle a day or more after a
+day ends; ours don't wait.
 
 Example output (the test fixture: 300 players over 21 days; arrays cut to two items):
 
