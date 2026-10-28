@@ -80,6 +80,12 @@ describe("explorer proxy guard", () => {
 		expect(guardRequest({ method: "GET", url: "/v1/auth/check", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/errors?window=24h&realm=server", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/errors/fp-abc123", headers: same }, true)).toEqual({ ok: true });
+		// The server page's error kinds; saved queries are read only through the proxy.
+		expect(guardRequest({ method: "GET", url: "/v1/servers/0b5c7d9e-1111/errors?window=30d", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/saved-queries", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/saved-queries/12", headers: same }, true)).toEqual({ ok: true });
+		for (const method of ["POST", "PATCH", "DELETE"]) expect(guardRequest({ method, url: "/v1/saved-queries/12", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
+		expect(guardRequest({ method: "POST", url: "/v1/saved-queries", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "GET", url: "/v1/live?topics=error", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/identity", headers: same }, true)).toMatchObject({ ok: false, status: 403 }); // the game's ingest route
 		// Runtime settings: read only through the proxy; saving and the test alert stay on the backend's own explorer.

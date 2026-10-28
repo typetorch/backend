@@ -376,6 +376,8 @@ export interface PlayerSessionRow {
 	firstSession: boolean;
 	dev: string | null;
 	art: string;
+	/** The game server's JobId (newer backends). */
+	job?: string | null;
 }
 
 export interface PlayerPurchase {
@@ -1249,6 +1251,41 @@ export interface ErrorDetail {
 	byBuild: { build: string; n: number }[];
 	byBranch: { branch: string; n: number }[];
 	byRealm: { realm: string; n: number }[];
+	/** The game servers that reported it (newer backends), most occurrences first, at most 20. */
+	byJob?: { job: string; n: number; branch: string; build: string; lastAt: string }[];
+}
+
+/** GET /v1/servers/<job>/errors: the error kinds one game server reported. */
+export interface ServerErrors {
+	job: string;
+	window: { from: string; to: string };
+	errors: { fp: string; template: string; topFrame: string | null; realms: string[]; count: number; firstAt: string; lastAt: string; total: number }[];
+	total: number;
+	more: number;
+}
+
+// Saved queries (GET /v1/saved-queries) --------------------------------------------------------------------------------
+
+export const SAVED_QUERY_CHARTS = ["table", "bar", "line"] as const;
+export type SavedQueryChart = (typeof SAVED_QUERY_CHARTS)[number];
+
+export interface SavedQuery {
+	id: number;
+	name: string;
+	sql: string;
+	chart: SavedQueryChart | null;
+	pinned: boolean;
+	createdBy: string;
+	createdAt: string;
+	updatedBy: string;
+	updatedAt: string;
+}
+
+export interface SavedQueryInput {
+	name?: string;
+	sql?: string;
+	chart?: SavedQueryChart | null;
+	pinned?: boolean;
 }
 
 // Runtime settings (GET / PATCH /v1/admin/settings) --------------------------------------------------------------------

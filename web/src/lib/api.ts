@@ -30,6 +30,9 @@ import type {
 	RobloxServerLogs,
 	PlayerProfile,
 	QueryInfo,
+	SavedQuery,
+	SavedQueryInput,
+	ServerErrors,
 	QueryName,
 	QueryResults,
 	RemoteCommand,
@@ -186,6 +189,13 @@ export function createApi(options: ApiOptions = {}) {
 		errorPlayers: (fp: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ErrorPlayers>(`/v1/errors/${encodeURIComponent(fp)}/players${qs({ ...params })}`, signal),
 		/** The error kinds one player hit (most occurrences first, at most 200). */
 		playerErrors: (pid: string, params: ErrorParams = {}, signal?: AbortSignal) => get<PlayerErrors>(`/v1/players/${encodeURIComponent(pid)}/errors${qs({ ...params })}`, signal),
+		/** The error kinds one game server reported (most occurrences first, at most 200). */
+		serverErrors: (job: string, params: ErrorParams = {}, signal?: AbortSignal) => get<ServerErrors>(`/v1/servers/${encodeURIComponent(job)}/errors${qs({ ...params })}`, signal),
+		/** Saved queries (every signed-in role reads; admins change them). Run one with `sql(query.sql)`. */
+		savedQueries: (signal?: AbortSignal) => get<{ queries: SavedQuery[] }>("/v1/saved-queries", signal).then((r) => r.queries),
+		createSavedQuery: (input: SavedQueryInput & { name: string; sql: string }) => post<{ query: SavedQuery }>("/v1/saved-queries", input).then((r) => r.query),
+		updateSavedQuery: (id: number, patch: SavedQueryInput) => request<{ query: SavedQuery }>(`/v1/saved-queries/${id}`, { method: "PATCH", body: JSON.stringify(patch) }).then((r) => r.query),
+		deleteSavedQuery: (id: number) => request<{ ok: boolean }>(`/v1/saved-queries/${id}`, { method: "DELETE" }),
 		/** The experiment overrides the server knows (weights, active, forced variant; read-only). */
 		experimentOverrides: (signal?: AbortSignal) => get<ExperimentOverrides>("/v1/experiments", signal),
 		/** The players in one experiment (at most 200; one variant or all), under the filter bar's range and filters. */

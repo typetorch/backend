@@ -198,6 +198,8 @@ export interface ChartSeries {
 	key: string;
 	label: string;
 	color: string;
+	/** Drawn dashed (the previous period, under "vs previous period"). */
+	dashed?: boolean;
 }
 
 export type ChartRow = { t: number } & Record<string, number | null>;

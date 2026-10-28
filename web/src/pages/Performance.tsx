@@ -3,7 +3,8 @@
  * players), over time, by device class / input / screen size / branch / build, with p10, p50, p90 and p99 (p90 and p99 on the
  * bad side; p99 is marked as the worst case).
  * Every chart carries deploy marks (releases, rollbacks, kernel publishes, backup refreshes); clicking one filters to its
- * build. Builds can be compared side by side, or before vs after a mark over two equal windows.
+ * build. Builds can be compared side by side, or before vs after a mark over two equal windows. "vs previous period" adds
+ * change chips per metric and, without a grouping, the previous period as a dashed line on each chart.
  *
  * Every table is the shared DataTable (sort, filter, columns, CSV); a number column sorts by its raw value.
  */
@@ -12,16 +13,20 @@ import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router";
 import { cn } from "cn";
 import { DataTable, type DataColumn } from "@/components/data-table";
+import { ChangeChip } from "@/components/ChangeChip";
+import { CompareToggle } from "@/components/CompareToggle";
 import { PerfChart } from "@/components/PerfChart";
 import { PerfFlag } from "@/components/PerfFlag";
 import { ToggleChip } from "@/components/ToggleChip";
-import { EmptyState, ErrorState, LoadingBlock, PageHeader, QueryState, Section } from "@/components/common";
+import { EmptyState, ErrorState, LoadingBlock, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError } from "@/lib/api";
+import { change } from "@/lib/benchmarks";
+import { previousPeriod, useCompare, withPrevious, type PreviousPeriod } from "@/lib/compare";
 import { describeRange, windowBucketMs } from "@/lib/filters";
 import { fmtInt, shortId } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
@@ -50,6 +55,7 @@ import {
 	SERVER_METRIC_KEYS,
 	seriesOf,
 	type ChartRow,
+	type ChartSeries,
 	type ComparePeriod,
 	type DeployMark,
 	type Percentile,
@@ -260,15 +266,62 @@ function MetricCard({ title, about, children }: { title: string; about: string; 
 	);
 }
 
-function SeriesCharts({ result, metricKeys, pct, players, ...marks }: { result: PerfSeriesResult; metricKeys: readonly string[]; pct: Percentile; players?: boolean } & MarkProps) {
-	const series = seriesOf(result);
-	const charts: { key: string; title: string; about: string; rows: ChartRow[] }[] = metricKeys.map((k) => ({
-		key: k,
-		title: `${METRICS[k]?.label ?? k}, ${percentileName(pct)}`,
-		about: `${METRICS[k]?.about ?? ""} Line: ${PERCENTILE_HELP[pct]}.`,
-		rows: pivot(result, k, pct),
-	}));
-	if (players) charts.push({ key: "players", title: "Players", about: METRICS.players.about, rows: pivot(result, "", "players") });
+/** The previous period's answer and how far back it is. */
+interface PreviousSeries {
+	result: PerfSeriesResult;
+	shiftMs: number;
+}
+
+/** The previous period as a dashed series next to the one line of an ungrouped chart (none when the chart is grouped). */
+export function previousLine(result: PerfSeriesResult, previous: PreviousSeries | undefined, rows: ChartRow[], metric: string, pct: Percentile | "players"): { rows: ChartRow[]; series: ChartSeries[] } | undefined {
+	const current = seriesOf(result);
+	const before = previous ? seriesOf(previous.result) : [];
+	if (!previous || result.by !== "none" || current.length !== 1 || before.length !== 1) return undefined;
+	return {
+		rows: withPrevious(rows, pivot(previous.result, metric, pct), previous.shiftMs, (before[0] as ChartSeries).id, "prev") as ChartRow[],
+		series: [...current, { id: "prev", key: "prev", label: "Previous period", color: "var(--muted-foreground)", dashed: true }],
+	};
+}
+
+/** The overall picked percentile of each metric with its change against the previous period. */
+function PeriodTiles({ result, previous, metricKeys, pct }: { result: PerfSeriesResult; previous: PerfSeriesResult; metricKeys: readonly string[]; pct: Percentile }) {
+	return (
+		<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+			{metricKeys.map((k) => {
+				const now = result.overall.metrics[k]?.[pct] ?? null;
+				const then = previous.overall.metrics[k]?.[pct] ?? null;
+				return (
+					<Metric
+						key={k}
+						label={`${result.side === "server" && k === "mem" ? "Server memory" : (METRICS[k]?.label ?? k)}, ${percentileName(pct)}`}
+						value={fmtMetric(k, now)}
+						sub={`before: ${fmtMetric(k, then)}`}
+						delta={<ChangeChip change={change(now, then, !(METRICS[k]?.higherIsBetter ?? true))} against="the previous period" />}
+					/>
+				);
+			})}
+		</div>
+	);
+}
+
+function SeriesCharts({ result, metricKeys, pct, players, previous, ...marks }: { result: PerfSeriesResult; metricKeys: readonly string[]; pct: Percentile; players?: boolean; previous?: PreviousSeries } & MarkProps) {
+	const plain = seriesOf(result);
+	const charts: { key: string; title: string; about: string; rows: ChartRow[]; series: ChartSeries[] }[] = metricKeys.map((k) => {
+		const rows = pivot(result, k, pct);
+		const withBefore = previousLine(result, previous, rows, k, pct);
+		return {
+			key: k,
+			title: `${METRICS[k]?.label ?? k}, ${percentileName(pct)}`,
+			about: `${METRICS[k]?.about ?? ""} Line: ${PERCENTILE_HELP[pct]}.${withBefore ? " Dashed: the previous period." : ""}`,
+			rows: withBefore?.rows ?? rows,
+			series: withBefore?.series ?? plain,
+		};
+	});
+	if (players) {
+		const rows = pivot(result, "", "players");
+		const withBefore = previousLine(result, previous, rows, "", "players");
+		charts.push({ key: "players", title: "Players", about: METRICS.players.about, rows: withBefore?.rows ?? rows, series: withBefore?.series ?? plain });
+	}
 	return (
 		<div className="grid gap-3 lg:grid-cols-3">
 			{charts.map((c) => (
@@ -276,7 +329,7 @@ function SeriesCharts({ result, metricKeys, pct, players, ...marks }: { result: 
 					<PerfChart
 						label={`${c.title} over time`}
 						rows={c.rows}
-						series={series}
+						series={c.series}
 						fromMs={result.fromMs}
 						toMs={result.toMs}
 						format={(v) => fmtMetric(c.key, v)}
@@ -308,10 +361,19 @@ interface SectionProps extends MarkProps {
 	pct: Percentile;
 	filters: Filters;
 	stepMinutes: number | undefined;
+	/** Under "vs previous period": the period before. */
+	period?: PreviousPeriod;
 }
 
-function ClientSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps) {
+/** The section's answer for the previous period (only while comparing). */
+function usePrevious(name: "perf-client" | "perf-server", options: object, period: PreviousPeriod | undefined): PreviousSeries | undefined {
+	const q = useAnalytics(name, options, { enabled: period !== undefined, ...(period ? { filters: period.filters } : {}) });
+	return period && q.data ? { result: q.data, shiftMs: period.shiftMs } : undefined;
+}
+
+function ClientSection({ by, pct, filters, stepMinutes, period, ...marks }: SectionProps) {
 	const q = useAnalytics("perf-client", seriesOptions(by, stepMinutes), { filters });
+	const previous = usePrevious("perf-client", seriesOptions(by, stepMinutes), period);
 	return (
 		<Section
 			title="Players' devices"
@@ -326,7 +388,8 @@ function ClientSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps
 			>
 				{(r) => (
 					<>
-						<SeriesCharts result={r} metricKeys={CLIENT_METRIC_KEYS} pct={pct} {...marks} />
+						{previous ? <PeriodTiles result={r} previous={previous.result} metricKeys={CLIENT_METRIC_KEYS} pct={pct} /> : null}
+						<SeriesCharts result={r} metricKeys={CLIENT_METRIC_KEYS} pct={pct} {...(previous ? { previous } : {})} {...marks} />
 						{r.groupsTotal > r.groups.length ? <p className="text-xs text-muted-foreground">The {r.groups.length} busiest of {r.groupsTotal} groups are shown.</p> : null}
 						<GroupTable result={r} metricKeys={CLIENT_METRIC_KEYS} />
 					</>
@@ -336,9 +399,10 @@ function ClientSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps
 	);
 }
 
-function ServerSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps) {
+function ServerSection({ by, pct, filters, stepMinutes, period, ...marks }: SectionProps) {
 	const serverBy = SERVER_GROUPS.includes(by) ? by : "none";
 	const q = useAnalytics("perf-server", seriesOptions(serverBy, stepMinutes), { filters });
+	const previous = usePrevious("perf-server", seriesOptions(serverBy, stepMinutes), period);
 	const note = serverBy !== by ? ` Servers have no ${GROUP_BY_LABELS[by].toLowerCase()}: shown for everything.` : "";
 	return (
 		<Section
@@ -349,7 +413,8 @@ function ServerSection({ by, pct, filters, stepMinutes, ...marks }: SectionProps
 			<QueryState query={q} loadingRows={6} isEmpty={(r) => r.overall.samples === 0} empty="No server samples in this range (tech/server, every techEvery seconds per server).">
 				{(r) => (
 					<>
-						<SeriesCharts result={r} metricKeys={["tps", "mem"]} pct={pct} players {...marks} />
+						{previous ? <PeriodTiles result={r} previous={previous.result} metricKeys={SERVER_METRIC_KEYS} pct={pct} /> : null}
+						<SeriesCharts result={r} metricKeys={["tps", "mem"]} pct={pct} players {...(previous ? { previous } : {})} {...marks} />
 						<GroupTable result={r} metricKeys={SERVER_METRIC_KEYS} />
 					</>
 				)}
@@ -750,6 +815,9 @@ export default function Performance() {
 	const seqOf = useMemo(() => new Map(allMarks.filter((m) => m.artifact && m.seq !== null && m.kind !== "backup").map((m) => [m.artifact as string, m.seq as number])), [allMarks]);
 	const onMark = useCallback((m: DeployMark) => patch({ mark: m.id, ...(m.artifact && m.kind !== "kernel" ? { art: m.artifact } : {}) }), [patch]);
 	const markProps: MarkProps = { marks, selectedMark: selected?.id ?? null, onMark };
+	const [compare] = useCompare();
+	const before = useMemo(() => previousPeriod(state), [state]);
+	const period = compare ? before : undefined;
 	return (
 		<>
 			<PageHeader
@@ -782,6 +850,7 @@ export default function Performance() {
 								))}
 							</SelectContent>
 						</Select>
+						<CompareToggle disabled={!before} />
 						<ToggleGroup type="single" variant="outline" size="sm" value={pct} onValueChange={(v) => v && setPct(v)} aria-label="Percentile">
 							{PERCENTILES.map((p) => (
 								<ToggleGroupItem key={p} value={p} className="px-2.5 text-xs" title={PERCENTILE_HELP[p]}>
@@ -805,8 +874,8 @@ export default function Performance() {
 					onClear={() => patch({ mark: null, ...(apiFilters.art === selected.artifact ? { art: null } : {}) })}
 				/>
 			) : null}
-			<ClientSection by={by} pct={pct} filters={apiFilters} stepMinutes={stepMinutes} {...markProps} />
-			<ServerSection by={by} pct={pct} filters={apiFilters} stepMinutes={stepMinutes} {...markProps} />
+			<ClientSection by={by} pct={pct} filters={apiFilters} stepMinutes={stepMinutes} {...(period ? { period } : {})} {...markProps} />
+			<ServerSection by={by} pct={pct} filters={apiFilters} stepMinutes={stepMinutes} {...(period ? { period } : {})} {...markProps} />
 			<LiveServers branch={branch} since={range.from} {...markProps} />
 			<CompareSection filters={apiFilters} marks={allMarks} seqOf={seqOf} />
 		</>

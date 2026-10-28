@@ -484,6 +484,9 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
 | `GET /v1/players/<pid>/errors` | admin, web | the error kinds one player hit |
+| `GET /v1/servers/<job>/errors` | admin, web | the error kinds one game server reported |
+| `GET /v1/saved-queries`, `GET /v1/saved-queries/<id>` | admin, web | the Query page's saved queries (see [Saved queries](#saved-queries)) |
+| `POST /v1/saved-queries`, `PATCH /v1/saved-queries/<id>`, `DELETE /v1/saved-queries/<id>` | admin | save, change (name, SQL, chart, pinned), delete one |
 | `GET /v1/experiments/<key>/players` | admin, web | the players in one experiment: variant, random or forced, assigned / first / last seen |
 | `GET /v1/experiments` | admin, web | the experiment overrides from `data/settings.json` (`active`, `weights`, `variant` per experiment; nothing else from the file): `{ source: "settings-file" \| "none" \| "unreadable", experiments }` |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
@@ -691,7 +694,8 @@ Reads (admin, web): `GET /v1/errors?window=24h&realm=server&branch=prod&build=..
 realm, count, players, firstAt, lastAt, total, spark: [..] }], totals: { count, kinds, players }, more, builds: [{ build, n,
 lastAt }] }` (`builds`: the artifact ids with errors in the window under the other filters, most recently seen first, at most
 50; the Errors page's artifact filter, URL param `build`; a branch or build with control characters is a 400); `GET /v1/errors/<fp>`
-adds the sample `stack`, the dense `series` and `byBuild`, `byBranch`, `byRealm`. `players` counts distinct ids over the days the
+adds the sample `stack`, the dense `series`, `byBuild`, `byBranch`, `byRealm` and `byJob` (the game servers that reported it, most
+occurrences first, at most 20: `{ job, n, branch, build, lastAt }`). `players` counts distinct ids over the days the
 window touches. `GET /v1/errors/<fp>/players` (same window and filters, `limit` 1-200, default 200) answers `{ fp, window,
 players: [{ pid, uid?, name?, displayName?, count, days, firstAt, lastAt, realms }], total, more, withoutPlayer: [{ realm,
 count, firstAt, lastAt }] }`: most occurrences first, then the most recently seen. `count` is the occurrences in the reports
@@ -707,6 +711,14 @@ more }`: the kinds that player hit, most occurrences first, then the most recent
 bound as above, `total` on a kind is its all-time count over every player. A bad pid is a 400, an erased one a 404, a pid
 nobody reported an empty list. The player detail's **Errors** view (`view=errors`, side in `realm=`) lists them under the
 page's range, branch and artifact; each kind links to the Errors page with `?fp=` (its side sheet), keeping the filters.
+
+Per server, `GET /v1/servers/<job>/errors` (same window and filters, `limit` 1-200, default 200; same reader gate) answers
+`{ job, window, errors: [{ fp, template, topFrame, realms, count, firstAt, lastAt, total }], total, more }`: the kinds one game
+server reported, most occurrences first. A JobId with control characters or over 200 characters is a 400. The server page
+(`/servers/<JobId>`) shows them as **Errors it reported** (over the last 30 days, live or gone), each opening the kind on the
+Errors page; the kind's side sheet lists **Servers that reported it** (each JobId opening its server page) and links each
+build in **By build** to the Errors page filtered to it and to the Performance page with its deploy marks. A Fleet alert
+that names a build links to that build's errors too.
 
 The **Experiments** page does the same for experiments: a row of the experiments list or of the variants table (click, or
 Enter / Space) opens the players in a side sheet (`?assigned=<experiment>&assignedVariant=<variant>`, under the page's
@@ -784,6 +796,28 @@ sizes sort by their value, not the text shown), a search box and per-column filt
 widths, "12 of 340 rows", pages, copy a cell or a row as JSON, and Export of the filtered view as CSV. Sort, filters and hidden
 columns are remembered per table in the browser and written to the URL (`fleet-servers.sort=-players`), so a view can be shared.
 How to add a table or a column: `web/README.md`, "Tables".
+
+**Saved queries.** On the Query page's SQL tab, a saved-query picker: pick one to load and run it (`?saved=<id>`, a shareable
+link), and owners name, save ("Save", "Save as new"), pick how it is shown (table, bar or line chart: the first column is the
+axis, the number columns after it the series, at most four), **Pin to Overview** and delete it (a second click confirms, since
+it is deleted for everyone). The read-only web role lists and runs saved queries; its edits stay on the page. Pinned queries show
+on the Overview as tiles under the charts (their own range, not the filter bar's; an "Open" link back to the Query page).
+Backend side: [Saved queries](#saved-queries).
+
+**Links between pages.** Entities are clickable wherever they appear: a JobId opens its server page (the Fleet page and its alerts, a player's
+Sessions table, an error kind's "Servers that reported it"); a player opens their page (an
+error kind's players); an error kind opens its side sheet (a player's Errors view, a server's **Errors it reported**); a build in
+an error kind's breakdown opens the Errors page filtered to it, and the Performance page with its deploy marks ("perf"); a Fleet
+alert that names a build has an **Errors** link to that build's errors, over a window that reaches back to the alert. Deploy
+history gets its own pages later: until then a build's deploys are the Performance page's marks.
+
+**vs previous period.** A chip in the header of the Overview, Errors and Performance pages (like the Roblox page's benchmark
+cards; `vs=prev` in the URL, so the compared view is shareable). The Overview's tiles get a change chip against the period
+before, of the same length and under the same other filters (an hour preset: the hour before; "7 days": the 7 days before, up
+to the same time of day, so a half-finished today is not held against a whole day; a custom range: the same number of whole
+days before it; a custom range without a start date has nothing to compare and the chip says so), and each per-day chart a
+dashed previous-period line, step by step. Errors compares the three count tiles with the window before. Performance adds a tile
+per metric (the picked percentile now vs before) and, without a grouping, the previous period as a dashed line on each chart.
 
 ## Row format
 
@@ -1114,6 +1148,19 @@ that reads only `events`, `recordings` or its own CTEs (no file paths, no schema
 heartbeat's props can hold a private server's access code). Refusals and SQL errors answer 400 with the reason. The
 sandbox opens on the first query and its memory comes on top of the main instance's (on a 1 GB VPS, lower
 `TYPETORCH_SQL_MEMORY` or turn it off if the nightly export and ad-hoc queries may overlap).
+
+### Saved queries
+
+The Query page's SQL can be saved for everyone who signs in: `saved_queries` in the fleet SQLite file (`id, name, sql, chart,
+pinned, created_by, created_at, updated_by, updated_at`). `GET /v1/saved-queries` (admin, web) answers `{ queries: [...] }` by
+name, `GET /v1/saved-queries/<id>` one query; `POST /v1/saved-queries { name, sql, chart?, pinned? }` (admin) answers `201
+{ query }`, `PATCH /v1/saved-queries/<id>` takes any of the four fields, `DELETE /v1/saved-queries/<id>` answers `{ ok: true }`.
+`chart` is `null` (a table), `"table"`, `"bar"` or `"line"`; `pinned` puts it on the Overview as a tile. Saving never runs the
+query: the text goes through the sandbox's first layer (one SELECT or WITH, no denied words) and is kept as text; running one is
+`POST /v1/sql` like any other query, so every layer applies on every run and the web role runs a saved query exactly as it
+runs its own. Bounds: 200 queries, 12 pinned, names of 1 to 100 characters (unique, ignoring case), 64 KB bodies, 60 writes
+per minute per address; a bad body is a 400, a duplicate name or a full list a 409, an unknown id a 404, a write from the web
+role a 403. `created_by` / `updated_by` is the owner's Roblox name or "admin token", never a token.
 
 Settings: see [Settings](#settings) and `server/backend.env.example`.
 

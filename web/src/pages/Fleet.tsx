@@ -383,6 +383,18 @@ function Report({ data }: { data: FleetReports }) {
 	);
 }
 
+/**
+ * The Errors page for an alert: its build (and branch) over a window that reaches back to the alert (24 h, 7 d or 30 d).
+ * Undefined when the alert names no build (a server's own alert links its server in the Job column).
+ */
+export function alertErrorsHref(a: Pick<FleetAlert, "artifact" | "branch" | "at">, now = Date.now()): string | undefined {
+	if (!a.artifact) return undefined;
+	const age = now - a.at;
+	const window = age < 86_400_000 ? "24h" : age < 7 * 86_400_000 ? "7d" : "30d";
+	const params = new URLSearchParams({ build: a.artifact, ...(a.branch ? { branch: a.branch } : {}), ...(window !== "24h" ? { window } : {}) });
+	return `/errors?${params.toString()}`;
+}
+
 export const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
 	{ id: "at", header: "When (UTC)", type: "date", accessor: (a) => a.at, cell: (a) => fmtTime(a.at), className: "font-mono text-xs tabular-nums" },
 	{
@@ -425,6 +437,24 @@ export const ALERT_COLUMNS: DataColumn<FleetAlert>[] = [
 			) : null;
 		},
 		format: (_v, a) => (alertBundle(a.details) ? "bundle" : ""),
+	},
+	{
+		id: "errors",
+		header: "Errors",
+		title: "The error kinds of the alert's build",
+		accessor: (a) => alertErrorsHref(a) ?? null,
+		cell: (a) => {
+			const href = alertErrorsHref(a);
+			return href ? (
+				<Link to={href} className="text-xs underline-offset-2 hover:underline" title={`Errors from build ${a.artifact}`}>
+					Errors
+				</Link>
+			) : null;
+		},
+		sortable: false,
+		filter: false,
+		searchable: false,
+		exportValue: () => null,
 	},
 	{ id: "branch", header: "Branch", type: "enum", accessor: (a) => a.branch ?? null, defaultHidden: true },
 	{ id: "source", header: "Source", type: "enum", accessor: (a) => a.source ?? null, defaultHidden: true },
