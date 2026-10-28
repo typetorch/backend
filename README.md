@@ -1639,7 +1639,7 @@ API (beta: [Observability](https://create.roblox.com/docs/cloud/reference/featur
 
 Creator Hub's **play-through rate** (PTR) starts at the Home impression: the share of users shown the game's tile who
 went on to play. A game server never sees impressions, so our own events can't produce it (the Roblox page's
-play-through card is a stand-in). Roblox's [Analytics Query API](https://create.roblox.com/docs/cloud/guides/analytics)
+qualified first sessions card is ours and a different number). Roblox's [Analytics Query API](https://create.roblox.com/docs/cloud/guides/analytics)
 (Open Cloud, announced August 2026) serves Creator Hub's own numbers: with `OPENCLOUD_API_KEY` given the
 **`universe.analytics:read`** operation of the **universe-analytics** API system on the game and `TYPETORCH_UNIVERSE_ID`,
 the backend reads them for the Roblox page's **Acquisition, from Roblox** section (`GET /v1/roblox/analytics/acquisition`).
@@ -1652,7 +1652,7 @@ the backend reads them for the Roblox page's **Acquisition, from Roblox** sectio
   table). A slow query answers 202 and is polled on the operation path Roblox returns. A rate over the period is the
   mean of its daily values (Creator Hub's moving average); a count the sum of the days.
 - Roblox doesn't document a rate's scale: a series is read as fractions unless a day's value is above 1 (then percent).
-  The genre benchmarks (50th / 90th percentile) aren't in the API; type them under **Set benchmarks** (play-through)
+  The genre benchmarks (50th / 90th percentile) aren't in the API; type them under **Set benchmarks** (play-through rate, from Roblox)
   and the card marks where the rate sits. The API is read-only and has 4 years of history for these metrics.
 - Roblox allows 30 analytics queries a minute per key owner, shared with every other use of the key: a refresh is 6
   queries, the answer is cached an hour (the data is daily), one refresh runs at a time, at most 12 queries a minute

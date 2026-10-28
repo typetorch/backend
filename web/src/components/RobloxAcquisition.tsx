@@ -180,7 +180,7 @@ function Body({ r, bench, onSet }: { r: Acquisition; bench?: Benchmark; onSet():
 				</Table>
 			) : null}
 			<p className="text-xs text-muted-foreground">
-				Rates are the mean of Roblox's daily values; counts are unique users per day, summed. The per-source rate is plays over impressions for the period, not Roblox's own chart. Genre benchmarks aren't in the API: type Creator Hub's 50th / 90th under Set benchmarks (play-through). Fetched {new Date(r.fetchedAt).toLocaleString("en-US", { timeZone: "UTC", hour12: false })} UTC.
+				Rates are the mean of Roblox's daily values; counts are unique users per day, summed. The per-source rate is plays over impressions for the period, not Roblox's own chart. Genre benchmarks aren't in the API: type Creator Hub's 50th / 90th under Set benchmarks (play-through rate, from Roblox). Fetched {new Date(r.fetchedAt).toLocaleString("en-US", { timeZone: "UTC", hour12: false })} UTC.
 			</p>
 		</>
 	);

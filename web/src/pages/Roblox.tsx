@@ -314,13 +314,19 @@ function BenchmarkCard({ spec, current, previous, bench, days, onSet }: { spec: 
 type BenchmarkedCard = CardSpec & { key: BenchmarkKey };
 export const BENCHMARKED_CARDS = CARDS.filter((c): c is BenchmarkedCard => c.key !== null);
 
+/** The editor's rows: the benchmarked cards, then Roblox's own play-through rate (the Acquisition, from Roblox section). */
+export const BENCHMARK_ROWS: { key: BenchmarkKey; title: string; unit: string }[] = [
+	...BENCHMARKED_CARDS.map((c) => ({ key: c.key, title: c.title, unit: c.unit })),
+	{ key: "playThrough", title: "Play-through rate, from Roblox", unit: "%" },
+];
+
 function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave(b: Benchmarks): void; onClose(): void }) {
 	const [draft, setDraft] = useState<Record<string, { p50: string; p90: string }>>(() =>
-		Object.fromEntries(BENCHMARKED_CARDS.map((c) => [c.key, { p50: value[c.key]?.p50?.toString() ?? "", p90: value[c.key]?.p90?.toString() ?? "" }])),
+		Object.fromEntries(BENCHMARK_ROWS.map((c) => [c.key, { p50: value[c.key]?.p50?.toString() ?? "", p90: value[c.key]?.p90?.toString() ?? "" }])),
 	);
 	const save = () => {
 		const out: Benchmarks = {};
-		for (const c of BENCHMARKED_CARDS) {
+		for (const c of BENCHMARK_ROWS) {
 			const p50 = Number.parseFloat(draft[c.key]?.p50 ?? "");
 			const p90 = Number.parseFloat(draft[c.key]?.p90 ?? "");
 			if (Number.isFinite(p50) && Number.isFinite(p90) && p50 > 0 && p90 > 0) out[c.key] = { p50, p90 };
@@ -338,7 +344,7 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 				<span />
 				<span className="text-muted-foreground">50th</span>
 				<span className="text-muted-foreground">90th</span>
-				{BENCHMARKED_CARDS.map((c) => (
+				{BENCHMARK_ROWS.map((c) => (
 					<div key={c.key} className="contents">
 						<span>
 							{c.title} <span className="text-muted-foreground">({c.unit})</span>
@@ -357,7 +363,7 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 				))}
 			</div>
 			<div className="flex justify-end gap-2">
-				<Button variant="ghost" size="sm" onClick={() => setDraft(Object.fromEntries(BENCHMARKED_CARDS.map((c) => [c.key, { p50: "", p90: "" }])))}>
+				<Button variant="ghost" size="sm" onClick={() => setDraft(Object.fromEntries(BENCHMARK_ROWS.map((c) => [c.key, { p50: "", p90: "" }])))}>
 					Clear
 				</Button>
 				<Button size="sm" onClick={save}>

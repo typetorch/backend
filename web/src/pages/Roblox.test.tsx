@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api, ApiError } from "@/lib/api";
 import type { BenchmarkPeriod, BenchmarksResult, Filters, RealtimeResult, TrendsResult, TrendValues } from "@/lib/types";
-import Roblox, { BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, retentionSub, TRENDS } from "./Roblox";
+import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, retentionSub, TRENDS } from "./Roblox";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -135,6 +135,8 @@ describe("Roblox page", () => {
 			expect(within(card).queryByText("set benchmarks")).toBeNull();
 			expect(BENCHMARKED_CARDS.some((c) => c.id === "qualifiedFirstSessions")).toBe(false);
 			expect(BENCHMARKED_CARDS.length).toBe(CARDS.length - 1);
+			// The typed play-through benchmark is Creator Hub's PTR: the editor keeps it for Roblox's own rate.
+			expect(BENCHMARK_ROWS.map((r) => r.key)).toContain("playThrough");
 			// The D1 card does compare against the typed 50th / 90th.
 			const d1 = screen.getByText("Day 1 retention").closest("[data-slot=card]") as HTMLElement;
 			expect(within(d1).getByText(/percentile/)).toBeTruthy();
