@@ -30,7 +30,7 @@ is the same command.
 - [Routes and roles](#routes-and-roles) ([API docs for agents](#api-docs-for-agents): OpenAPI, Swagger UI, llms.txt)
 - [Deploy on Coolify](#deploy-on-coolify)
 - [Audit log](#audit-log)
-- [Backups and restore](#backups-and-restore)
+- [Backups and restore](#backups-and-restore) ([Disk space](#disk-space))
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
 - [The explorer](#the-explorer)
@@ -156,6 +156,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_WEB_DIR`, `TYPETORCH_EXPLORER` | `web/dist`, `on` | Where the built explorer is; `off` serves the API only. |
 | `TYPETORCH_AUDIT_KEEP_DAYS` | `365` | Days of [audit log](#audit-log) entries kept (also on the Settings page). |
 | `TYPETORCH_BACKUP_DIR`, `TYPETORCH_BACKUP_KEEP`, `TYPETORCH_BACKUP_HOURS` | `<data dir>/backups`, `3`, `24` | [Local backups](#backups-and-restore): where, how many are kept, hours between them (`0` = no schedule). |
+| `TYPETORCH_DISK_WARN_PERCENT`, `TYPETORCH_DISK_CRITICAL_PERCENT` | `15`, `5` | [Disk space](#disk-space): free percent of the data disk under which the explorer warns and a `disk_low` alert is raised (`0` = never). |
 | `TYPETORCH_RUNTIME_SETTINGS` | `on` | `off` ignores what the Settings page saved (the file stays) and makes the page read only: the way back in after locking yourself out. |
 
 </details>
@@ -505,7 +506,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
 | `GET /v1/admin/audit` | admin | the [audit log](#audit-log), newest first: `?actor=&action=&outcome=&since=&until=&before=&limit=&facets=1` |
-| `GET /v1/admin/backups`, `POST /v1/admin/backups` | admin | [backups](#backups-and-restore): the schedule and the local backups; `POST` makes one now (2 a minute with the download) |
+| `GET /v1/admin/backups`, `POST /v1/admin/backups` | admin | [backups](#backups-and-restore): the schedule, the local backups and the [disk](#disk-space); `POST` makes one now (2 a minute with the download) |
 | `POST /v1/admin/backups/download` | admin | a tar of a fresh backup, streamed (without the webhook URL and `instance.key`) |
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
@@ -677,6 +678,18 @@ curl -X POST -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" -o backup.tar htt
 5. Start the app. It loads `raw/incoming` and anything else accepted after the backup that is still on the volume, and
    finishes erasures the backup predates (`live.erased` drives the rewrite at start). Save the alert webhook again on the
    Settings page if the backup was a download.
+
+### Disk space
+
+The server measures the disk the data folder is on every 10 minutes (and at start). Under `TYPETORCH_DISK_WARN_PERCENT`
+(15 %) free it is a **warning**, under `TYPETORCH_DISK_CRITICAL_PERCENT` (5 %) **critical** (`0` turns a level off). The
+level is in `GET /v1/storage` and `GET /v1/admin/backups` (`disk: { freeBytes, totalBytes, freePercent, level, ... }`),
+in `/healthz` for the admin token, and the explorer shows it on the Overview's Storage card and the Settings page's
+**Backups and disk** card (a red alert under the threshold). With the fleet part on, a `disk_low` alert (source `server`)
+goes out like any other fleet alert, so the alert webhook carries it: one per level until it is acked or the disk has
+room again (a restart does not repeat an open one). To make room: shorter retention on the Settings page (events,
+recordings, error logs, the audit log), fewer local backups (`TYPETORCH_BACKUP_KEEP`), or a bigger volume. The local
+backups are hard links, so they cost little until the day files they share are pruned.
 
 ## The event bus
 
@@ -1117,7 +1130,7 @@ bun src/server/main.ts    # or, after bun run build: node dist/server/main.js   
 | `GET /v1/queries` | admin, web | the query list |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>?from=&to=&pid=&limit=` | admin, web | the nightly rollup tables |
 | `POST /v1/sql` | admin, web | `{ sql, limit? }` -> `{ columns, rows, truncated, ms }`: one read-only SELECT (below) |
-| `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), free disk space; measured at most every 30 s |
+| `GET /v1/storage` | admin | bytes and files per part of the data folder (live DuckDB + WAL, Parquet events / recordings with oldest and newest day, raw incoming / archive, rollups, fleet SQLite, SQL sandbox, spill), row counts (live and Parquet), raw archive bytes per day (today vs the 7 days before), the [disk](#disk-space) (free space and its level); measured at most every 30 s |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` (`flushSeconds`, `recordShare`, `techEvery`, `experiments`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure (below) |
 | `GET /healthz` | open / admin | `{ ok }`; with the admin role: `state`, memory, loader lag, row counts, fleet counts, the bus, error log counts |
