@@ -273,6 +273,15 @@ const ROUTES: Route[] = [
 	{ method: "get", path: "/v1/fleet/servers/{jobId}/metrics", tag: "fleet", roles: ["admin", "web"], summary: "One server's TPS / memory / players history", params: [JOB, q("since", TIME)] },
 	{ method: "get", path: "/v1/fleet/servers/{jobId}/bundles", tag: "fleet", roles: ["admin", "web"], summary: "One server's debug bundles", params: [JOB] },
 	{ method: "get", path: "/v1/fleet/bundles/{id}", tag: "fleet", roles: ["admin", "web"], summary: "One debug bundle (the web role gets no playerLogs)", params: [p("id", "the bundle id")] },
+	{
+		method: "get",
+		path: "/v1/fleet/deploys",
+		tag: "fleet",
+		roles: ["admin", "web"],
+		summary: "Deploy history, newest first: { deploys, next }",
+		params: [q("branch", "one branch"), q("before", "the page before this seq (the last page's next)", int()), q("limit", "rows (50, at most 100)", int())],
+	},
+	{ method: "get", path: "/v1/fleet/deploys/{seq}", tag: "fleet", roles: ["admin", "web"], summary: "One deploy: outcome, report, alerts, previous / next", params: [p("seq", "the deploy #seq", int())] },
 	{ method: "get", path: "/v1/fleet/reports", tag: "fleet", roles: ["admin", "web"], summary: "Deploy reports", params: [q("seq", "a deploy #seq", int()), q("artifact", "an artifact id"), q("branch", "one branch")] },
 	{
 		method: "get",

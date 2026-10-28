@@ -289,7 +289,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		maxKinds: () => runtime.get("errorMaxKinds"),
 		rowsPerDay: () => runtime.get("errorRowsPerDay"),
 	});
-	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
+	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert), deployKeepDays: () => runtime.get("deployKeepDays") }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
 	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
 	const remoteDebug = fleet ? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit") }) : undefined;
