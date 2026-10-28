@@ -42,6 +42,7 @@ import type {
 	WatchReply,
 } from "./types";
 import type { DeployMark, PerfServer, ServerMetricPoint } from "./perf";
+import type { DeployDetail, DeployPage } from "./deploys";
 
 /** The header the backend wants on cookie-authenticated requests that change something. */
 export const CSRF_HEADER = "x-typetorch";
@@ -243,6 +244,10 @@ export function createApi(options: ApiOptions = {}) {
 		/** Chart marks: releases, kernel publishes and backup refreshes in a window, oldest first (GET /v1/fleet/marks). */
 		fleetMarks: (params: { since?: number; until?: number; branch?: string; kinds?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ marks: DeployMark[] }>(`/v1/fleet/marks${qs(params)}`, signal).then((r) => r.marks),
+		/** The deploy history, newest first, one page (`before`: the last page's `next`). */
+		fleetDeploys: (params: { branch?: string; before?: number; limit?: number } = {}, signal?: AbortSignal) => get<DeployPage>(`/v1/fleet/deploys${qs(params)}`, signal),
+		/** One release: its outcome, its report while the reports are kept, its alerts, the releases before and after it. */
+		fleetDeploy: (seq: number, signal?: AbortSignal) => get<DeployDetail>(`/v1/fleet/deploys/${encodeURIComponent(String(seq))}`, signal),
 		/** Live servers with the heartbeat-metrics fields when the backend has them (tps, memMb...). */
 		perfServers: (branch?: string, signal?: AbortSignal) => get<{ servers: PerfServer[]; players: number }>(`/v1/fleet/servers${qs({ branch })}`, signal),
 		/** One server's TPS / memory history (the heartbeat-metrics contract; 404 on backends before it). */

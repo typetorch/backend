@@ -21,6 +21,7 @@ import {
 	Gauge,
 	LayoutDashboard,
 	ListFilter,
+	Rocket,
 	Server,
 	Settings,
 	Terminal,
@@ -80,6 +81,7 @@ export const NAV_GROUPS: NavGroup[] = [
 		label: "Observe & troubleshoot",
 		items: [
 			{ label: "Fleet", path: "/fleet", icon: Server, noFilters: true, also: ["/servers"] },
+			{ label: "Deploys", path: "/deploys", icon: Rocket, noFilters: true },
 			{ label: "Errors", path: "/errors", icon: Bug, noFilters: true },
 			{ label: "Performance", path: "/performance", icon: Gauge },
 		],

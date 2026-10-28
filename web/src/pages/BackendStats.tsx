@@ -9,12 +9,15 @@ import { Pause, Play } from "lucide-react";
 import { useMemo, useState } from "react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { DataTable, type DataColumn } from "@/components/data-table";
+import { DeployMarksToggle, MarkHoverCard, markerLines, useDeployMarks, useOpenDeploy, type MarkHover } from "@/components/DeployMarkers";
 import { EmptyState, ErrorState, KeyValue, LoadingBlock, Metric, PageHeader, Section } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
+import { groupMarks } from "@/lib/deploys";
 import { fmtBytes, fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
+import type { DeployMark } from "@/lib/perf";
 import type { BackendStats, RouteGroup, RouteStats, StatsBucket, StatsWindow } from "@/lib/types";
 
 export const BACKEND_STATS_KEY = ["backend-stats"] as const;
@@ -108,14 +111,35 @@ interface Series {
 	color: string;
 }
 
-function StatsChart({ label, rows, series, format, history }: { label: string; rows: StatsRow[]; series: Series[]; format(v: number): string; history: History }) {
+function StatsChart({
+	label,
+	rows,
+	series,
+	format,
+	history,
+	marks = [],
+	onMarkClick,
+}: {
+	label: string;
+	rows: StatsRow[];
+	series: Series[];
+	format(v: number): string;
+	history: History;
+	/** Deploy markers (game releases) in the chart's window. */
+	marks?: DeployMark[];
+	onMarkClick?(mark: DeployMark): void;
+}) {
 	const config: ChartConfig = Object.fromEntries(series.map((s) => [s.id, { label: s.label, color: s.color }]));
+	const [hover, setHover] = useState<MarkHover | null>(null);
+	const first = rows[0]?.t ?? 0;
+	const last = rows[rows.length - 1]?.t ?? 0;
+	const groups = groupMarks(marks, (m) => (m.at >= first && m.at <= last ? m.at : undefined));
 	const tick = (t: number) => {
 		const iso = new Date(t).toISOString();
 		return history === "seconds" ? iso.slice(11, 19) : iso.slice(11, 16);
 	};
 	return (
-		<div role="figure" aria-label={label}>
+		<div className="relative" role="figure" aria-label={label}>
 			<ChartContainer config={config} className="aspect-auto h-48 w-full">
 				<LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
 					<CartesianGrid vertical={false} />
@@ -136,8 +160,10 @@ function StatsChart({ label, rows, series, format, history }: { label: string; r
 					{series.map((s) => (
 						<Line key={s.id} dataKey={s.id} name={s.id} stroke={`var(--color-${s.id})`} strokeWidth={1.75} dot={false} isAnimationActive={false} connectNulls={false} />
 					))}
+					{markerLines(groups, { onHover: setHover, ...(onMarkClick ? { onClick: onMarkClick } : {}) })}
 				</LineChart>
 			</ChartContainer>
+			<MarkHoverCard hover={hover} {...(onMarkClick ? { clickHint: "Click: open the deploy" } : {})} />
 		</div>
 	);
 }
@@ -176,6 +202,11 @@ export default function BackendStatsPage() {
 	const data = stats.data;
 	const rows = useMemo(() => (data ? timeline(data, history) : []), [data, history]);
 	const historyTitle = HISTORIES.find((h) => h.id === history)?.title ?? "";
+	// Game releases on the charts (every branch): did a deploy change the load?
+	const span = history === "seconds" ? 2 * 60_000 : 60 * 60_000;
+	const deploys = useDeployMarks({ from: Date.now() - span, to: Date.now() });
+	const openDeploy = useOpenDeploy();
+	const markProps = { marks: deploys.marks, onMarkClick: openDeploy };
 
 	return (
 		<div className="space-y-4">
@@ -191,6 +222,7 @@ export default function BackendStatsPage() {
 								</ToggleGroupItem>
 							))}
 						</ToggleGroup>
+						<DeployMarksToggle {...deploys} />
 						<Button variant={live ? "default" : "outline"} size="sm" onClick={() => setLive((v) => !v)} aria-pressed={live} title={live ? "Updating every 2 seconds. Click to pause." : "Paused. Click to update every 2 seconds."}>
 							{live ? <Pause /> : <Play />}
 							{live ? "Live" : "Paused"}
@@ -214,10 +246,11 @@ export default function BackendStatsPage() {
 
 					<div className="grid gap-4 lg:grid-cols-2">
 						<Section title="Requests per second" description={historyTitle}>
-							<StatsChart label="Requests per second" history={history} rows={rows} format={perSecond} series={[{ id: "requests", label: "Requests / s", color: C(1) }, { id: "errors", label: "5xx / s", color: C(5) }]} />
+							<StatsChart {...markProps} label="Requests per second" history={history} rows={rows} format={perSecond} series={[{ id: "requests", label: "Requests / s", color: C(1) }, { id: "errors", label: "5xx / s", color: C(5) }]} />
 						</Section>
 						<Section title="Queries and inserts per second" description={historyTitle}>
 							<StatsChart
+								{...markProps}
 								label="Queries and inserts per second"
 								history={history}
 								rows={rows}
@@ -232,16 +265,16 @@ export default function BackendStatsPage() {
 							/>
 						</Section>
 						<Section title="Request latency" description={`${historyTitle}. Streams and long-polls are left out.`}>
-							<StatsChart label="Request latency" history={history} rows={rows} format={ms} series={[{ id: "p50", label: "p50", color: C(1) }, { id: "p90", label: "p90", color: C(3) }, { id: "p99", label: "p99", color: C(5) }]} />
+							<StatsChart {...markProps} label="Request latency" history={history} rows={rows} format={ms} series={[{ id: "p50", label: "p50", color: C(1) }, { id: "p90", label: "p90", color: C(3) }, { id: "p99", label: "p99", color: C(5) }]} />
 						</Section>
 						<Section title="DuckDB statement latency" description={historyTitle}>
-							<StatsChart label="DuckDB statement latency" history={history} rows={rows} format={ms} series={[{ id: "duckP50", label: "p50", color: C(1) }, { id: "duckP99", label: "p99", color: C(5) }]} />
+							<StatsChart {...markProps} label="DuckDB statement latency" history={history} rows={rows} format={ms} series={[{ id: "duckP50", label: "p50", color: C(1) }, { id: "duckP99", label: "p99", color: C(5) }]} />
 						</Section>
 						<Section title="Memory" description={`${historyTitle}. RSS is the whole process; the heap is JavaScript's.`}>
-							<StatsChart label="Memory" history={history} rows={rows} format={mb} series={[{ id: "rss", label: "RSS", color: C(1) }, { id: "heap", label: "Heap used", color: C(2) }, { id: "external", label: "Native, buffers", color: C(4) }]} />
+							<StatsChart {...markProps} label="Memory" history={history} rows={rows} format={mb} series={[{ id: "rss", label: "RSS", color: C(1) }, { id: "heap", label: "Heap used", color: C(2) }, { id: "external", label: "Native, buffers", color: C(4) }]} />
 						</Section>
 						<Section title="CPU and event loop lag" description={`${historyTitle}. Lag: how late the once-a-second tick came (the worst in the bucket).`}>
-							<StatsChart label="CPU and event loop lag" history={history} rows={rows} format={(v) => fmtNum(v, 1)} series={[{ id: "cpu", label: "CPU %", color: C(1) }, { id: "lag", label: "Loop lag ms", color: C(5) }]} />
+							<StatsChart {...markProps} label="CPU and event loop lag" history={history} rows={rows} format={(v) => fmtNum(v, 1)} series={[{ id: "cpu", label: "CPU %", color: C(1) }, { id: "lag", label: "Loop lag ms", color: C(5) }]} />
 						</Section>
 					</div>
 

@@ -2,8 +2,12 @@
  * A small per-day bar chart (one series; the card title names it). Days without data show as zero. Windows of a day or
  * less use the same chart per step (1 min, 5 min, 1 h): labels are "YYYY-MM-DD hh:mm" and the axis shows the time.
  */
+import { useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { MarkHoverCard, markerLines, type MarkHover } from "@/components/DeployMarkers";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
+import { groupMarks, placeOnLabels } from "@/lib/deploys";
+import type { DeployMark } from "@/lib/perf";
 
 export interface DayPoint {
 	date: string;
@@ -42,23 +46,44 @@ export function fillSteps(points: { t: number; value: number }[], fromMs: number
 /** "10-05" for a day, "17:05" for a step inside a day. */
 const tick = (d: string) => (d.length > 10 ? d.slice(11) : d.slice(5));
 
-export function DayBars({ data, label, decimals = 0, color = "var(--chart-1)" }: { data: DayPoint[]; label: string; decimals?: number; color?: string }) {
+export function DayBars({
+	data,
+	label,
+	decimals = 0,
+	color = "var(--chart-1)",
+	marks = [],
+	onMarkClick,
+}: {
+	data: DayPoint[];
+	label: string;
+	decimals?: number;
+	color?: string;
+	/** Deploy markers: each on the bar (day or step) it falls in. */
+	marks?: DeployMark[];
+	onMarkClick?(mark: DeployMark): void;
+}) {
 	const config: ChartConfig = { value: { label, color } };
+	const [hover, setHover] = useState<MarkHover | null>(null);
+	const groups = useMemo(() => (marks.length ? groupMarks(marks, placeOnLabels(data.map((d) => d.date))) : []), [marks, data]);
 	return (
-		<ChartContainer config={config} className="aspect-auto h-40 w-full">
-			<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={2}>
-				<CartesianGrid vertical={false} />
-				<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={tick} />
-				<YAxis
-					tickLine={false}
-					axisLine={false}
-					width={40}
-					allowDecimals={decimals > 0}
-					tickFormatter={(v: number) => (decimals ? v.toFixed(decimals) : String(v))}
-				/>
-				<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(d) => String(d)} />} />
-				<Bar dataKey="value" fill="var(--color-value)" radius={[4, 4, 0, 0]} maxBarSize={28} isAnimationActive={false} />
-			</BarChart>
-		</ChartContainer>
+		<div className="relative">
+			<ChartContainer config={config} className="aspect-auto h-40 w-full">
+				<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={2}>
+					<CartesianGrid vertical={false} />
+					<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={tick} />
+					<YAxis
+						tickLine={false}
+						axisLine={false}
+						width={40}
+						allowDecimals={decimals > 0}
+						tickFormatter={(v: number) => (decimals ? v.toFixed(decimals) : String(v))}
+					/>
+					<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(d) => String(d)} />} />
+					<Bar dataKey="value" fill="var(--color-value)" radius={[4, 4, 0, 0]} maxBarSize={28} isAnimationActive={false} />
+					{markerLines(groups, { onHover: setHover, ...(onMarkClick ? { onClick: onMarkClick } : {}) })}
+				</BarChart>
+			</ChartContainer>
+			<MarkHoverCard hover={hover} {...(onMarkClick ? { clickHint: "Click: open the deploy" } : {})} />
+		</div>
 	);
 }

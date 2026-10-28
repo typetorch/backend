@@ -3,13 +3,16 @@
  * heartbeats) and the kernel's status() on request (op `status`, what the dev menu's Server > Status shows).
  */
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { DeployMarksToggle, MarkHoverCard, markerLines, useDeployMarks, useOpenDeploy, type MarkHover } from "@/components/DeployMarkers";
 import { EmptyState, ErrorState, JsonBlock, KeyValue, LoadingBlock } from "@/components/common";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { api, ApiError } from "@/lib/api";
 import { fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
+import { groupMarks } from "@/lib/deploys";
 import type { RemoteState } from "@/lib/remote-debug";
-import type { ServerMetricPoint } from "@/lib/perf";
+import type { DeployMark, ServerMetricPoint } from "@/lib/perf";
 import type { RemoteStatus } from "@/lib/types";
 import { RemoteBar } from "./shared";
 
@@ -54,7 +57,12 @@ function MetricChart({
 	digits,
 	minMax,
 	windowText,
+	marks = [],
+	onMarkClick,
 }: {
+	/** Deploy markers in the chart's window. */
+	marks?: DeployMark[];
+	onMarkClick?(mark: DeployMark): void;
 	title: string;
 	unit: string;
 	points: ServerMetricPoint[];
@@ -70,6 +78,9 @@ function MetricChart({
 	const first = points.length ? points[0].t : 0;
 	const xTicks = timeTicks(first, last?.t ?? first);
 	const yTicks = valueTicks(values.length ? Math.max(...values) : 0, minMax);
+	const [hover, setHover] = useState<MarkHover | null>(null);
+	const end = last?.t ?? first;
+	const groups = groupMarks(marks, (m) => (m.at >= first && m.at <= end ? m.at : undefined));
 	return (
 		<figure className="min-w-0 space-y-1" aria-label={`${title} over ${windowText}`}>
 			<figcaption className="flex items-baseline justify-between gap-2 text-sm">
@@ -79,37 +90,41 @@ function MetricChart({
 				</span>
 			</figcaption>
 			{values.length ? (
-				<ChartContainer config={config} className="aspect-auto h-40 w-full">
-					<LineChart data={points} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
-						<CartesianGrid vertical={false} />
-						<XAxis
-							dataKey="t"
-							type="number"
-							scale="time"
-							domain={["dataMin", "dataMax"]}
-							ticks={xTicks}
-							tickLine={false}
-							axisLine={false}
-							tickMargin={6}
-							tickFormatter={timeLabel((last?.t ?? first) - first)}
-						/>
-						<YAxis tickLine={false} axisLine={false} width={44} domain={[0, yTicks[4]]} ticks={yTicks} interval={0} tickFormatter={(v: number) => fmtNum(v, 1)} />
-
-						<ChartTooltip
-							content={
-								<ChartTooltipContent
-									labelFormatter={(_, p) => `${fmtTime(Number(p?.[0]?.payload?.t)).slice((last?.t ?? first) - first > 20 * 3_600_000 ? 5 : 11, 19)} UTC`}
-									formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${typeof v === "number" ? `${fmtNum(v, digits)} ${unit}` : "–"}`}
-								/>
-							}
-						/>
-						{/* In the series' own order (Recharts sorts by name otherwise). */}
-						{series.length > 1 ? <ChartLegend itemSorter={null} content={<ChartLegendContent />} /> : null}
-						{series.map((s) => (
-							<Line key={s.key} dataKey={s.key} stroke={`var(--color-${s.key})`} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
-						))}
-					</LineChart>
-				</ChartContainer>
+				<div className="relative">
+					<ChartContainer config={config} className="aspect-auto h-40 w-full">
+						<LineChart data={points} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+							<CartesianGrid vertical={false} />
+							<XAxis
+								dataKey="t"
+								type="number"
+								scale="time"
+								domain={["dataMin", "dataMax"]}
+								ticks={xTicks}
+								tickLine={false}
+								axisLine={false}
+								tickMargin={6}
+								tickFormatter={timeLabel((last?.t ?? first) - first)}
+							/>
+							<YAxis tickLine={false} axisLine={false} width={44} domain={[0, yTicks[4]]} ticks={yTicks} interval={0} tickFormatter={(v: number) => fmtNum(v, 1)} />
+	
+							<ChartTooltip
+								content={
+									<ChartTooltipContent
+										labelFormatter={(_, p) => `${fmtTime(Number(p?.[0]?.payload?.t)).slice((last?.t ?? first) - first > 20 * 3_600_000 ? 5 : 11, 19)} UTC`}
+										formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${typeof v === "number" ? `${fmtNum(v, digits)} ${unit}` : "–"}`}
+									/>
+								}
+							/>
+							{/* In the series' own order (Recharts sorts by name otherwise). */}
+							{series.length > 1 ? <ChartLegend itemSorter={null} content={<ChartLegendContent />} /> : null}
+							{series.map((s) => (
+								<Line key={s.key} dataKey={s.key} stroke={`var(--color-${s.key})`} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
+							))}
+							{markerLines(groups, { onHover: setHover, ...(onMarkClick ? { onClick: onMarkClick } : {}) })}
+						</LineChart>
+					</ChartContainer>
+					<MarkHoverCard hover={hover} {...(onMarkClick ? { clickHint: "Click: open the deploy" } : {})} />
+				</div>
 			) : (
 				<p className="flex h-40 items-center justify-center rounded-lg border border-dashed px-3 text-center text-xs text-muted-foreground">No readings in this window.</p>
 			)}
@@ -121,7 +136,11 @@ function MetricChart({
  * TPS, memory and players over the last hour, from the fleet metrics; with `since` (a server that isn't live: where its
  * metrics start) over its whole life, older parts from the backend's 5-minute rollups (kept 30 days).
  */
-export function ServerCharts({ job, live, since }: { job: string; live: boolean; since?: number }) {
+export function ServerCharts({ job, live, since, branch }: { job: string; live: boolean; since?: number; branch?: string | undefined }) {
+	// Deploy markers of the server's branch (and place-wide kernel / backup marks) over the charts' window.
+	const deploys = useDeployMarks({ from: since ?? Date.now() - CHART_MINUTES * 60_000, to: Date.now() }, branch);
+	const openDeploy = useOpenDeploy();
+	const markProps = { marks: deploys.marks, onMarkClick: openDeploy };
 	const metrics = useQuery({
 		queryKey: ["fleet", "server-metrics", job, since ?? "last-hour"],
 		queryFn: ({ signal }) => api.serverMetrics(job, since ?? Date.now() - CHART_MINUTES * 60_000, signal),
@@ -138,31 +157,40 @@ export function ServerCharts({ job, live, since }: { job: string; live: boolean;
 	if (!points.length)
 		return <EmptyState>{since !== undefined ? "No TPS or memory readings kept for this server (rollups are kept 30 days)." : "No TPS or memory readings in the last hour (kernel 0.4.2+ sends them with every heartbeat)."}</EmptyState>;
 	return (
-		<div className="grid gap-4 md:grid-cols-3">
-			<MetricChart
-				windowText={windowText}
-				title="Server TPS"
-				unit="TPS"
-				digits={1}
-				minMax={60}
-				points={points}
-				series={[
-					{ key: "tps", label: "Average", color: "var(--chart-1)" },
-					{ key: "tpsMin", label: "Slowest second", color: "var(--chart-2)" },
-				]}
-			/>
-			<MetricChart
-				windowText={windowText}
-				title="Memory"
-				unit="MB"
-				digits={0}
-				points={points}
-				series={[
-					{ key: "memMb", label: "Total", color: "var(--chart-1)" },
-					{ key: "luaMb", label: "Lua heap", color: "var(--chart-2)" },
-				]}
-			/>
-			<MetricChart windowText={windowText} title="Players" unit="players" digits={0} minMax={4} points={points} series={[{ key: "players", label: "Players", color: "var(--chart-1)" }]} />
+		<div className="space-y-2">
+			{deploys.all.length ? (
+				<div className="flex justify-end">
+					<DeployMarksToggle {...deploys} />
+				</div>
+			) : null}
+			<div className="grid gap-4 md:grid-cols-3">
+				<MetricChart
+					{...markProps}
+					windowText={windowText}
+					title="Server TPS"
+					unit="TPS"
+					digits={1}
+					minMax={60}
+					points={points}
+					series={[
+						{ key: "tps", label: "Average", color: "var(--chart-1)" },
+						{ key: "tpsMin", label: "Slowest second", color: "var(--chart-2)" },
+					]}
+				/>
+				<MetricChart
+					{...markProps}
+					windowText={windowText}
+					title="Memory"
+					unit="MB"
+					digits={0}
+					points={points}
+					series={[
+						{ key: "memMb", label: "Total", color: "var(--chart-1)" },
+						{ key: "luaMb", label: "Lua heap", color: "var(--chart-2)" },
+					]}
+				/>
+				<MetricChart {...markProps} windowText={windowText} title="Players" unit="players" digits={0} minMax={4} points={points} series={[{ key: "players", label: "Players", color: "var(--chart-1)" }]} />
+			</div>
 		</div>
 	);
 }
@@ -208,13 +236,25 @@ export function StatusFacts({ data }: { data: RemoteStatus }) {
 
 /** `status` is the page's: it is fetched once as soon as the server polls (the header shows its place version). */
 // The charts render only while the tab shows (a chart in a hidden panel has no size and warns on every resize).
-export function StatusTab({ active, job, live, status }: { active: boolean; job: string; live: boolean; status: RemoteState<RemoteStatus> & { run: () => Promise<unknown> } }) {
+export function StatusTab({
+	active,
+	job,
+	live,
+	status,
+	branch,
+}: {
+	active: boolean;
+	job: string;
+	live: boolean;
+	status: RemoteState<RemoteStatus> & { run: () => Promise<unknown> };
+	branch?: string | undefined;
+}) {
 	const run = status.run;
 	return (
 		<div className="space-y-6">
 			<section className="space-y-2">
 				<h2 className="text-sm font-medium">Last {CHART_MINUTES} minutes</h2>
-				{active ? <ServerCharts job={job} live={live} /> : null}
+				{active ? <ServerCharts job={job} live={live} branch={branch} /> : null}
 			</section>
 			<section className="space-y-3">
 				<h2 className="text-sm font-medium">Kernel status</h2>

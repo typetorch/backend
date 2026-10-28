@@ -1,4 +1,5 @@
 import { DayBars, fillDays, fillSteps, type DayPoint } from "@/components/DayBars";
+import { DeployMarksToggle, useDeployMarks, useOpenDeploy } from "@/components/DeployMarkers";
 import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { isReadOnly, useAuth } from "@/lib/auth";
@@ -32,7 +33,10 @@ export function overviewBars(data: OverviewResult, key: (typeof CHARTS)[number][
 	return { points: fillDays(data.days.map((d) => ({ date: d.date, value: d[key] })), data.from, data.to), per: "per day (UTC), by the day a session started" };
 }
 
-function Body({ data }: { data: OverviewResult }) {
+function Body({ data, branch }: { data: OverviewResult; branch: string | undefined }) {
+	// Deploy markers on every chart, on the bar (day or step) each release falls in; a click opens its deploy page.
+	const deploys = useDeployMarks({ from: Date.parse(data.from), to: Date.parse(data.to) }, branch);
+	const openDeploy = useOpenDeploy();
 	return (
 		<>
 			<div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
@@ -45,12 +49,17 @@ function Body({ data }: { data: OverviewResult }) {
 				<Metric label="Avg session" value={fmtMinutes(data.avgSessionMinutes)} />
 				<Metric label="Playtime per player" value={fmtMinutes(data.playtimePerPlayerMinutes)} />
 			</div>
+			{deploys.all.length ? (
+				<div className="flex justify-end">
+					<DeployMarksToggle {...deploys} />
+				</div>
+			) : null}
 			<div className="grid gap-3 lg:grid-cols-2">
 				{CHARTS.map((c) => {
 					const { points, per } = overviewBars(data, c.key);
 					return (
 						<Section key={c.key} title={c.label} description={per}>
-							<DayBars label={c.label} decimals={c.decimals} data={points} />
+							<DayBars label={c.label} decimals={c.decimals} data={points} marks={deploys.marks} onMarkClick={openDeploy} />
 						</Section>
 					);
 				})}
@@ -60,15 +69,16 @@ function Body({ data }: { data: OverviewResult }) {
 }
 
 export default function Overview() {
-	const { state } = useFilters();
+	const { state, apiFilters } = useFilters();
 	const q = useAnalytics("overview");
+	const branch = typeof apiFilters.branch === "string" ? apiFilters.branch : undefined;
 	// The storage card is the server's disk: owners only (the backend refuses it to a viewer).
 	const readOnly = isReadOnly(useAuth());
 	return (
 		<>
 			<PageHeader title="Overview" description={`Players, sessions and playtime, ${describeRange(state)}. Session length = first to last event.`} />
 			<QueryState query={q} loadingRows={6}>
-				{(data) => <Body data={data} />}
+				{(data) => <Body data={data} branch={branch} />}
 			</QueryState>
 			{readOnly ? null : <StorageCard />}
 		</>

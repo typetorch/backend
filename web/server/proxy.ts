@@ -112,6 +112,7 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "GET", path: /^\/v1\/fleet\/(servers|reports|alerts|stream)$/ },
 	// The Performance page: chart marks, and one server's TPS / memory history (the heartbeat metrics update).
 	{ method: "GET", path: /^\/v1\/fleet\/marks$/ },
+	{ method: "GET", path: /^\/v1\/fleet\/deploys(\/\d{1,15})?$/ },
 	{ method: "GET", path: /^\/v1\/fleet\/servers\/[A-Za-z0-9_.:{}%-]{1,200}\/metrics$/ },
 	// Plans/25, the server page: one server (its metrics: the rule above), remote debug. The POSTs only ask for read-only
 	// answers (v1 has no op that changes the game server); the backend audits each command.

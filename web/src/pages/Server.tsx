@@ -276,7 +276,7 @@ function ServerView({ job }: { job: string }) {
 					{robloxLogs}
 					{data.server || since !== undefined ? (
 						<Section title="Its whole life" description="TPS, memory and players from its heartbeats (5-minute averages past the last 2 hours; kept 30 days).">
-							<ServerCharts job={job} live={false} since={since} />
+							<ServerCharts job={job} live={false} since={since} branch={data.server?.branch ?? undefined} />
 						</Section>
 					) : null}
 				</>
@@ -303,7 +303,7 @@ function ServerView({ job }: { job: string }) {
 							</TabsList>
 						</div>
 						<TabsContent value="status" forceMount className="data-[state=inactive]:hidden">
-							<StatusTab active={tab === "status"} job={job} live={live} status={status} />
+							<StatusTab active={tab === "status"} job={job} live={live} status={status} branch={data.server?.branch ?? undefined} />
 						</TabsContent>
 						<TabsContent value="logs" forceMount className="data-[state=inactive]:hidden">
 							<LogsTab active={tab === "logs"} players={players} request={logRequest} />

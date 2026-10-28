@@ -10,6 +10,7 @@ import { cn } from "cn";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
+import { DeployMarksToggle, MarkHoverCard, markerLines, useDeployMarks, useOpenDeploy, type MarkHover } from "@/components/DeployMarkers";
 import { UserIdLink } from "@/components/Identity";
 import { PlayerPageLink, playerLabel } from "@/components/PlayerLink";
 import { Sparkline } from "@/components/Sparkline";
@@ -19,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { api, type ErrorParams } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtTime, plural, shortId } from "@/lib/format";
+import { bucketIndex, groupMarks } from "@/lib/deploys";
 import { useParam } from "@/lib/hooks";
 import type { ErrorDetail, ErrorKind, ErrorList, ErrorPlayer, ErrorPlayers } from "@/lib/types";
 
@@ -176,20 +178,37 @@ function Breakdown({ title, rows }: { title: string; rows: { label: string; n: n
 	);
 }
 
-function SeriesBars({ detail }: { detail: ErrorDetail }) {
+function SeriesBars({ detail, branch }: { detail: ErrorDetail; branch?: string }) {
 	const config: ChartConfig = { n: { label: "Errors", color: "var(--status-critical)" } };
 	const daily = detail.window.bucketSeconds >= 86_400;
 	const data = detail.series.map((p) => ({ t: p.t, n: p.n, label: daily ? p.t.slice(5, 10) : p.t.slice(5, 16).replace("T", " ") }));
+	// Deploy markers on the bar each release falls in (a click opens its deploy page).
+	const deploys = useDeployMarks({ from: Date.parse(detail.window.from), to: Date.parse(detail.window.to) }, branch);
+	const openDeploy = useOpenDeploy();
+	const [hover, setHover] = useState<MarkHover | null>(null);
+	const starts = detail.series.map((p) => Date.parse(p.t));
+	const groups = groupMarks(deploys.marks, (m) => data[bucketIndex(m.at, starts)]?.label);
 	return (
-		<ChartContainer config={config} className="aspect-auto h-40 w-full">
-			<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={1}>
-				<CartesianGrid vertical={false} />
-				<XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} />
-				<YAxis tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-				<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(l) => String(l)} />} />
-				<Bar dataKey="n" fill="var(--color-n)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
-			</BarChart>
-		</ChartContainer>
+		<div className="space-y-1">
+			{deploys.all.length ? (
+				<div className="flex justify-end">
+					<DeployMarksToggle {...deploys} />
+				</div>
+			) : null}
+			<div className="relative">
+				<ChartContainer config={config} className="aspect-auto h-40 w-full">
+					<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={1}>
+						<CartesianGrid vertical={false} />
+						<XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} />
+						<YAxis tickLine={false} axisLine={false} width={40} allowDecimals={false} />
+						<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(l) => String(l)} />} />
+						<Bar dataKey="n" fill="var(--color-n)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+						{markerLines(groups, { onHover: setHover, onClick: openDeploy })}
+					</BarChart>
+				</ChartContainer>
+				<MarkHoverCard hover={hover} clickHint="Click: open the deploy" />
+			</div>
+		</div>
 	);
 }
 
@@ -276,7 +295,7 @@ function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
 							<span className="font-mono text-xs">{d.kind.fp}</span>
 						</KeyValue>
 					</div>
-					<SeriesBars detail={d} />
+					<SeriesBars detail={d} {...(params.branch ? { branch: params.branch } : {})} />
 					<div className="space-y-1">
 						<div className="text-xs font-medium text-muted-foreground">Players who hit it</div>
 						<KindPlayers fp={fp} params={params} />
