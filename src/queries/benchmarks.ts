@@ -57,6 +57,20 @@ interface Rate {
 	of: number;
 }
 
+/**
+ * A retention rate over a window of cohort days, and how much of that window the data covers: `complete` when there
+ * were events from the first cohort day on, `partial` when the events start inside the window (`dataFrom`, the cohorts
+ * before it are missing), `none` when they start after it (a game tracked for 10 days has no D30 cohort yet) or there
+ * are no events at all (`dataFrom` null). `rate` / `count` / `of` are 0 when `none`.
+ */
+export interface Retention extends Rate {
+	cohortFrom: string;
+	cohortTo: string;
+	history: "complete" | "partial" | "none";
+	/** The first UTC day with a session in the data read for the cohorts (the first cohort day at the earliest). */
+	dataFrom: string | null;
+}
+
 /** Roblox keeps 30% of developer product and pass sales; the creator gets the rest. */
 export const DEFAULT_CREATOR_SHARE = 0.7;
 
@@ -119,9 +133,9 @@ export interface BenchmarkPeriod {
 	/** Roblox's "Average playtime": per day playtime / DAU, the mean of the days. Minutes. */
 	avgPlaytimeMinutes: number | null;
 	/** New players by first play date, back on day 1 / 7 / 30: the `days` latest cohorts whose day 1 / 7 / 30 is over. */
-	d1Retention: Rate & { cohortFrom: string; cohortTo: string };
-	d7Retention: Rate & { cohortFrom: string; cohortTo: string };
-	d30Retention: Rate & { cohortFrom: string; cohortTo: string };
+	d1Retention: Retention;
+	d7Retention: Retention;
+	d30Retention: Retention;
 	/** Paying DAU / DAU per day, the mean of the days (count = payer-days, of = player-days). */
 	payerConversion: Rate;
 	/** Revenue / paying users per day, the mean of the days with payers; null without any. */
@@ -192,6 +206,9 @@ export const benchmarks = defineQuery<BenchmarkOptions, BenchmarksResult>({
 				`r AS (SELECT c.pid AS pid, c.cday AS cday, MAX(CASE WHEN a.day = c.cday + 1 THEN 1 ELSE 0 END) AS k1, MAX(CASE WHEN a.day = c.cday + 7 THEN 1 ELSE 0 END) AS k7, ` +
 				`MAX(CASE WHEN a.day = c.cday + 30 THEN 1 ELSE 0 END) AS k30 FROM c LEFT JOIN a ON a.pid = c.pid GROUP BY c.pid, c.cday) ` +
 				`SELECT cday, COUNT(*) AS cohort, SUM(k1) AS k1, SUM(k7) AS k7, SUM(k30) AS k30 FROM r GROUP BY cday ORDER BY cday ${lim(1000)}`,
+			// The first day with any session since the earliest cohort day read: tells a cohort window with no new
+			// players ("0 of 0") apart from one the data doesn't reach (tracking started later).
+			history: `WITH ${sessionDaysCte(ctx, cohortFrom, pTo)} SELECT MIN(day) AS first_day FROM a ${lim(1)}`,
 			mau:
 				`WITH ev AS (${playerEvents(ctx, f, mauFrom - SESSION_SLACK_MS, pTo, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp")}), ${SESSIONS_CTE}, ` +
 				`sd AS (SELECT pid, ${dayOf("t0")} AS day FROM s WHERE t0 >= ${int(mauFrom)} AND t0 < ${int(pTo)}) ` +
@@ -204,7 +221,8 @@ export const benchmarks = defineQuery<BenchmarkOptions, BenchmarksResult>({
 		const curStart = lastDay - o.days + 1;
 		const daily = new Map<number, Row>(rows.daily.map((r) => [num(r.day), r]));
 		const cohorts = new Map<number, Row>(rows.retention.map((r) => [num(r.cday), r]));
-		const retention = (k: 1 | 7 | 30, first: number, last: number) => ({
+		const firstDay = numOrNull(rows.history[0]?.first_day);
+		const retention = (k: 1 | 7 | 30, first: number, last: number): Retention => ({
 			...meanRate(
 				Array.from({ length: last - first + 1 }, (_, i) => {
 					const r = cohorts.get(first + i);
@@ -213,6 +231,8 @@ export const benchmarks = defineQuery<BenchmarkOptions, BenchmarksResult>({
 			),
 			cohortFrom: isoDay(first),
 			cohortTo: isoDay(last),
+			history: firstDay === null || firstDay > last ? "none" : firstDay > first ? "partial" : "complete",
+			dataFrom: firstDay === null ? null : isoDay(firstDay),
 		});
 		const period = (cur: 0 | 1): BenchmarkPeriod => {
 			const start = cur ? curStart : curStart - o.days;

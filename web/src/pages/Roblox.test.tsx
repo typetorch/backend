@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type { BenchmarkPeriod, BenchmarksResult, Filters, RealtimeResult, TrendsResult, TrendValues } from "@/lib/types";
-import Roblox, { CALCULATION_NOTES, CARDS, periodLabel, TRENDS } from "./Roblox";
+import Roblox, { BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, retentionSub, TRENDS } from "./Roblox";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -33,9 +33,9 @@ function period(from: string, to: string, over: Partial<BenchmarkPeriod> = {}): 
 		sessions: 90,
 		avgSessionMinutes: 12.5,
 		avgPlaytimeMinutes: 25,
-		d1Retention: { ...rate(3, 12), cohortFrom: "2026-10-01", cohortTo: "2026-10-07" },
-		d7Retention: { ...rate(1, 10), cohortFrom: "2026-09-25", cohortTo: "2026-10-01" },
-		d30Retention: { ...rate(2, 20), cohortFrom: "2026-09-02", cohortTo: "2026-09-08" },
+		d1Retention: { ...rate(3, 12), cohortFrom: "2026-10-01", cohortTo: "2026-10-07", history: "complete", dataFrom: "2026-08-01" },
+		d7Retention: { ...rate(1, 10), cohortFrom: "2026-09-25", cohortTo: "2026-10-01", history: "complete", dataFrom: "2026-08-01" },
+		d30Retention: { ...rate(2, 20), cohortFrom: "2026-09-02", cohortTo: "2026-09-08", history: "complete", dataFrom: "2026-08-01" },
 		payerConversion: { rate: 0.05, count: 4, of: 70 },
 		arppu: 70,
 		arpdau: 3.5,
@@ -102,7 +102,7 @@ describe("Roblox page", () => {
 		expect(await screen.findByText("280 Robux revenue (400 spent)")).toBeTruthy();
 		// The cards' first title, then the trends tab of the same name.
 		expect(screen.getAllByText("Average session time").length).toBe(2);
-		for (const title of ["Daily active users", "Monthly active users", "New users", "Day 1 retention", "Day 7 retention", "Day 30 retention", "Payer conversion", "ARPPU", "ARPDAU", "Average playtime", "Play-through rate (after join)"]) {
+		for (const title of ["Daily active users", "Monthly active users", "New users", "Day 1 retention", "Day 7 retention", "Day 30 retention", "Payer conversion", "ARPPU", "ARPDAU", "Average playtime", "Qualified first sessions"]) {
 			expect(screen.getAllByText(title).length).toBeGreaterThan(0);
 		}
 		expect(screen.getByText("12.5 min")).toBeTruthy();
@@ -115,10 +115,36 @@ describe("Roblox page", () => {
 		expect(screen.getByText("Average concurrent users")).toBeTruthy();
 		expect(screen.getByText("4.3")).toBeTruthy();
 		expect(screen.getByText(`${periodLabel(benchmarks.current)} vs ${periodLabel(benchmarks.previous)}`)).toBeTruthy();
-		// Estimates (revenue, payers, CCU) and our own numbers (play-through, join sources) carry a mark with the reason.
-		expect(document.querySelectorAll('button[aria-label^="Estimate: how it differs"]').length).toBe(4);
+		// Estimates (new users and the three retention cards: the SDK's first visit; revenue, payers, CCU) and our own numbers
+		// (qualified first sessions, join sources) carry a mark with the reason.
+		expect(document.querySelectorAll('button[aria-label^="Estimate: how it differs"]').length).toBe(8);
 		expect(document.querySelectorAll('button[aria-label^="Ours: how it differs"]').length).toBe(2);
+		expect(screen.getByText("6 of 12 first sessions, 5 min or longer")).toBeTruthy();
 	}, 60_000);
+
+	it("our qualified first sessions card takes no Roblox benchmark, and D30 says when the history is too short", async () => {
+		localStorage.setItem("tt-explorer-benchmarks", JSON.stringify({ d1: { p50: 20, p90: 35 }, playThrough: { p50: 10, p90: 20 } }));
+		try {
+			benchmarks.current.d30Retention = { rate: 0, count: 0, of: 0, cohortFrom: "2026-09-02", cohortTo: "2026-09-08", history: "none", dataFrom: "2026-09-20" };
+			benchmarks.current.d7Retention = { rate: 0.1, count: 1, of: 10, cohortFrom: "2026-09-25", cohortTo: "2026-10-01", history: "partial", dataFrom: "2026-09-27" };
+			mount();
+			const card = (await screen.findByText("Qualified first sessions")).closest("[data-slot=card]") as HTMLElement;
+			// No bar, no percentile, no "set benchmarks" link on our own metric, even with an old saved benchmark for it.
+			expect(within(card).queryByText(/percentile/)).toBeNull();
+			expect(within(card).queryByText("set benchmarks")).toBeNull();
+			expect(BENCHMARKED_CARDS.some((c) => c.id === "qualifiedFirstSessions")).toBe(false);
+			expect(BENCHMARKED_CARDS.length).toBe(CARDS.length - 1);
+			// The D1 card does compare against the typed 50th / 90th.
+			const d1 = screen.getByText("Day 1 retention").closest("[data-slot=card]") as HTMLElement;
+			expect(within(d1).getByText(/percentile/)).toBeTruthy();
+			// D30: the cohorts are older than the events.
+			expect(screen.getByText("not enough history: cohorts Sep 2 - Sep 8, events start Sep 20")).toBeTruthy();
+			expect(screen.getByText("1 of 10 new players (cohorts from Sep 27: events start then)")).toBeTruthy();
+		} finally {
+			localStorage.removeItem("tt-explorer-benchmarks");
+			benchmarks.current = period("2026-10-02T00:00:00.000Z", "2026-10-09T00:00:00.000Z");
+		}
+	});
 
 	it("explains how the numbers are calculated", async () => {
 		mount();
@@ -146,13 +172,22 @@ describe("Roblox page", () => {
 
 describe("definitions", () => {
 	it("every card explains Creator Hub's definition, and every mark says why it differs", () => {
-		expect(CARDS.map((c) => c.key)).toEqual(["dau", "mau", "newUsers", "sessionTime", "d1", "d7", "d30", "payer", "arppu", "arpdau", "playtime", "playThrough"]);
+		expect(CARDS.map((c) => c.id)).toEqual(["dau", "mau", "newUsers", "sessionTime", "d1", "d7", "d30", "payer", "arppu", "arpdau", "playtime", "qualifiedFirstSessions"]);
 		for (const c of CARDS) {
 			expect(c.info.length).toBeGreaterThan(20);
 			if (c.differs) expect(c.differs.why.length).toBeGreaterThan(20);
 		}
-		expect(CARDS.find((c) => c.key === "playThrough")?.differs?.label).toBe("Ours");
+		expect(CARDS.find((c) => c.id === "qualifiedFirstSessions")?.differs?.label).toBe("Ours");
+		for (const id of ["newUsers", "d1", "d7", "d30"]) expect(CARDS.find((c) => c.id === id)?.differs?.label).toBe("Estimate");
 		expect(TRENDS.map((t) => t.key)).toContain("sessionMinutes");
+	});
+
+	it("a retention line says when the history is missing or partial", () => {
+		const base = { rate: 0, count: 0, of: 0, cohortFrom: "2026-09-21", cohortTo: "2026-09-27" };
+		expect(retentionSub({ ...base, history: "none", dataFrom: "2026-10-10" })).toBe("not enough history: cohorts Sep 21 - Sep 27, events start Oct 10");
+		expect(retentionSub({ ...base, history: "none", dataFrom: null })).toBe("not enough history: cohorts Sep 21 - Sep 27, no events yet");
+		expect(retentionSub({ ...base, count: 3, of: 40, history: "partial", dataFrom: "2026-09-24" })).toBe("3 of 40 new players (cohorts from Sep 24: events start then)");
+		expect(retentionSub({ ...base, count: 3, of: 40, history: "complete", dataFrom: "2026-09-01" })).toBe("3 of 40 new players");
 	});
 
 	it("period labels are UTC days, the end exclusive", () => {

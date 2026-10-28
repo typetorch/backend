@@ -1101,7 +1101,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `players` | players seen in the range, most recent first or `sort: "robux"` for top spenders (pid, sessions, events, playtime, `robux` = Robux spent: distinct server-sent purchase rows, 0 for none); `search` = part of a pid | 30 days |
 | `values` | the branches, artifacts (newest first), channels and devices seen in the range, for filter pickers | 30 days |
 | `events` | the newest rows, optionally of one `kind` / `name` / `pid` (`limit` up to 1,000); `fleet` rows come without props | 7 days |
-| `benchmarks` | the last `days` (7) full UTC days vs the `days` before, as Creator Hub defines them ([Roblox parity](#roblox-parity)): DAU, MAU (the 30 days ending on the period's last day), new users, average session time, playtime per DAU, D1/D7/D30 (cohorts by first play date, the latest `days` whose day 1 / 7 / 30 is over), payer conversion, ARPPU, ARPDAU, Robux spent and revenue (`creatorShare`, 0.7), after-join play-through (ours: first sessions reaching `qualifiedMinutes`) | ends at `to` |
+| `benchmarks` | the last `days` (7) full UTC days vs the `days` before, as Creator Hub defines them ([Roblox parity](#roblox-parity)): DAU, MAU (the 30 days ending on the period's last day), new users, average session time, playtime per DAU, D1/D7/D30 (cohorts by first play date, the latest `days` whose day 1 / 7 / 30 is over), payer conversion, ARPPU, ARPDAU, Robux spent and revenue (`creatorShare`, 0.7), qualified first sessions (ours: first sessions reaching `qualifiedMinutes`); each retention rate says whether the events cover its cohort days (`history`: complete, partial or none, with `dataFrom`) | ends at `to` |
 | `realtime` | concurrent users per hour from fleet heartbeats (per minute, summed over servers, Studio left out; `ccuDays` 7): the peak minute and the average, and now; session time, client errors per session (tech/error from clients), client fps, server memory: the last `hours` (24) vs the hours before | 7 days |
 | `trends` | per full UTC day, `window`-day (7) moving averages of new users, DAU, session time, playtime per DAU, Robux, revenue and D1 (ratios: the mean of the daily values), in total and per join source (session/join `from`; past `maxSources` folded into `other`) | 28 days |
 | `perf-client` | client fps, memory and ping (tech/client) over time and per group: `by` = `none`, `dev` (device class), `input`, `screen` (viewport short side: `<400`, `400-599`, `600-799`, `800-1079`, `1080+`), `branch`, `art`; p10 (the plain 10th percentile), p50, p90 / p99 on the bad side, avg, n; the busiest `maxGroups` (8, at most 20). Step: the window's (`windowBucketMs`), or `bucketMinutes` (1-1440), or about `buckets` (10-400). At most 92 days and 400 steps | 7 days |
@@ -1130,11 +1130,15 @@ payer conversion = paying DAU / DAU, ARPPU, ARPDAU, D1/D7/D30) is the mean of it
 (per hour and over the window) and the mean of the minutes. Retention (here, in `retention` and in `roblox`) is by
 first play date, and a player is back on day N only when a later session *started* that day (a first session running
 past midnight isn't a return); `retention` and `roblox` leave Studio out too.
-What can't match, marked on the page: revenue is an estimate (logged purchase prices times `creatorShare`, 0.7; Creator Hub
-also counts passes bought outside the game, commissions and avatar items), payer conversion misses purchases made outside
-the game, CCU comes from heartbeats about once a minute, join sources are the game's own (no Home / Search split), and the
-play-through rate is ours (Creator Hub's starts at the impression). Creator Hub's own numbers settle a day or more after a
-day ends; ours don't wait.
+What can't match, marked on the page: new users and retention are estimates (`newp` is the first visit the SDK has seen, so
+players who played before the SDK was added look new on their next visit and, coming back more often than real new
+players, lift the cohorts of the first tracked weeks; Creator Hub knows the real first play date), revenue is an estimate
+(logged purchase prices times `creatorShare`, 0.7; Creator Hub also counts passes bought outside the game, commissions and
+avatar items), payer conversion misses purchases made outside the game, CCU comes from heartbeats about once a minute,
+join sources are the game's own (no Home / Search split), and the qualified first sessions card is ours (Creator Hub's
+play-through rate starts at the impression, so that card takes no benchmark). A retention card whose cohort days are
+older than the events says "not enough history" (`history: none`) instead of 0 of 0; one whose window the events start
+inside is `partial`. Creator Hub's own numbers settle a day or more after a day ends; ours don't wait.
 
 Example output (the test fixture: 300 players over 21 days; arrays cut to two items):
 

@@ -96,22 +96,45 @@ describe("benchmarks follow Creator Hub", () => {
 	test("D1 by first play date: a first session past midnight is not a return; a new session the next day is", async () => {
 		const r = await store.query("benchmarks", {}, { days: 7 });
 		// D1 cohorts: the 7 latest join days whose day 1 is over (days -8 to -2). Day -3: A and B, B back. Day -2: C, not back.
-		expect(r.current.d1Retention).toEqual({ rate: 0.25, count: 1, of: 3, cohortFrom: isoDay(-8), cohortTo: isoDay(-2) });
-		// D7: no cohort is old enough.
-		expect(r.current.d7Retention).toMatchObject({ rate: 0, count: 0, of: 0 });
+		expect(r.current.d1Retention).toEqual({ rate: 0.25, count: 1, of: 3, cohortFrom: isoDay(-8), cohortTo: isoDay(-2), history: "complete", dataFrom: isoDay(-40) });
+		// D7: no cohort is old enough; the data (from day -40) covers the window, so there just were no new players.
+		expect(r.current.d7Retention).toMatchObject({ rate: 0, count: 0, of: 0, history: "complete" });
 	});
 
 	test("D30 by first play date, and MAU as the distinct players of the 30 days ending on the period's last day", async () => {
 		const r = await store.query("benchmarks", {}, { days: 7 });
 		// M joined on day -40 and came back on day -10: a day-30 return for the previous period's cohorts (days -44 to -38).
-		expect(r.previous.d30Retention).toEqual({ rate: 1, count: 1, of: 1, cohortFrom: isoDay(-44), cohortTo: isoDay(-38) });
-		expect(r.current.d30Retention).toEqual({ rate: 0, count: 0, of: 0, cohortFrom: isoDay(-37), cohortTo: isoDay(-31) });
+		// The events start on day -40, inside that window: its first cohorts are missing (partial history).
+		expect(r.previous.d30Retention).toEqual({ rate: 1, count: 1, of: 1, cohortFrom: isoDay(-44), cohortTo: isoDay(-38), history: "partial", dataFrom: isoDay(-40) });
+		expect(r.current.d30Retention).toEqual({ rate: 0, count: 0, of: 0, cohortFrom: isoDay(-37), cohortTo: isoDay(-31), history: "complete", dataFrom: isoDay(-40) });
 		// MAU: days -30 to -1 hold A, B, C and M's return; days -37 to -8 hold M only. S is Studio, T is today.
 		expect(r.current.mau).toBe(4);
 		expect(r.previous.mau).toBe(1);
 		expect(r.current.players).toBe(3); // the period itself (days -7 to -1) doesn't have M
 		expect(r.previous.players).toBe(1);
 		expect(r.previous.newUsers).toBe(0);
+	});
+});
+
+describe("a game tracked for a few days", () => {
+	let recent: { instance: DuckDBInstance; connection: DuckDBConnection };
+	let young: DuckDbStore;
+	beforeAll(async () => {
+		// Only the events of the last 3 days: tracking started on day -3.
+		recent = await fixtureDb({ events: events.filter((e) => e.t >= D(-3)), recordings: [] });
+		young = new DuckDbStore(recent.connection, (name) => name, () => NOW);
+	});
+	afterAll(() => {
+		recent.connection.closeSync();
+		recent.instance.closeSync();
+	});
+
+	test("D7 and D30 say the history doesn't reach their cohorts, instead of 0 of 0", async () => {
+		const r = await young.query("benchmarks", {}, { days: 7 });
+		expect(r.current.d1Retention).toMatchObject({ count: 1, of: 3, history: "partial", dataFrom: isoDay(-3) }); // cohorts -8 to -2, events from -3
+		expect(r.current.d7Retention).toMatchObject({ count: 0, of: 0, history: "none", dataFrom: isoDay(-3) }); // cohorts -14 to -8
+		expect(r.current.d30Retention).toMatchObject({ count: 0, of: 0, history: "none", dataFrom: isoDay(-3) });
+		expect(r.previous.d1Retention).toMatchObject({ history: "none" });
 	});
 });
 

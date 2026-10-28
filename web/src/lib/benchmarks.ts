@@ -4,11 +4,13 @@
  */
 
 /**
- * One per card. `sessionTime` is Creator Hub's "Average session time" (the benchmarked engagement KPI); `playtime` is
- * its "Average playtime" (per DAU). Creator Hub benchmarks only some of these; the others take a 50th / 90th too if the
- * user has one from elsewhere.
+ * One per card that Creator Hub has a counterpart for. `sessionTime` is Creator Hub's "Average session time" (the
+ * benchmarked engagement KPI); `playtime` is its "Average playtime" (per DAU). Creator Hub benchmarks only some of
+ * these; the others take a 50th / 90th too if the user has one from elsewhere. Our own metrics (the qualified first
+ * sessions card) take none: a Roblox percentile means nothing for a number Roblox doesn't compute.
  */
-export type BenchmarkKey = "dau" | "mau" | "newUsers" | "sessionTime" | "playtime" | "d1" | "d7" | "d30" | "payer" | "arppu" | "arpdau" | "playThrough";
+export type BenchmarkKey = "dau" | "mau" | "newUsers" | "sessionTime" | "playtime" | "d1" | "d7" | "d30" | "payer" | "arppu" | "arpdau";
+export const BENCHMARK_KEYS: readonly BenchmarkKey[] = ["dau", "mau", "newUsers", "sessionTime", "playtime", "d1", "d7", "d30", "payer", "arppu", "arpdau"];
 
 export interface Benchmark {
 	p50: number;
@@ -27,6 +29,8 @@ export function loadBenchmarks(storage: Pick<Storage, "getItem"> | undefined = g
 		const out: Benchmarks = {};
 		for (const [key, value] of Object.entries(parsed)) {
 			const v = value as Partial<Benchmark> | null;
+			// Keys of cards that no longer take a benchmark (an older "playThrough") are dropped.
+			if (!BENCHMARK_KEYS.includes(key as BenchmarkKey)) continue;
 			if (v && Number.isFinite(v.p50) && Number.isFinite(v.p90)) out[key as BenchmarkKey] = { p50: Number(v.p50), p90: Number(v.p90) };
 		}
 		return out;

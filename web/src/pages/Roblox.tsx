@@ -24,7 +24,7 @@ import { barMax, change, estimatePercentile, loadBenchmarks, saveBenchmarks, typ
 import { isoDate } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum, fmtPct } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
-import type { BenchmarkPeriod, Filters, RealtimeResult, TrendValues } from "@/lib/types";
+import type { BenchmarkPeriod, Filters, RealtimeResult, Retention, TrendValues } from "@/lib/types";
 
 /** The filter bar's filters without its date range (these sections have their own). */
 function useNoRange(): Filters {
@@ -44,7 +44,10 @@ export interface Differs {
 }
 
 export interface CardSpec {
-	key: BenchmarkKey;
+	/** The benchmark it takes; `null` for our own metrics (no Creator Hub counterpart, so no 50th / 90th to compare with). */
+	key: BenchmarkKey | null;
+	/** Unique id, the benchmark key when there is one. */
+	id: string;
 	title: string;
 	/** Value in the unit the user types benchmarks in (minutes, percent, Robux). */
 	value(p: BenchmarkPeriod): number | null;
@@ -57,6 +60,16 @@ export interface CardSpec {
 
 const pct = (r: { rate: number; of: number }) => (r.of > 0 ? r.rate * 100 : null);
 
+/**
+ * `newp` is the first visit the SDK has seen: a player who first played before the SDK was added looks new on their
+ * next visit (and then never again). Retention cohorts inherit it: those players come back more often than real new
+ * players, so cohorts run high until every earlier player has been seen once; the install day's cohort is the worst.
+ */
+const NEW_USER_DIFFERS: Differs = {
+	label: "Estimate",
+	why: "A new user is a player's first visit since the SDK was added, so players who played before that look new on their next visit, until each has come back once. Creator Hub knows their real first play date. Cohorts from the first tracked days run highest.",
+};
+
 const REVENUE_DIFFERS: Differs = {
 	label: "Estimate",
 	why: "Revenue here is what players paid in game purchases times 70% (Roblox keeps 30%). Creator Hub also counts passes bought outside the game, commissions and avatar item sales, which the game never sees.",
@@ -65,6 +78,7 @@ const REVENUE_DIFFERS: Differs = {
 export const CARDS: CardSpec[] = [
 	{
 		key: "dau",
+		id: "dau",
 		title: "Daily active users",
 		value: (p) => p.dau,
 		format: (v) => fmtNum(v, 1),
@@ -73,6 +87,7 @@ export const CARDS: CardSpec[] = [
 	},
 	{
 		key: "mau",
+		id: "mau",
 		title: "Monthly active users",
 		value: (p) => p.mau,
 		format: (v) => fmtInt(v),
@@ -81,14 +96,17 @@ export const CARDS: CardSpec[] = [
 	},
 	{
 		key: "newUsers",
+		id: "newUsers",
 		title: "New users",
 		value: (p) => p.newUsers,
 		format: (v) => fmtInt(v),
 		unit: "players",
 		info: "Creator Hub: users who played the experience for the first time. Here the players whose first-ever session started in the period (the SDK marks a player's first join), summed over its days.",
+		differs: NEW_USER_DIFFERS,
 	},
 	{
 		key: "sessionTime",
+		id: "sessionTime",
 		title: "Average session time",
 		value: (p) => p.avgSessionMinutes,
 		format: (v) => fmtMinutes(v),
@@ -97,30 +115,37 @@ export const CARDS: CardSpec[] = [
 	},
 	{
 		key: "d1",
+		id: "d1",
 		title: "Day 1 retention",
 		value: (p) => pct(p.d1Retention),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
 		info: "Creator Hub: new users who played again the day after their first play date, by that date. Here the same: a new session must start the next UTC day (a first session running past midnight isn't a return), for the latest join days whose next day is over, averaged over those days.",
+		differs: NEW_USER_DIFFERS,
 	},
 	{
 		key: "d7",
+		id: "d7",
 		title: "Day 7 retention",
 		value: (p) => pct(p.d7Retention),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
 		info: "Creator Hub: new users who played again on day 7 (the 8th day) after their first play date. Here the same rule as day 1, 7 days on, for the latest join days whose day 7 is over.",
+		differs: NEW_USER_DIFFERS,
 	},
 	{
 		key: "d30",
+		id: "d30",
 		title: "Day 30 retention",
 		value: (p) => pct(p.d30Retention),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
 		info: "Creator Hub: new users who played again on day 30 after their first play date. Here the same rule as day 1, 30 days on, for the latest join days whose day 30 is over.",
+		differs: NEW_USER_DIFFERS,
 	},
 	{
 		key: "payer",
+		id: "payer",
 		title: "Payer conversion",
 		value: (p) => pct(p.payerConversion),
 		format: (v) => `${fmtNum(v, 2)}%`,
@@ -130,6 +155,7 @@ export const CARDS: CardSpec[] = [
 	},
 	{
 		key: "arppu",
+		id: "arppu",
 		title: "ARPPU",
 		value: (p) => p.arppu,
 		format: (v) => `${fmtNum(v, 1)} R$`,
@@ -139,6 +165,7 @@ export const CARDS: CardSpec[] = [
 	},
 	{
 		key: "arpdau",
+		id: "arpdau",
 		title: "ARPDAU",
 		value: (p) => p.arpdau,
 		format: (v) => `${fmtNum(v, 2)} R$`,
@@ -148,6 +175,7 @@ export const CARDS: CardSpec[] = [
 	},
 	{
 		key: "playtime",
+		id: "playtime",
 		title: "Average playtime",
 		value: (p) => p.avgPlaytimeMinutes,
 		format: (v) => fmtMinutes(v),
@@ -155,18 +183,31 @@ export const CARDS: CardSpec[] = [
 		info: "Creator Hub: playtime per daily active user. Here all playtime of a UTC day divided by that day's players, averaged over the period's days.",
 	},
 	{
-		key: "playThrough",
-		title: "Play-through rate (after join)",
+		key: null,
+		id: "qualifiedFirstSessions",
+		title: "Qualified first sessions",
 		value: (p) => pct(p.playThrough),
 		format: (v) => `${fmtNum(v, 1)}%`,
 		unit: "%",
-		info: "Our version: the share of new players' first sessions (that are over) lasting at least 5 minutes.",
-		differs: { label: "Ours", why: "Creator Hub's play-through rate starts at the home-page impression (seen, then played), which games can't see. Don't compare it with Creator Hub's benchmark." },
+		info: "Ours, not a Creator Hub number: the share of new players' first sessions (that are over) lasting at least 5 minutes. Creator Hub's play-through rate is something else (impressions that led to a play), so this card takes no benchmark.",
+		differs: { label: "Ours", why: "Creator Hub's play-through rate starts at the home-page impression (seen, then played), which games can't see; its percentiles don't apply to this number, so there is nothing to compare it with." },
 	},
 ];
 
+/** "Oct 1" for a UTC day ("2026-10-01"). */
+const fmtDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+
+/** A retention card's second line: the counts, or why there are none when the data doesn't reach the cohort days. */
+export function retentionSub(r: Retention): string {
+	if (r.history === "none") {
+		return `not enough history: cohorts ${fmtDay(r.cohortFrom)} - ${fmtDay(r.cohortTo)}, ${r.dataFrom ? `events start ${fmtDay(r.dataFrom)}` : "no events yet"}`;
+	}
+	const counts = `${fmtInt(r.count)} of ${fmtInt(r.of)} new players`;
+	return r.history === "partial" && r.dataFrom ? `${counts} (cohorts from ${fmtDay(r.dataFrom)}: events start then)` : counts;
+}
+
 function sub(spec: CardSpec, p: BenchmarkPeriod): string {
-	switch (spec.key) {
+	switch (spec.id) {
 		case "dau":
 			return `${fmtInt(p.players)} players in the period`;
 		case "mau":
@@ -178,19 +219,21 @@ function sub(spec: CardSpec, p: BenchmarkPeriod): string {
 		case "playtime":
 			return `${fmtNum(p.dau, 1)} daily active users`;
 		case "d1":
-			return `${fmtInt(p.d1Retention.count)} of ${fmtInt(p.d1Retention.of)} new players`;
+			return retentionSub(p.d1Retention);
 		case "d7":
-			return `${fmtInt(p.d7Retention.count)} of ${fmtInt(p.d7Retention.of)} new players`;
+			return retentionSub(p.d7Retention);
 		case "d30":
-			return `${fmtInt(p.d30Retention.count)} of ${fmtInt(p.d30Retention.of)} new players`;
+			return retentionSub(p.d30Retention);
 		case "payer":
 			return `${fmtInt(p.payerConversion.count)} payer-days of ${fmtInt(p.payerConversion.of)} player-days`;
 		case "arppu":
 			return `${fmtInt(p.revenue)} Robux revenue (${fmtInt(p.robux)} spent)`;
 		case "arpdau":
 			return `${fmtNum(p.dau, 1)} daily active users`;
-		case "playThrough":
-			return `${fmtInt(p.playThrough.count)} of ${fmtInt(p.playThrough.of)} first sessions`;
+		case "qualifiedFirstSessions":
+			return `${fmtInt(p.playThrough.count)} of ${fmtInt(p.playThrough.of)} first sessions, ${p.playThrough.minutes} min or longer`;
+		default:
+			return "";
 	}
 }
 
@@ -260,19 +303,23 @@ function BenchmarkCard({ spec, current, previous, bench, days, onSet }: { spec: 
 					<ChangeChip change={change(value, spec.value(previous))} against={`the ${days} days before`} />
 				</div>
 				<div className="text-xs text-muted-foreground tabular-nums">{sub(spec, current)}</div>
-				<BenchmarkBar value={value} {...(bench ? { bench } : {})} onSet={onSet} />
+				{spec.key === null ? null : <BenchmarkBar value={value} {...(bench ? { bench } : {})} onSet={onSet} />}
 			</CardContent>
 		</Card>
 	);
 }
 
+/** The cards with a Creator Hub counterpart: the ones that take a benchmark. */
+type BenchmarkedCard = CardSpec & { key: BenchmarkKey };
+export const BENCHMARKED_CARDS = CARDS.filter((c): c is BenchmarkedCard => c.key !== null);
+
 function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave(b: Benchmarks): void; onClose(): void }) {
 	const [draft, setDraft] = useState<Record<string, { p50: string; p90: string }>>(() =>
-		Object.fromEntries(CARDS.map((c) => [c.key, { p50: value[c.key]?.p50?.toString() ?? "", p90: value[c.key]?.p90?.toString() ?? "" }])),
+		Object.fromEntries(BENCHMARKED_CARDS.map((c) => [c.key, { p50: value[c.key]?.p50?.toString() ?? "", p90: value[c.key]?.p90?.toString() ?? "" }])),
 	);
 	const save = () => {
 		const out: Benchmarks = {};
-		for (const c of CARDS) {
+		for (const c of BENCHMARKED_CARDS) {
 			const p50 = Number.parseFloat(draft[c.key]?.p50 ?? "");
 			const p90 = Number.parseFloat(draft[c.key]?.p90 ?? "");
 			if (Number.isFinite(p50) && Number.isFinite(p90) && p50 > 0 && p90 > 0) out[c.key] = { p50, p90 };
@@ -290,7 +337,7 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 				<span />
 				<span className="text-muted-foreground">50th</span>
 				<span className="text-muted-foreground">90th</span>
-				{CARDS.map((c) => (
+				{BENCHMARKED_CARDS.map((c) => (
 					<div key={c.key} className="contents">
 						<span>
 							{c.title} <span className="text-muted-foreground">({c.unit})</span>
@@ -309,7 +356,7 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 				))}
 			</div>
 			<div className="flex justify-end gap-2">
-				<Button variant="ghost" size="sm" onClick={() => setDraft(Object.fromEntries(CARDS.map((c) => [c.key, { p50: "", p90: "" }])))}>
+				<Button variant="ghost" size="sm" onClick={() => setDraft(Object.fromEntries(BENCHMARKED_CARDS.map((c) => [c.key, { p50: "", p90: "" }])))}>
 					Clear
 				</Button>
 				<Button size="sm" onClick={save}>
@@ -557,7 +604,7 @@ export const CALCULATION_NOTES: { title: string; text: string }[] = [
 	{ title: "Sessions", text: "One session per join, from its first to its last event, with no minimum length. It counts on the day it started, so a player active past midnight is a daily active user of the first day only." },
 	{ title: "Who counts", text: "Players on public, private and reserved servers. Studio play tests don't count (Creator Hub only sees published games)." },
 	{ title: "Active users", text: "Daily active users are the distinct players who started a session that UTC day, averaged over the period. Monthly active users are the distinct players of the 30 days ending on the period's last day." },
-	{ title: "New users and retention", text: "A new user is a player's first-ever session. Day 1 / 7 / 30 retention is by first play date: the share of that day's new users who start a new session exactly 1 / 7 / 30 days later, over the latest join days whose day N is over." },
+	{ title: "New users and retention", text: "A new user is a player's first session since the SDK was added (players from before it look new once more). Day 1 / 7 / 30 retention is by first play date: the share of that day's new users who start a new session exactly 1 / 7 / 30 days later, over the latest join days whose day N is over. A card says \"not enough history\" when the events don't reach its cohort days yet." },
 	{ title: "Averages", text: "A card is the average of its daily values over the period: average session time and playtime per DAU, payer conversion, ARPPU and ARPDAU are computed each day, then averaged, as Creator Hub's 7-day averages." },
 	{ title: "Revenue", text: "Robux players paid in purchases the game server logged, times 70% (Roblox keeps 30% of developer product and pass sales). An estimate: Creator Hub also counts sales outside the game." },
 	{ title: "Concurrent users", text: "Players per minute from the servers' heartbeats, summed over servers (Studio left out): the peak minute and the average of the minutes, per hour and over the last 24 h. An estimate: a heartbeat is about once a minute." },
@@ -640,12 +687,12 @@ export default function Roblox() {
 									<div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
 										{CARDS.map((spec) => (
 											<BenchmarkCard
-												key={spec.key}
+												key={spec.id}
 												spec={spec}
 												current={r.current}
 												previous={r.previous}
 												days={days}
-												{...(bench[spec.key] ? { bench: bench[spec.key] } : {})}
+												{...(spec.key && bench[spec.key] ? { bench: bench[spec.key] } : {})}
 												onSet={() => setEditing(true)}
 											/>
 										))}

@@ -480,6 +480,17 @@ export interface EventsResult {
 	events: EventRow[];
 }
 
+/**
+ * A retention rate over a window of cohort days, and how much of it the data covers: `complete`, `partial` (the events
+ * start inside the window, on `dataFrom`) or `none` (they start after it, or there are none: `dataFrom` null).
+ */
+export interface Retention extends Rate {
+	cohortFrom: string;
+	cohortTo: string;
+	history: "complete" | "partial" | "none";
+	dataFrom: string | null;
+}
+
 /** The Roblox page's numbers, as Creator Hub defines them (README "Roblox parity"). */
 export interface BenchmarkPeriod {
 	/** First day 00:00 UTC, and the end of the last full day (exclusive). */
@@ -495,9 +506,9 @@ export interface BenchmarkPeriod {
 	avgSessionMinutes: number | null;
 	/** Per day playtime / DAU, the mean of the days. */
 	avgPlaytimeMinutes: number | null;
-	d1Retention: Rate & { cohortFrom: string; cohortTo: string };
-	d7Retention: Rate & { cohortFrom: string; cohortTo: string };
-	d30Retention: Rate & { cohortFrom: string; cohortTo: string };
+	d1Retention: Retention;
+	d7Retention: Retention;
+	d30Retention: Retention;
 	/** rate = the mean of daily paying DAU / DAU; count / of = payer-days / player-days. */
 	payerConversion: Rate;
 	arppu: number | null;
