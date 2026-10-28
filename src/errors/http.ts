@@ -7,10 +7,12 @@
  *     most occurrences first, with their UserId and Roblox name when known, and the occurrences that named no player
  *   GET /v1/players/<pid>/errors?window=|from=&to=&branch=&build=&realm=&limit=      -> the kinds one player hit (at most 200),
  *     most occurrences first, with the kind's message, side, first/last seen and all-time count
+ *   GET /v1/servers/<job>/errors?window=|from=&to=&branch=&build=&realm=&limit=     -> the kinds one game server reported
+ *     (at most 200), the same shape without `days`
  * `window` is a number and a unit (30m, 6h, 7d); without `from` the window ends now. Times are unix ms or ISO.
  */
-import { ErrorInputError, FP_PATTERN } from "./parse.ts";
-import { chooseBucket, ERROR_PLAYERS_MAX, PLAYER_ERRORS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
+import { ERROR_JOB_PATTERN, ErrorInputError, FP_PATTERN } from "./parse.ts";
+import { chooseBucket, ERROR_PLAYERS_MAX, PLAYER_ERRORS_MAX, SERVER_ERRORS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
 
 /** What the server knows about a pid: its UserId and Roblox names (when linked), or that it was erased (left out). */
 export interface PlayerIdentity {
@@ -146,6 +148,29 @@ export async function handlePlayerErrors(store: ErrorStore, pid: string, url: UR
 		const limit = limitText ? Number(limitText) : PLAYER_ERRORS_MAX;
 		if (!Number.isInteger(limit) || limit < 1 || limit > PLAYER_ERRORS_MAX) throw new ErrorInputError(`limit is a whole number from 1 to ${PLAYER_ERRORS_MAX}`);
 		return json(200, await store.playerErrors(pid, window, filter, limit));
+	} catch (error) {
+		if (error instanceof ErrorInputError) return json(400, { error: error.message });
+		throw error;
+	}
+}
+
+/** GET /v1/servers/<job>/errors: the error kinds one game server reported in the window, under the error filters. */
+export async function handleServerErrors(store: ErrorStore, rawJob: string, url: URL, o: { now: number; keepDays: number }): Promise<Response> {
+	let job: string;
+	try {
+		job = decodeURIComponent(rawJob);
+	} catch {
+		return json(400, { error: "bad JobId" });
+	}
+	if (!ERROR_JOB_PATTERN.test(job)) return json(400, { error: "bad JobId" });
+	const q = url.searchParams;
+	try {
+		const window = parseWindow(q, o.now, o.keepDays);
+		const filter = parseFilter(q);
+		const limitText = q.get("limit");
+		const limit = limitText ? Number(limitText) : SERVER_ERRORS_MAX;
+		if (!Number.isInteger(limit) || limit < 1 || limit > SERVER_ERRORS_MAX) throw new ErrorInputError(`limit is a whole number from 1 to ${SERVER_ERRORS_MAX}`);
+		return json(200, await store.serverErrors(job, window, filter, limit));
 	} catch (error) {
 		if (error instanceof ErrorInputError) return json(400, { error: error.message });
 		throw error;

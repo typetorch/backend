@@ -53,6 +53,8 @@ export interface PlayerSession {
 	firstSession: boolean;
 	dev: string | null;
 	art: string;
+	/** The game server's JobId the session ran on (the smallest one when a session spans several, as `dev` and `art`). */
+	job: string | null;
 }
 
 export interface PlayerPurchase {
@@ -146,8 +148,8 @@ export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 		const table = ctx.table("events", w.from, w.to);
 		const cond = `${where({ ...f, from: w.from }, ctx)} AND e.pid = ${lit(o.pid)}`;
 		const sessionsCte =
-			`ev AS (SELECT e.sid AS sid, e.t AS t, e.newp AS newp, e.dev AS dev, e.art AS art FROM ${table} e WHERE ${cond} AND e.sid IS NOT NULL AND e.sid <> ''), ` +
-			`s AS (SELECT sid, MIN(t) AS t0, MAX(t) AS t1, COUNT(*) AS n, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew, MIN(dev) AS dev, MIN(art) AS art FROM ev GROUP BY sid)`;
+			`ev AS (SELECT e.sid AS sid, e.t AS t, e.newp AS newp, e.dev AS dev, e.art AS art, e.job AS job FROM ${table} e WHERE ${cond} AND e.sid IS NOT NULL AND e.sid <> ''), ` +
+			`s AS (SELECT sid, MIN(t) AS t0, MAX(t) AS t1, COUNT(*) AS n, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew, MIN(dev) AS dev, MIN(art) AS art, MIN(job) AS job FROM ev GROUP BY sid)`;
 		const buckets = Math.ceil((w.to - w.from) / w.bucketMs) + 2;
 		return {
 			totals:
@@ -160,7 +162,7 @@ export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 				`SELECT bk, COUNT(*) AS purchases, SUM(COALESCE(robux, 0)) AS robux FROM (SELECT ${bucketOf("e.t", w.bucketMs)} AS bk, ` +
 				`${ctx.dialect.jsonNumber("e.props", PROP_KEYS.purchaseRobux)} AS robux, e.src AS esrc FROM ${table} e WHERE ${cond} AND e.kind = 'purchase') y ` +
 				`WHERE ${SERVER_PURCHASE} GROUP BY bk ORDER BY bk ${lim(buckets)}`,
-			sessions: `WITH ${sessionsCte} SELECT sid, t0, t1, n, isnew, dev, art FROM s ORDER BY t0 DESC, sid ${lim(o.sessions + 1)}`,
+			sessions: `WITH ${sessionsCte} SELECT sid, t0, t1, n, isnew, dev, art, job FROM s ORDER BY t0 DESC, sid ${lim(o.sessions + 1)}`,
 			purchases:
 				`SELECT e.t AS t, e.name AS name, e.sid AS sid, e.props AS props FROM ${table} e WHERE ${cond} AND e.kind = 'purchase' AND (e.src IS NULL OR e.src <> 'client') ` +
 				`ORDER BY e.t DESC, e.sid ${lim(o.purchases + 1)}`,
@@ -221,6 +223,7 @@ export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 				firstSession: num(r.isnew) === 1,
 				dev: strOrNull(r.dev),
 				art: str(r.art),
+				job: strOrNull(r.job),
 			})),
 			sessionsTruncated: rows.sessions.length > o.sessions,
 			purchases: rows.purchases.slice(0, o.purchases).map((r) => {
