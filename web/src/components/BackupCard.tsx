@@ -6,6 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, Download } from "lucide-react";
 import { EmptyState, QueryState, Section } from "@/components/common";
+import { DiskWarning } from "@/components/DiskWarning";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Button } from "@/components/ui/button";
 import { api, ApiError } from "@/lib/api";
@@ -50,6 +51,7 @@ function Body({ s }: { s: BackupsStatus }) {
 	const busy = s.running || now.isPending || download.isPending;
 	return (
 		<div className="space-y-3">
+			<DiskWarning disk={s.disk} />
 			<p className="text-sm text-muted-foreground">
 				{s.everyHours > 0 ? `Every ${plural(s.everyHours, "hour")}, keeping the newest ${fmtInt(s.keep)}` : `No schedule (TYPETORCH_BACKUP_HOURS=0); keeping the newest ${fmtInt(s.keep)}`}, in <span className="font-mono text-foreground break-all">{s.dir}</span>.
 				{s.next && s.everyHours > 0 ? ` Next ${fmtAgo(s.next)}.` : ""}
@@ -77,7 +79,7 @@ function Body({ s }: { s: BackupsStatus }) {
 export function BackupCard() {
 	const q = useQuery({ queryKey: BACKUPS_KEY, queryFn: ({ signal }) => api.backups(signal), refetchInterval: 60_000 });
 	return (
-		<Section title="Backups" description="SQLite, DuckDB and the day files, copied while the server runs.">
+		<Section title="Backups and disk" description="SQLite, DuckDB and the day files, copied while the server runs; the disk they are on.">
 			<QueryState query={q} loadingRows={2}>
 				{(s) => <Body s={s} />}
 			</QueryState>
