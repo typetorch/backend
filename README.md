@@ -26,6 +26,7 @@ is the same command.
 - [Quick start (local)](#quick-start-local)
 - [Settings](#settings)
 - [Runtime settings (the Settings page)](#runtime-settings-the-settings-page)
+- [Backend alerts](#backend-alerts) (alerts from the backend's own data: errors, players online, ingest, its health, disk)
 - [Security](#security)
 - [Routes and roles](#routes-and-roles) ([API docs for agents](#api-docs-for-agents): OpenAPI, Swagger UI, llms.txt)
 - [Deploy on Coolify](#deploy-on-coolify)
@@ -175,6 +176,7 @@ as noted for the token login).
 | Alert webhook (`alertWebhookUrl`) | `TYPETORCH_ALERT_WEBHOOK_URL` | an `https://` URL, or `""` for none. **A secret:** never shown or returned again |
 | Webhook format (`alertWebhookFormat`) | `TYPETORCH_ALERT_WEBHOOK_FORMAT` | `auto` (from the URL's host), `discord`, `slack`, `json` |
 | Alert levels sent (`alertWebhookLevels`) | `TYPETORCH_ALERT_WEBHOOK_LEVELS` | one or more of `critical`, `warning`, `info` |
+| Backend alert rules (`backendAlerts`) | `TYPETORCH_BACKEND_ALERTS` and `TYPETORCH_ALERT_<RULE>_*` | the master switch, the repeat window, the hourly cap, and per rule on/off, level and thresholds ([Backend alerts](#backend-alerts)) |
 | Admin allow list (`adminAllowIps`) | `TYPETORCH_ADMIN_ALLOW_IPS` | up to 64 addresses / CIDR ranges; empty = any address. **Guarded**, below |
 | Admin token login (`tokenLogin`) | `TYPETORCH_TOKEN_LOGIN` | on / off. **Guarded**, below |
 | Viewers (`webViewers`) | `TYPETORCH_WEB_VIEWERS` | up to 200 Roblox UserIds who sign in with Roblox as read-only viewers (the web role); a viewer taken off the list is signed out at once |
@@ -233,6 +235,63 @@ curl -X POST -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" https://backend.e
 
 `PATCH` answers the new view plus `changed` (the keys whose saved value changed) and `sessionsEnded` when the token login was
 turned off; `400` names the key and the rule, `409` carries `guard: "allow-list" | "token-login"`. Unknown keys are refused.
+
+## Backend alerts
+
+Most alerts come from the game servers (the kernel). The backend also watches its own data and raises alerts through the
+same pipeline: they are stored in the fleet's alert list (source `server`), so they show on the Fleet page's alerts and its
+stream, go on the bus' `alert` topic and to the webhook with the same levels filter. Code: `src/alerts/` (`rules.ts` the
+definitions and the setting, `checks.ts` each rule as a pure function, `evaluator.ts` the timer, the data and the raising).
+It needs the fleet part (the alert store lives there).
+
+**The rules** (code, default level, default thresholds; every value is editable):
+
+| Rule (code) | Fires when | Defaults |
+|---|---|---|
+| Error spike (`backend_error_spike`) | one error kind's count in the last N minutes is at least F times its usual rate per N minutes over the hours before, and at least a minimum | warning; 10 min, 5x, 50 errors, usual rate over 24 h |
+| New error after a deploy (`backend_error_new`) | an error kind first seen within X minutes after the latest deploy (the fleet's `deploys` table) reaches a count; the alert carries the deploy's seq, branch and artifact | warning; 30 min, 20 errors |
+| Players online drop (`backend_ccu_drop`) | players online (fleet heartbeats) fall by X% from the window's peak within N minutes while servers still send heartbeats | critical; 50%, 10 min, peak of 20+ players |
+| Fleet silent (`backend_fleet_silent`) | no heartbeat (and no analytics ingest, when analytics run) for N minutes, after players were online in the hour before | critical; 10 min, 10+ players before |
+| Ingest stopped (`backend_ingest_stopped`) | analytics ingest accepted no rows for N minutes after steady traffic (rows in 75%+ of the 30 minutes before) while players are online | warning; 10 min, 100+ rows / min before |
+| Slow requests (`backend_latency`) | request p99 above the threshold in every minute of the window (minutes with few requests don't count) | warning; 2000 ms, 5 min, 30 requests / min |
+| Memory (`backend_memory`) | the process's RSS above the threshold for the whole window | warning; 800 MB, 5 min |
+| Event loop lag (`backend_loop_lag`) | the loop came late by more than the threshold in every minute of the window | warning; 500 ms, 3 min |
+| Server errors (`backend_5xx`) | the share of 5xx answers over the window, with a minimum of requests | warning; 5%, 5 min, 100 requests |
+| Disk space low (`backend_disk_low`) | free space on the data folder's disk below X% or below X GB (0 turns one off) | critical; 10%, 2 GB |
+| Disk filling up (`backend_disk_growth`) | at the growth since the oldest hourly sample of the last 7 days (at least one day of them), the disk is full within N days | warning; 7 days |
+
+**Quiet on a small test place.** Every rule that compares against "before" needs volume first (a minimum count, peak or rows
+a minute), and a rule without enough data yet says "waiting" instead of firing. Samples are kept from the server's start, so
+after a deploy the players and ingest rules need their window of samples again (the disk history is in SQLite and survives).
+**Analytics:** the ingest rule switches off while analytics aren't running (the analytics part off, or a handover), and fleet
+silent then looks at heartbeats alone. Basin is not involved.
+
+**Dedup and throttle.** A finding has a subject (an error kind, a deploy and kind, the moment a silence began; the whole fleet
+for the rest): the same rule and subject is raised once per repeat window (default 180 min), checked against the stored
+alerts too, so a restart or a deploy's second server doesn't raise it again. At most `perHour` backend alerts (default 12) go
+out per hour; the rest are counted. The webhook's own dedup (10 minutes per code) and rate limit apply on top.
+
+**Cost.** One tick a minute, never two at once: two indexed reads of the `servers` table, the error tables only while the
+error rules are on (the window grouped by kind, at most 20 kinds, then one primary-key range per kind), the newest deploy, the
+in-memory metrics rings, one `statfs`, and one row an hour in `backend_disk_samples` (30 days kept). Samples in memory: one a
+minute for 6 hours.
+
+**Settings.** One runtime setting, `backendAlerts`, edited in the Settings page's "Backend alerts" section (each rule with
+On / Off, a level and its thresholds, and what it saw on the last run). The environment gives the defaults, one variable per
+value; an invalid one stops the start like every other setting:
+
+| Variable | Meaning |
+|---|---|
+| `TYPETORCH_BACKEND_ALERTS` | on (default) / off: every rule |
+| `TYPETORCH_BACKEND_ALERTS_REPEAT_MINUTES` | the repeat window, 5 to 10,080 (default 180) |
+| `TYPETORCH_BACKEND_ALERTS_PER_HOUR` | the hourly cap, 1 to 120 (default 12) |
+| `TYPETORCH_ALERT_<RULE>` | on / off for one rule; `<RULE>` is `ERROR_SPIKE`, `ERROR_NEW`, `CCU_DROP`, `FLEET_SILENT`, `INGEST_STOPPED`, `LATENCY`, `MEMORY`, `LOOP_LAG`, `5XX`, `DISK_LOW`, `DISK_GROWTH` |
+| `TYPETORCH_ALERT_<RULE>_LEVEL` | `critical`, `warning` or `info` |
+| `TYPETORCH_ALERT_<RULE>_<THRESHOLD>` | e.g. `TYPETORCH_ALERT_CCU_DROP_PERCENT=40`, `TYPETORCH_ALERT_DISK_LOW_GB=5`; the names and bounds are in `src/alerts/rules.ts` and on the Settings page (hover a field) |
+
+A `PATCH /v1/admin/settings` may send part of the value (`{"backendAlerts":{"rules":{"ccuDrop":{"on":false}}}}`): the rest
+stays as it is. `GET /v1/admin/alert-rules` (admin) answers each rule's state (`ok`, `waiting`, `firing`, `off`,
+`unavailable`) with a short note, when it last raised, and the raised / deduped / throttled counts since the start.
 
 ## Security
 
@@ -499,6 +558,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
 | `PATCH /v1/admin/settings` | admin | `{ key: value \| null }`, applied at once; lockout guards (see [Runtime settings](#runtime-settings-the-settings-page)) |
 | `POST /v1/admin/settings/test-alert` | admin | one test alert through the saved webhook (3 a minute) |
+| `GET /v1/admin/alert-rules` | admin | the [backend alert rules](#backend-alerts)' state on the last run (404 without the fleet part) |
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
@@ -611,7 +671,7 @@ read-only store (`openDuckDbStore`) on it is refused: query the running server o
 | `events` | `POST /v1/ingest` (validated rows) | `duckdb-writer` (raw file), `live` |
 | `heartbeat` | fleet heartbeat and closing posts | `fleet-store` (SQLite), `live` |
 | `deploy` | deploy reports and deploy starts | `fleet-store`, `live` |
-| `alert` | the fleet store, for every stored alert (game, CLI, the server's own sweeps) | `alert-notifier` (webhook), `live` |
+| `alert` | the fleet store, for every stored alert (game, CLI, the server's own sweeps and the [backend alert rules](#backend-alerts)) | `alert-notifier` (webhook), `live` |
 | `error` | `POST /v1/errors` | `error-store` (kinds, counts, players), `live` |
 
 Two kinds of subscriber. The stores that answer for their data are **awaited**: a `202` still means the batch is in the raw
