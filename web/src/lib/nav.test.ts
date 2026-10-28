@@ -84,6 +84,8 @@ describe("findNavItem", () => {
 		expect(findNavItem("/players/abc")?.label).toBe("Players");
 		expect(findNavItem("/fleet")?.label).toBe("Fleet");
 		expect(findNavItem("/servers/job-1")?.label).toBe("Fleet");
+		expect(findNavItem("/deploys")?.label).toBe("Deploys");
+		expect(findNavItem("/deploys/42")?.label).toBe("Deploys");
 	});
 
 	it("does not match by a bare string prefix, and '/' only matches itself", () => {

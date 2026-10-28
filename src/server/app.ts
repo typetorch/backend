@@ -324,7 +324,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	const savedQueryLimiter = new RateLimiter(SAVED_QUERY_WRITES_PER_MINUTE, clock);
-	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
+	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert), deployKeepDays: () => runtime.get("deployKeepDays") }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
 	// Backend alerts: once a minute, rules over the error tables, the fleet, ingest, these metrics and the disk, raised
 	// through the fleet's alert store (the Fleet page, the stream, the bus and the webhook, like the kernel's).

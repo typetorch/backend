@@ -56,6 +56,8 @@ const router = createBrowserRouter([
 			{ path: "first-session", lazy: page(() => import("@/pages/FirstSession")) },
 			{ path: "events", lazy: page(() => import("@/pages/Events")) },
 			{ path: "fleet", lazy: page(() => import("@/pages/Fleet")) },
+			{ path: "deploys", lazy: page(() => import("@/pages/Deploys")) },
+			{ path: "deploys/:seq", lazy: page(() => import("@/pages/DeployDetail")) },
 			{ path: "performance", lazy: page(() => import("@/pages/Performance")) },
 			// Plans/25: one fleet server and its read-only remote debug (lit as Fleet in the sidebar: its `also: ["/servers"]`).
 			{ path: "servers/:jobId", lazy: page(() => import("@/pages/Server")) },

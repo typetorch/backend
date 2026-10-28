@@ -9,9 +9,9 @@ import { CompareToggle } from "@/components/CompareToggle";
 import { DataTable } from "@/components/data-table";
 import { chartRows, chartShape } from "@/components/SavedQueryView";
 import { SessionsView } from "@/components/player-detail/StatViews";
-import type { PerfSeriesResult } from "@/lib/perf";
+import type { DeployMark, PerfSeriesResult } from "@/lib/perf";
 import type { FleetAlert, OverviewResult, PlayerStatsResult, SavedQuery } from "@/lib/types";
-import { BuildLinks } from "./Errors";
+import { BuildLinks, buildSeqs } from "./Errors";
 import { ALERT_COLUMNS, alertErrorsHref } from "./Fleet";
 import { Body } from "./Overview";
 import { previousLine } from "./Performance";
@@ -93,13 +93,26 @@ describe("saved queries", () => {
 });
 
 describe("links between pages", () => {
-	it("an error kind's build opens the Errors page filtered to it, and Performance with its deploy marks", () => {
+	it("an error kind's build opens the Errors page filtered to it, and its deploy page (Performance when no mark names it)", () => {
 		mount(<BuildLinks build="a1b2c3d-000042" window="7d" />);
 		expect(screen.getByRole("link", { name: "a1b2c3d-000042" }).getAttribute("href")).toBe("/errors?build=a1b2c3d-000042&window=7d");
 		expect(screen.getByRole("link", { name: "perf" }).getAttribute("href")).toBe("/performance?art=a1b2c3d-000042");
 		cleanup();
+		mount(<BuildLinks build="a1b2c3d-000042" window="7d" seq={42} />);
+		expect(screen.getByRole("link", { name: "deploy #42" }).getAttribute("href")).toBe("/deploys/42");
+		expect(screen.queryByRole("link", { name: "perf" })).toBeNull();
+		cleanup();
 		mount(<BuildLinks build="(unknown)" window="24h" />);
 		expect(screen.queryByRole("link")).toBeNull();
+	});
+
+	it("a build's deploy is its latest release mark; kernel and backup marks name none", () => {
+		const mark = (over: Partial<DeployMark>): DeployMark => ({ id: "deploy:1", kind: "deploy", at: T, time: new Date(T).toISOString(), branch: "prod", seq: 1, artifact: "a1", channel: null, from: null, kernel: null, placeVersion: null, message: null, ...over });
+		const seqs = buildSeqs([mark({}), mark({ id: "deploy:3", seq: 3 }), mark({ id: "deploy:2", seq: 2, artifact: "a2" }), mark({ id: "kernel:9", kind: "kernel", seq: 9, artifact: "a3" })]);
+		expect([...seqs.entries()]).toEqual([
+			["a1", 3],
+			["a2", 2],
+		]);
 	});
 
 	it("a Fleet alert links to the errors of its build, over a window that reaches it; a server's page lists its errors", () => {

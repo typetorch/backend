@@ -13,6 +13,8 @@
  *   GET  /v1/fleet/bundles/<id>                                     { bundle: { ...summary, body } } (the web role: no body.playerLogs)
  *   GET  /v1/fleet/marks?since=&until=&branch=&kinds=&limit=        chart marks: releases, kernel publishes, backup refreshes
  *   GET  /v1/fleet/reports?seq=|artifact=|latest&branch=
+ *   GET  /v1/fleet/deploys?branch=&before=<seq>&limit=              the deploy history, newest first: { deploys, next }
+ *   GET  /v1/fleet/deploys/<seq>                                    one release: { deploy, report, alerts, previous, next }
  *   GET  /v1/fleet/alerts?since=&level=&unacked=&limit=
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
@@ -316,6 +318,22 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 					...(q.get("branch") ? { branch: q.get("branch") as string } : {}),
 				}),
 			);
+		}
+		// The deploy history (deploys.ts): one page newest first, and one release with its report and alerts.
+		if (route === "deploys") {
+			const before = intParam(q.get("before"), "before");
+			const limit = intParam(q.get("limit"), "limit");
+			const branch = q.get("branch");
+			if (branch && branch.length > 64) throw new FleetInputError("branch must be at most 64 characters");
+			return json(
+				200,
+				await o.service.deployHistory({ ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}), ...(branch ? { branch } : {}) }),
+			);
+		}
+		const deploy = /^deploys\/(\d{1,15})$/.exec(route);
+		if (deploy) {
+			const found = await o.service.deployDetail(Number(deploy[1]));
+			return found ? json(200, found) : json(404, { error: "no such deploy (the history keeps releases for the deployKeepDays setting)" });
 		}
 		if (route === "alerts") {
 			const level = q.get("level");

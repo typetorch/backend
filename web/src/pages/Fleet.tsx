@@ -347,7 +347,7 @@ const REPORT_COLUMNS: DataColumn<ServerReport>[] = [
 	{ id: "seq", header: "Deploy", accessor: (r) => r.seq, defaultHidden: true },
 ];
 
-function Report({ data }: { data: FleetReports }) {
+export function Report({ data }: { data: FleetReports }) {
 	if (data.seq === null) return <EmptyState>No deploy reported yet.</EmptyState>;
 	return (
 		<div className="space-y-3">
@@ -575,7 +575,15 @@ export default function Fleet() {
 				)}
 			</QueryState>
 			<div className="grid gap-4 xl:grid-cols-2">
-				<Section title="Latest deploy" className="min-w-0">
+				<Section
+					title="Latest deploy"
+					className="min-w-0"
+					actions={
+						<Link to="/deploys" className="text-xs underline-offset-2 hover:underline">
+							All deploys
+						</Link>
+					}
+				>
 					<QueryState query={report}>{(data) => <Report data={data} />}</QueryState>
 				</Section>
 				<Section title="Live events" description="Changes pushed by the server since this page opened." className="min-w-0">

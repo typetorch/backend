@@ -11,6 +11,7 @@
 import { DEPLOY_RESULTS } from "../schema.ts";
 import { toMs, type ServerInfo } from "../queries/fleet.ts";
 import type { FleetDb, SqlValue } from "./db.ts";
+import { ADDED_DEPLOY_HISTORY_COLUMNS, DEPLOY_ROW_COLUMNS, deployRecords, freezeSummaries, KEEP_DEPLOYS_DAYS, listDeploys, pruneDeploys, type DeployListOptions, type DeployRecord, type DeployRow } from "./deploys.ts";
 import { healthReasons } from "./health.ts";
 import type { Notifier } from "./notify.ts";
 
@@ -163,6 +164,29 @@ export interface FleetReport {
 	reports: ReportItem[];
 }
 
+/** A release next to another on its branch (the deploy page's previous / next links). */
+export interface DeployNeighbor {
+	seq: number;
+	kind: string;
+	artifact: string | null;
+	at: number;
+}
+
+/** GET /v1/fleet/deploys/<seq>: one release, its reports while they are kept, and its alerts. */
+export interface DeployDetail {
+	deploy: DeployRecord;
+	/** The full report (results with timings, errors, every server's report, servers behind, stuck), null once frozen. */
+	report: FleetReport | null;
+	/** Alerts that name the seq (deploy_failed, server_stuck, auto_rollback...), newest first, at most DEPLOY_ALERTS_MAX. */
+	alerts: Alert[];
+	/** The release before and after it on the same branch. */
+	previous: DeployNeighbor | null;
+	next: DeployNeighbor | null;
+}
+
+/** A deploy page lists at most this many of the release's alerts. */
+export const DEPLOY_ALERTS_MAX = 50;
+
 export type FleetEvent =
 	| { type: "server"; change: "new" | "update" | "lost" | "closed" | "back"; server: ServerInfo }
 	| { type: "report"; seq: number; job: string; result: string; branch: string | null }
@@ -296,6 +320,8 @@ export interface ParsedDeploy {
 	from: string | null;
 	/** The release note (`m`). */
 	message: string | null;
+	/** Who or what started it (`by`: a user, "ci", "auto_rollback"...), for the deploy history. */
+	by: string | null;
 }
 
 /** A kernel publish or backup refresh from the CLI (POST /v1/fleet/mark). */
@@ -452,8 +478,9 @@ export function parseReport(raw: unknown): ParsedReport {
 }
 
 /**
- * `{s, b, a, ch, t, k?, fr?, m?}` from the CLI when a deploy starts: gives stuck detection a start time and the charts a
- * mark. `k`: deploy | rollback | promote | resign; `fr`: the build before; `m`: the release note; `t`: unix ms or s.
+ * `{s, b, a, ch, t, k?, fr?, m?, by?}` from the CLI when a deploy starts: gives stuck detection a start time, the charts a
+ * mark and the deploy history a row. `k`: deploy | rollback | promote | resign; `fr`: the build before; `m`: the release
+ * note; `by`: who or what started it; `t`: unix ms or s.
  */
 export function parseDeploy(raw: unknown): ParsedDeploy {
 	const b = asBody(raw);
@@ -468,6 +495,7 @@ export function parseDeploy(raw: unknown): ParsedDeploy {
 		kind: kind as DeployKind | null,
 		from: text(b, "fr", 64),
 		message: text(b, "m", 200),
+		by: text(b, "by", 64),
 	};
 }
 
@@ -917,6 +945,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 	acked_at INTEGER, acked_by TEXT);
 CREATE INDEX IF NOT EXISTS alerts_created ON alerts (created);
 CREATE INDEX IF NOT EXISTS alerts_job ON alerts (job, id);
+CREATE INDEX IF NOT EXISTS alerts_seq ON alerts (seq);
 CREATE TABLE IF NOT EXISTS deploys (
 	seq INTEGER PRIMARY KEY, branch TEXT, artifact TEXT, channel TEXT, t INTEGER, received INTEGER NOT NULL, stuck_at INTEGER);
 CREATE INDEX IF NOT EXISTS deploys_received ON deploys (received);
@@ -965,6 +994,10 @@ export interface FleetServiceOptions {
 	goneServersMax?: number;
 	/** Debug bundles' stored bytes at most (default BUNDLES_MAX_BYTES). */
 	bundlesMaxBytes?: number;
+	/** Days of deploy history kept (default KEEP_DEPLOYS_DAYS; a function: the runtime setting, read at each hourly run). */
+	deployKeepDays?: number | (() => number);
+	/** Deploy history rows at most (default DEPLOYS_MAX_ROWS). */
+	deploysMaxRows?: number;
 }
 
 /** gzip / gunzip through the web's CompressionStream (Bun, Node 18+, Workers: no Node APIs here). */
@@ -1040,8 +1073,9 @@ export class FleetService {
 		await options.db.exec(SCHEMA);
 		// Kernel 0.4.0 (the budget summary) and 0.4.2 (TPS, memory): columns added to files made before them.
 		await addColumns(options.db, "servers", ADDED_SERVER_COLUMNS);
-		// Release kinds for the deploy marks, to deploys tables made before them.
+		// Release kinds for the deploy marks, then the deploy history's columns, to deploys tables made before them.
 		await addColumns(options.db, "deploys", ADDED_DEPLOY_COLUMNS);
+		await addColumns(options.db, "deploys", ADDED_DEPLOY_HISTORY_COLUMNS);
 		return service;
 	}
 
@@ -1137,10 +1171,11 @@ export class FleetService {
 		// `t` is stored as ms (the CLI's clock; replaced by now when a day or more off).
 		const t = d.t === null ? null : markTime(d.t, now);
 		await this.db.run(
-			"INSERT INTO deploys (seq, branch, artifact, channel, t, received, kind, from_artifact, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(seq) DO UPDATE SET branch = excluded.branch, " +
+			"INSERT INTO deploys (seq, branch, artifact, channel, t, received, kind, from_artifact, message, started_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(seq) DO UPDATE SET branch = excluded.branch, " +
 				"artifact = COALESCE(excluded.artifact, deploys.artifact), channel = excluded.channel, t = excluded.t, received = MIN(deploys.received, excluded.received), " +
-				"kind = COALESCE(excluded.kind, deploys.kind), from_artifact = COALESCE(excluded.from_artifact, deploys.from_artifact), message = COALESCE(excluded.message, deploys.message)",
-			[d.seq, d.branch, d.artifact, d.channel, t, now, d.kind, d.from, d.message],
+				"kind = COALESCE(excluded.kind, deploys.kind), from_artifact = COALESCE(excluded.from_artifact, deploys.from_artifact), message = COALESCE(excluded.message, deploys.message), " +
+				"started_by = COALESCE(excluded.started_by, deploys.started_by)",
+			[d.seq, d.branch, d.artifact, d.channel, t, now, d.kind, d.from, d.message, d.by],
 		);
 		this.emit({ type: "deploy", seq: d.seq, branch: d.branch, artifact: d.artifact, kind: d.kind });
 	}
@@ -1615,6 +1650,38 @@ export class FleetService {
 		};
 	}
 
+	/** Days of deploy history kept: the option (a runtime setting) or the default. */
+	private deployKeepDays(): number {
+		const keep = this.options.deployKeepDays;
+		const days = typeof keep === "function" ? keep() : keep;
+		return typeof days === "number" && Number.isFinite(days) && days > 0 ? days : KEEP_DEPLOYS_DAYS;
+	}
+
+	/** The deploy history, newest first, one page at a time (see deploys.ts). */
+	deployHistory(options: DeployListOptions = {}): Promise<{ deploys: DeployRecord[]; next: number | null }> {
+		return listDeploys(this.db, this.clock(), STUCK_WINDOW_MS, options);
+	}
+
+	/** One release of the history with its report, alerts and neighbors; undefined when the deploys table doesn't have it. */
+	async deployDetail(seq: number): Promise<DeployDetail | undefined> {
+		const now = this.clock();
+		const row = await this.db.first<DeployRow>(`SELECT ${DEPLOY_ROW_COLUMNS} FROM deploys WHERE seq = ?`, [seq]);
+		if (!row) return undefined;
+		const [deploy] = await deployRecords(this.db, [row], now, STUCK_WINDOW_MS);
+		const alerts = (await this.db.all<AlertRow>("SELECT * FROM alerts WHERE seq = ? ORDER BY id DESC LIMIT ?", [seq, DEPLOY_ALERTS_MAX])).map(alertOf);
+		const neighbor = async (sql: string): Promise<DeployNeighbor | null> => {
+			const r = await this.db.first<{ seq: number; kind: string | null; artifact: string | null; t: number | null; received: number }>(sql, [row.branch, seq]);
+			return r ? { seq: r.seq, kind: r.kind ?? "deploy", artifact: r.artifact, at: toMs(r.t) ?? r.received } : null;
+		};
+		return {
+			deploy,
+			report: deploy.frozen ? null : await this.reports({ seq }),
+			alerts,
+			previous: await neighbor("SELECT seq, kind, artifact, t, received FROM deploys WHERE branch IS ? AND seq < ? ORDER BY seq DESC LIMIT 1"),
+			next: await neighbor("SELECT seq, kind, artifact, t, received FROM deploys WHERE branch IS ? AND seq > ? ORDER BY seq LIMIT 1"),
+		};
+	}
+
 	async alerts(options: { since?: number; level?: AlertLevel; unacked?: boolean; limit?: number } = {}): Promise<Alert[]> {
 		const where: string[] = ["created >= ?"];
 		const params: SqlValue[] = [options.since ?? 0];
@@ -1679,7 +1746,8 @@ export class FleetService {
 				[now - LOST_AFTER_MS, d.branch, d.seq, d.seq],
 			);
 			if (!rows.length) continue;
-			if (!(await this.db.run("UPDATE deploys SET stuck_at = ? WHERE seq = ? AND stuck_at IS NULL", [now, d.seq])).changes) continue;
+			// The count goes on the row too: the deploy history's "stuck" (its reports never say).
+			if (!(await this.db.run("UPDATE deploys SET stuck_at = ?, stuck = ? WHERE seq = ? AND stuck_at IS NULL", [now, rows.length, d.seq])).changes) continue;
 			stuck += rows.length;
 			await this.addAlert({
 				level: "warning",
@@ -1705,9 +1773,11 @@ export class FleetService {
 		if (top?.id && top.id > cap) await this.db.run("DELETE FROM server_metrics WHERE id <= ?", [top.id - cap]);
 		if (now - this.lastRetention > 3_600_000) {
 			this.lastRetention = now;
+			// The deploy history keeps each release's counts on its row before its oldest reports go.
+			await freezeSummaries(this.db, now, KEEP_REPORTS_MS);
 			await this.db.run("DELETE FROM reports WHERE received < ?", [now - KEEP_REPORTS_MS]);
 			await this.db.run("DELETE FROM alerts WHERE created < ?", [now - KEEP_ALERTS_MS]);
-			await this.db.run("DELETE FROM deploys WHERE received < ?", [now - KEEP_ALERTS_MS]);
+			await pruneDeploys(this.db, now, this.deployKeepDays(), this.options.deploysMaxRows);
 			await this.db.run("DELETE FROM marks WHERE received < ?", [now - KEEP_MARKS_MS]);
 			// And at most MARKS_MAX_ROWS (the newest): marks come from the CLI at 30 a minute at most, so a leaked game key
 			// can add a few thousand an hour, never an unbounded table.

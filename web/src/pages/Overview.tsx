@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { ChangeChip } from "@/components/ChangeChip";
 import { CompareToggle } from "@/components/CompareToggle";
 import { DayBars, fillDays, fillSteps, type DayPoint } from "@/components/DayBars";
+import { DeployMarksToggle, useDeployMarks, useOpenDeploy } from "@/components/DeployMarkers";
 import { SavedQueryTile } from "@/components/SavedQueryView";
 import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
@@ -52,7 +53,10 @@ export function overviewBars(data: OverviewResult, key: (typeof CHARTS)[number][
 	return { points: fillDays(data.days.map((d) => ({ date: d.date, value: d[key] })), data.from, data.to), per: "per day (UTC), by the day a session started" };
 }
 
-export function Body({ data, previous }: { data: OverviewResult; previous?: OverviewResult }) {
+export function Body({ data, previous, branch }: { data: OverviewResult; previous?: OverviewResult; branch?: string | undefined }) {
+	// Deploy markers on every chart, on the bar (day or step) each release falls in; a click opens its deploy page.
+	const deploys = useDeployMarks({ from: Date.parse(data.from), to: Date.parse(data.to) }, branch);
+	const openDeploy = useOpenDeploy();
 	return (
 		<>
 			<div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
@@ -60,13 +64,18 @@ export function Body({ data, previous }: { data: OverviewResult; previous?: Over
 					<Metric key={t.label} label={t.label} value={t.text(data)} delta={previous ? <ChangeChip change={change(t.value(data), t.value(previous))} against="the previous period" /> : undefined} />
 				))}
 			</div>
+			{deploys.all.length ? (
+				<div className="flex justify-end">
+					<DeployMarksToggle {...deploys} />
+				</div>
+			) : null}
 			<div className="grid gap-3 lg:grid-cols-2">
 				{CHARTS.map((c) => {
 					const { points, per } = overviewBars(data, c.key);
 					const before = previous ? overviewBars(previous, c.key).points.map((p) => p.value) : undefined;
 					return (
 						<Section key={c.key} title={c.label} description={before ? `${per}; dashed: the previous period` : per}>
-							<DayBars label={c.label} decimals={c.decimals} data={points} {...(before ? { previous: before } : {})} />
+							<DayBars label={c.label} decimals={c.decimals} data={points} {...(before ? { previous: before } : {})} marks={deploys.marks} onMarkClick={openDeploy} />
 						</Section>
 					);
 				})}
@@ -90,11 +99,12 @@ function PinnedQueries() {
 }
 
 export default function Overview() {
-	const { state } = useFilters();
+	const { state, apiFilters } = useFilters();
 	const [compare] = useCompare();
 	const period = useMemo(() => previousPeriod(state), [state]);
 	const q = useAnalytics("overview");
 	const prev = useAnalytics("overview", {}, { enabled: compare && period !== undefined, ...(period ? { filters: period.filters } : {}) });
+	const branch = typeof apiFilters.branch === "string" ? apiFilters.branch : undefined;
 	// The storage card is the server's disk: owners only (the backend refuses it to a viewer).
 	const readOnly = isReadOnly(useAuth());
 	return (
@@ -105,7 +115,7 @@ export default function Overview() {
 				actions={<CompareToggle disabled={!period} {...(!period ? { title: "Pick a start date to compare with the period before" } : {})} />}
 			/>
 			<QueryState query={q} loadingRows={6}>
-				{(data) => <Body data={data} {...(compare && prev.data ? { previous: prev.data } : {})} />}
+				{(data) => <Body data={data} branch={branch} {...(compare && prev.data ? { previous: prev.data } : {})} />}
 			</QueryState>
 			<PinnedQueries />
 			{readOnly ? null : <StorageCard />}

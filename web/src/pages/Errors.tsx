@@ -2,7 +2,8 @@
  * Error logs from game servers and clients: kinds with counts, a trend line, players affected, and a sample stack. A row
  * opens the kind in a side sheet (`?fp=` in the URL, so the link is shareable): where it happens, its stack, and the
  * players who hit it, each linking to their page, the servers that reported it (their pages) and its builds (the Errors
- * page filtered to one, and the Performance page with its deploy marks). "vs previous period" adds change chips to the tiles.
+ * page filtered to one, and its deploy page when the window's deploy marks name the build, else the Performance page with
+ * its deploy marks). "vs previous period" adds change chips to the tiles.
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -14,6 +15,7 @@ import { CompareToggle } from "@/components/CompareToggle";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
+import { DeployMarksToggle, MarkHoverCard, markerLines, useDeployMarks, useOpenDeploy, type MarkHover } from "@/components/DeployMarkers";
 import { UserIdLink } from "@/components/Identity";
 import { PlayerPageLink, playerLabel } from "@/components/PlayerLink";
 import { Sparkline } from "@/components/Sparkline";
@@ -25,7 +27,9 @@ import { api, type ErrorParams } from "@/lib/api";
 import { change } from "@/lib/benchmarks";
 import { previousWindow, useCompare } from "@/lib/compare";
 import { fmtAgo, fmtInt, fmtTime, plural, shortId } from "@/lib/format";
+import { bucketIndex, groupMarks, markDeploySeq } from "@/lib/deploys";
 import { useParam } from "@/lib/hooks";
+import type { DeployMark } from "@/lib/perf";
 import type { ErrorDetail, ErrorKind, ErrorList, ErrorPlayer, ErrorPlayers } from "@/lib/types";
 import { JobLink } from "./server/shared";
 
@@ -183,25 +187,45 @@ function Breakdown({ title, rows, link }: { title: string; rows: { label: string
 	);
 }
 
-function SeriesBars({ detail }: { detail: ErrorDetail }) {
+function SeriesBars({ detail, branch }: { detail: ErrorDetail; branch?: string }) {
 	const config: ChartConfig = { n: { label: "Errors", color: "var(--status-critical)" } };
 	const daily = detail.window.bucketSeconds >= 86_400;
 	const data = detail.series.map((p) => ({ t: p.t, n: p.n, label: daily ? p.t.slice(5, 10) : p.t.slice(5, 16).replace("T", " ") }));
+	// Deploy markers on the bar each release falls in (a click opens its deploy page).
+	const deploys = useDeployMarks({ from: Date.parse(detail.window.from), to: Date.parse(detail.window.to) }, branch);
+	const openDeploy = useOpenDeploy();
+	const [hover, setHover] = useState<MarkHover | null>(null);
+	const starts = detail.series.map((p) => Date.parse(p.t));
+	const groups = groupMarks(deploys.marks, (m) => data[bucketIndex(m.at, starts)]?.label);
 	return (
-		<ChartContainer config={config} className="aspect-auto h-40 w-full">
-			<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={1}>
-				<CartesianGrid vertical={false} />
-				<XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} />
-				<YAxis tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-				<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(l) => String(l)} />} />
-				<Bar dataKey="n" fill="var(--color-n)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
-			</BarChart>
-		</ChartContainer>
+		<div className="space-y-1">
+			{deploys.all.length ? (
+				<div className="flex justify-end">
+					<DeployMarksToggle {...deploys} />
+				</div>
+			) : null}
+			<div className="relative">
+				<ChartContainer config={config} className="aspect-auto h-40 w-full">
+					<BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -12 }} barCategoryGap={1}>
+						<CartesianGrid vertical={false} />
+						<XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} />
+						<YAxis tickLine={false} axisLine={false} width={40} allowDecimals={false} />
+						<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(l) => String(l)} />} />
+						<Bar dataKey="n" fill="var(--color-n)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+						{markerLines(groups, { onHover: setHover, onClick: openDeploy })}
+					</BarChart>
+				</ChartContainer>
+				<MarkHoverCard hover={hover} clickHint="Click: open the deploy" />
+			</div>
+		</div>
 	);
 }
 
-/** A build in a kind's breakdown: the Errors page filtered to it, and the Performance page for its deploy marks. */
-export function BuildLinks({ build, window }: { build: string; window: string }) {
+/**
+ * A build in a kind's breakdown: the Errors page filtered to it, and its deploy page when the window's deploy marks name
+ * the build (`seq`), else the Performance page with its deploy marks.
+ */
+export function BuildLinks({ build, window, seq }: { build: string; window: string; seq?: number | undefined }) {
 	if (build === "(unknown)") return <>{build}</>;
 	const errors = new URLSearchParams({ build, ...(window !== "24h" ? { window } : {}) });
 	return (
@@ -209,11 +233,36 @@ export function BuildLinks({ build, window }: { build: string; window: string })
 			<Link to={{ pathname: "/errors", search: `?${errors.toString()}` }} className="truncate underline-offset-2 hover:underline" title={`Only build ${build} on this page`}>
 				{build}
 			</Link>
-			<Link to={{ pathname: "/performance", search: `?${new URLSearchParams({ art: build }).toString()}` }} className="shrink-0 font-sans text-[11px] text-muted-foreground underline-offset-2 hover:underline" title={`Performance and deploy marks of ${build}`}>
-				perf
-			</Link>
+			{seq !== undefined ? (
+				<Link to={`/deploys/${seq}`} className="shrink-0 font-sans text-[11px] text-muted-foreground underline-offset-2 hover:underline" title={`The deploy of ${build}: its report, alerts and before vs after`}>
+					deploy #{seq}
+				</Link>
+			) : (
+				<Link to={{ pathname: "/performance", search: `?${new URLSearchParams({ art: build }).toString()}` }} className="shrink-0 font-sans text-[11px] text-muted-foreground underline-offset-2 hover:underline" title={`Performance and deploy marks of ${build}`}>
+					perf
+				</Link>
+			)}
 		</span>
 	);
+}
+
+/** The builds' seqs from the window's release marks (the latest release of a build when it was deployed more than once). */
+export function buildSeqs(marks: readonly DeployMark[]): Map<string, number> {
+	const out = new Map<string, number>();
+	for (const m of marks) {
+		const seq = markDeploySeq(m);
+		if (seq === null || !m.artifact) continue;
+		const known = out.get(m.artifact);
+		if (known === undefined || seq > known) out.set(m.artifact, seq);
+	}
+	return out;
+}
+
+/** The "By build" breakdown with each build's links; the marks are the same query as the series chart's. */
+function KindBuilds({ detail, window, branch }: { detail: ErrorDetail; window: string; branch?: string }) {
+	const deploys = useDeployMarks({ from: Date.parse(detail.window.from), to: Date.parse(detail.window.to) }, branch);
+	const seqs = useMemo(() => buildSeqs(deploys.all), [deploys.all]);
+	return <Breakdown title="By build" rows={detail.byBuild.map((r) => ({ label: r.build, n: r.n }))} link={(b) => <BuildLinks build={b} window={window} seq={seqs.get(b)} />} />;
 }
 
 /** The game servers that reported a kind (newer backends), each opening its server page. */
@@ -322,7 +371,7 @@ function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
 							<span className="font-mono text-xs">{d.kind.fp}</span>
 						</KeyValue>
 					</div>
-					<SeriesBars detail={d} />
+					<SeriesBars detail={d} {...(params.branch ? { branch: params.branch } : {})} />
 					<div className="space-y-1">
 						<div className="text-xs font-medium text-muted-foreground">Players who hit it</div>
 						<KindPlayers fp={fp} params={params} />
@@ -334,7 +383,7 @@ function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
 						</div>
 					) : null}
 					<div className="grid gap-4 md:grid-cols-3">
-						<Breakdown title="By build" rows={d.byBuild.map((r) => ({ label: r.build, n: r.n }))} link={(b) => <BuildLinks build={b} window={window} />} />
+						<KindBuilds detail={d} window={window} {...(params.branch ? { branch: params.branch } : {})} />
 						<Breakdown title="By branch" rows={d.byBranch.map((r) => ({ label: r.branch, n: r.n }))} />
 						<Breakdown title="By side" rows={d.byRealm.map((r) => ({ label: r.realm, n: r.n }))} />
 					</div>

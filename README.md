@@ -148,6 +148,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_ALERT_WEBHOOK_FORMAT`, `TYPETORCH_ALERT_WEBHOOK_LEVELS` | detected, `critical` | `discord`, `slack` or `json`; which levels are sent. |
 | `TYPETORCH_ERASURE_DELETE_LINK` | `0` | `1` also deletes the DataStore link on erasure. |
 | `TYPETORCH_ERROR_KEEP_DAYS`, `TYPETORCH_ERROR_MAX_KINDS` | `30`, `5000` | Error log retention and the most kinds stored. |
+| `TYPETORCH_DEPLOY_KEEP_DAYS` | `365` | Days of releases in the [deploy history](#deploy-history) (at most 10,000 rows). |
 | `TYPETORCH_ERRORS_IP_PER_MINUTE` | `1200` | `POST /v1/errors` per address per minute (game servers share egress addresses). |
 | `TYPETORCH_ERROR_ROWS_PER_DAY` | `2000000` | New error count and player rows per UTC day; past it new rows are dropped and counted. |
 | `TYPETORCH_SESSION_IDLE_HOURS`, `TYPETORCH_SESSION_MAX_DAYS` | `12`, `7` | Explorer session lifetime. |
@@ -195,6 +196,7 @@ as noted for the token login).
 | Error kinds stored (`errorMaxKinds`) | `TYPETORCH_ERROR_MAX_KINDS` | 100 to 1,000,000 |
 | Error rows per day (`errorRowsPerDay`) | `TYPETORCH_ERROR_ROWS_PER_DAY` | 10,000 to 1,000,000,000 |
 | Audit log history (`auditKeepDays`) | `TYPETORCH_AUDIT_KEEP_DAYS` | 7 to 3,650 days (pruned hourly) |
+| Deploy history (`deployKeepDays`) | `TYPETORCH_DEPLOY_KEEP_DAYS` | 7 to 3,650 days (pruned hourly; at most 10,000 releases either way) |
 
 The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
 wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
@@ -558,6 +560,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/roblox/products` | admin, web | game pass and developer product names, Robux prices and icons for the explorer's product tooltips, looked up by the server |
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
+| `GET /v1/fleet/deploys`, `GET /v1/fleet/deploys/<seq>` | admin, web | the [deploy history](#deploy-history): releases newest first, paged; one release with its report, alerts and neighbors |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
 | `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state, its [offline history](#debug-bundles-and-offline-history)) |
 | `GET /v1/fleet/servers/<jobId>/bundles`, `GET /v1/fleet/bundles/<id>` | admin, web | [debug bundles](#debug-bundles-and-offline-history); the web role gets a bundle's body without `playerLogs` |
@@ -935,6 +938,18 @@ icons and prices from Roblox through the product tooltip), payer conversion (pay
 purchase rate (payers who bought 2+ times), and the **first purchase**: how long new players (first-ever session in the range)
 took from joining to their first purchase (median and average), their conversion, and which of their sessions it happened in
 (1, 2, 3, 4-5, 6-10, 11+).
+**Deploys** (`/deploys`, Observe group): the [deploy history](#deploy-history), newest first, 50 at a time (**Load older
+deploys**), with who started each release, its outcome and servers ok / failed / stuck and its top deploy error; a branch
+box filters it. A row opens **`/deploys/<seq>`**: the release, its servers' reports (while kept, else the counts the history
+kept), the alerts that name its seq, links to the release before and after it on its branch, and **Before vs after**: two equal
+windows (1 h to 3 days each, shortened to the time since the deploy) of error logs (counts, kinds, the kinds new after it) and
+the `perf-compare` numbers, each saying so when this backend doesn't have them.
+
+**Deploy markers** on the time charts (Overview, the error series, Performance, a server's graphs, Backend stats): a vertical
+line per release (and kernel publish / backup refresh, from `GET /v1/fleet/marks`) labelled `#<seq> <branch>`, with a hover
+card; clicking a release opens its deploy page (Performance keeps its own filter-to-build click). On bar charts a marker sits on
+the bar it falls in; several on one bar share a line. The **Deploys (n)** chip next to the charts hides them on every chart
+(remembered in the browser).
 
 **Backend stats** (`/backend`, owners only): what the backend process itself is doing, like Roblox's Performance tab for a game
 server. Tiles with the last 10 seconds: requests / s (and 5xx / s), queries / s (DuckDB statements; SQLite reads next to it),
@@ -1361,12 +1376,14 @@ section it still writes for kernels before 0.4), so it works even when a game's 
 | `POST /v1/fleet/alert` | game | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k, d? }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`). `d` (kernel 0.5.2) is kept as the alert's `details` when it is a flat object (at most 16 keys; values strings of at most 1,000 bytes, numbers or booleans; at most 4 KB of JSON), else `details` is `null` (never a 400). `deploy_failed` carries `{ stage, error, attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }`; from 0.5.3 `d.bundle` names the [debug bundle](#debug-bundles-and-offline-history) that follows |
 | `POST /v1/fleet/bundle` | game | a kernel 0.5.3 [debug bundle](#debug-bundles-and-offline-history) (at most 512 KB, plain or `Content-Encoding: gzip`) -> `202 { ok: true, id }` |
 | `POST /v1/fleet/closing` | game | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
-| `POST /v1/fleet/deploy` | game | `{ s, b, a, ch, t, k?, fr?, m? }` from the CLI after a release (stuck detection's start time and a chart mark): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `t` unix ms or s (a clock a day off is replaced by the backend's) |
+| `POST /v1/fleet/deploy` | game | `{ s, b, a, ch, t, k?, fr?, m?, by? }` from the CLI after a release (stuck detection's start time, a chart mark and a deploy history row): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `by` who or what started it (64: a user, `ci`, `auto_rollback`); `t` unix ms or s (a clock a day off is replaced by the backend's) |
 | `POST /v1/fleet/mark` | game | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
 | `GET /v1/fleet/servers?branch=&maxAge=` | admin, web | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
 | `GET /v1/fleet/servers?gone=1&branch=&limit=` | admin, web | `{ servers: [...rows + closedAt, lostAt, state: closed\|lost, firstSeen] }`: servers that closed or were lost (kept 30 days), the most recently gone first (`limit` 200, at most 1,000) |
 | `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin, web | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }`. A `since` older than the 2-hour raw window adds the 5-minute rollups before it (one point per bucket, `t` = the bucket's start) and `rolledUntil` (unix ms: where the raw points take over) |
 | `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin, web | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
+| `GET /v1/fleet/deploys?branch=&before=<seq>&limit=` | admin, web | `{ deploys: [...], next }`: the [deploy history](#deploy-history), highest seq first; `limit` 50, at most 100; `next` (the last seq of the page, or `null` at the end) goes into `before` for the page after |
+| `GET /v1/fleet/deploys/<seq>` | admin, web | `{ deploy, report, alerts, previous, next }`: one release; `report` is the `reports?seq=` answer while its reports are kept (`null` once frozen), `alerts` the alerts with its seq (50 newest), `previous` / `next` `{ seq, kind, artifact, at }` on its branch. `404` when the history doesn't have it |
 | `GET /v1/fleet/alerts?since=<ms>&level=&unacked=1&limit=` | admin, web | `{ alerts: [...] }` (each with `at` in ms and `acked`) |
 | `GET /v1/fleet/marks?since=&until=&branch=&kinds=&limit=` | admin, web | `{ marks: [{ id, kind, at, time, branch, seq, artifact, channel, from, kernel, placeVersion, message, results?, inferred? }] }`, oldest first: every release in the deploys table (with its servers per report result; one known only from server reports has `inferred: true`) and the kernel / backup marks. Times unix ms or ISO; default the last 30 days; at most a 366-day window and the `limit` (500, at most 2,000) newest. `branch` keeps that branch's releases and every place-wide mark |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | `{ by? }` |
@@ -1409,7 +1426,7 @@ message (one alert per branch and artifact per sweep, listing the JobIds; critic
 with no report for it (it lists those JobIds and says nothing about the build). **Notifications:**
 `TYPETORCH_ALERT_WEBHOOK_URL` (Discord, Slack or generic JSON, detected from the URL or `TYPETORCH_ALERT_WEBHOOK_FORMAT`), critical
 only by default (`TYPETORCH_ALERT_WEBHOOK_LEVELS`), the same (code, branch, artifact) at most once per 10 minutes, at most
-20 posts a minute. Reports are kept 30 days, alerts and releases 90 days, kernel / backup marks a year (at most 5,000, the newest), closed
+20 posts a minute. Reports are kept 30 days, alerts 90 days, releases (the deploy history) `TYPETORCH_DEPLOY_KEEP_DAYS` (365) and at most 10,000, kernel / backup marks a year (at most 5,000, the newest), closed
 and lost servers 30 days (at most 50,000, the most recently gone kept), debug bundles 30 days. Per-JobId limits (40 a minute) sit above the kernel's
 own 30.
 
@@ -1425,6 +1442,22 @@ gets 400 before any limiter sees it.
 
 The fleet core (`src/fleet/service.ts`, `http.ts`) uses no Node APIs (async SQLite interface, Web Request/Response),
 so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durable Object.
+
+### Deploy history
+
+Every release in the `deploys` table (the CLI's `POST /v1/fleet/deploy`, or a seq first heard of in a server's report:
+`inferred`, kind `deploy`) is a row of the history (`src/fleet/deploys.ts`): seq, branch, artifact, channel, kind, the build
+before, the note, `startedBy` (the CLI's `by`; the explorer shows `CLI` without one and `server reports` for an inferred one),
+the start time, and how it went: servers per report result (each server's newest report), `ok` (swapped, booted, skipped),
+`failed` (failed, rolled_back), `stuck` (the count the `server_stuck` check found), the 5 most common deploy errors (300
+characters each) and the number of distinct ones, the first and last report, and an `outcome`: `pending`, `ok`, `partial`,
+`failed`, `stuck` or `no_reports`. While a release's reports are kept (30 days) the counts come from them on every read (20
+releases per statement, yielding in between); a day before its oldest reports go, the hourly retention writes the counts onto
+the row (`frozen: true`) and the history shows those from then on. Rows are kept `deployKeepDays` days
+(`TYPETORCH_DEPLOY_KEEP_DAYS`, 365, a [runtime setting](#runtime-settings-the-settings-page)) and at most 10,000 (the newest
+arrivals): the CLI's 30 posts a minute and reports with made-up seqs can't grow it without end. Older fleet files get the new
+columns on start (`ALTER TABLE ... ADD COLUMN`, nothing rewritten); their releases read as not frozen until the retention
+freezes them.
 
 ## Remote debug
 

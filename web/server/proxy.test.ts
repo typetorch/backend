@@ -66,6 +66,11 @@ describe("explorer proxy guard", () => {
 		// The Performance page's marks and a server's history.
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/marks?since=1&until=2&branch=prod", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/servers/11111111-2222-3333-4444-555555555555/metrics?since=1", headers: same }, true)).toEqual({ ok: true });
+		// The deploy history: the list (paged) and one release by seq; nothing else under /deploys.
+		expect(guardRequest({ method: "GET", url: "/v1/fleet/deploys?branch=prod&before=42&limit=50", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/fleet/deploys/42", headers: same }, true)).toEqual({ ok: true });
+		expect(guardRequest({ method: "GET", url: "/v1/fleet/deploys/abc", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
+		expect(guardRequest({ method: "POST", url: "/v1/fleet/deploys", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "GET", url: "/v1/fleet/servers/../storage/metrics", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "POST", url: "/v1/fleet/mark", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
 		expect(guardRequest({ method: "POST", url: "/v1/sql", headers: same }, true)).toEqual({ ok: true });
