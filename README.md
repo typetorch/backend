@@ -727,10 +727,10 @@ reached it (drop-offs: their last step and when; playtime funnels: their playtim
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
 Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
-Sessions, Timeline and Errors views), Flow, Experiments, First session, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
+Sessions, Timeline and Errors views), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
-Events, Funnels, Flow, Retention, First session, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
+Events, Funnels, Flow, Retention, First session, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
 Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
 TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
 name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
@@ -760,6 +760,20 @@ Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-
 **Live servers**: each server's latest TPS and memory from its heartbeat, and its own history
 (`GET /v1/fleet/servers/<jobId>/metrics`, kernel 0.4.2 heartbeats; the page says so when a server or the backend doesn't have
 it). A **Step** picker overrides the window's step (1 min to 1 day, 2 to 400 steps).
+
+**Economy** (`/economy`): the in-game currency from the game's server-sent `currency` rows (the `economy` query), one currency at
+a time (a picker lists every currency in the range, busiest first; `?currency=`). Earned vs spent per UTC day, the running
+balance (the net added up from the start of the range: games log flows, not balances, so above zero currency piles up),
+earned per active player, and the **top sources and sinks** by reason with their share of all earned or spent. Totals: earned,
+spent, net, spent per earned (above 100% the economy drains), per active player and per player with the currency (average and
+median net). Without currency rows the page says which framework call to make.
+
+**Monetization** (`/monetization`): Robux from the game's server-sent `purchase` rows (the `monetization` query; each distinct
+row once, like the other revenue queries). Revenue, purchases, payers and ARPDAU per UTC day, **revenue by product** (names,
+icons and prices from Roblox through the product tooltip), payer conversion (payers / active players), ARPPU, the repeat
+purchase rate (payers who bought 2+ times), and the **first purchase**: how long new players (first-ever session in the range)
+took from joining to their first purchase (median and average), their conversion, and which of their sessions it happened in
+(1, 2, 3, 4-5, 6-10, 11+).
 
 **Backend stats** (`/backend`, owners only): what the backend process itself is doing, like Roblox's Performance tab for a game
 server. Tiles with the last 10 seconds: requests / s (and 5xx / s), queries / s (DuckDB statements; SQLite reads next to it),
@@ -895,6 +909,8 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `perf-client` | client fps, memory and ping (tech/client) over time and per group: `by` = `none`, `dev` (device class), `input`, `screen` (viewport short side: `<400`, `400-599`, `600-799`, `800-1079`, `1080+`), `branch`, `art`; p10 (the plain 10th percentile), p50, p90 / p99 on the bad side, avg, n; the busiest `maxGroups` (8, at most 20). Step: the window's (`windowBucketMs`), or `bucketMinutes` (1-1440), or about `buckets` (10-400). At most 92 days and 400 steps | 7 days |
 | `perf-server` | server TPS (`hb`), physics FPS, memory (tech/server) and players (each server's average per step, summed), the same way; `by` = `none`, `branch`, `art` (server rows have no player: device, new/returning and variant filters don't apply) | 7 days |
 | `perf-compare` | the client and server numbers side by side: `mode: "builds"` (`arts`, at most 6; default the 4 busiest) or `mode: "around"` (`at`, unix ms or ISO, e.g. a mark's time: before vs after over two windows of `hours` (1-168, 24), shortened to the time since `at`) | 7 days |
+| `economy` | one currency's economy from `currency` rows (`currency`; default the busiest; `currencies` lists them all): earned, spent, net and the running balance per UTC day (dense up to 400 days), top `top` (10, at most 50) sources and sinks by `reason` with their share, totals per active player and per player with the currency (earners, spenders, average / median net, `sinkRatio` = spent / earned). Rows without a player count in the flows, not per player. `deltaKey` / `reasonKey` name the props (default `delta`, `reason`). Server-sent distinct rows only | 30 days |
+| `monetization` | Robux from `purchase` rows: robux, purchases, payers and ARPDAU per UTC day, revenue by product (`products`, at most `top` (25, at most 100), with kind, share and payers), totals (payer conversion, ARPPU, ARPU, ARPDAU over player-days, repeat purchase rate) and the first purchase of new players (median / average minutes from their first row, conversion, by session number: 1, 2, 3, 4-5, 6-10, 11+). `robuxKey` / `productKey` name the props. Server-sent distinct player rows only, like `players` | 30 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
 once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can
