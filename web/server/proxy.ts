@@ -124,6 +124,8 @@ export const ALLOWED_ROUTES: { method: "GET" | "POST"; path: RegExp }[] = [
 	{ method: "GET", path: /^\/v1\/admin\/settings$/ },
 	// The Backend stats page: the server's own metrics (counts and timings, no secrets).
 	{ method: "GET", path: /^\/v1\/admin\/stats$/ },
+	// The Settings page's backend alert rules: each rule's state (no secrets).
+	{ method: "GET", path: /^\/v1\/admin\/alert-rules$/ },
 ];
 
 export interface GuardInput {

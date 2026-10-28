@@ -45,6 +45,7 @@
  *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
  *   PATCH /v1/admin/settings        { key: value | null } (null = back to the environment), applied at once; lockout guards
  *   POST /v1/admin/settings/test-alert   one test alert through the current webhook (3 a minute)
+ *   GET  /v1/admin/alert-rules       the backend alert rules' state (src/alerts): ok, waiting, firing, off (admin)
  *   GET  /v1/admin/stats?window=1m|5m|15m|1h   server metrics (server/metrics.ts): requests, queries, inserts per second,
  *                                   latency percentiles, memory, CPU, per route group (the explorer's Backend stats page)
  *
@@ -89,6 +90,7 @@ import { RemoteDebugHub, type Caller } from "../fleet/remote-debug.ts";
 import { handleRemoteDebug, isRemoteDebugPath } from "../fleet/remote-debug-http.ts";
 import { RemoteDebugWaker } from "../fleet/remote-debug-wake.ts";
 import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
+import { ALERT_TICK_MS, BackendAlerts, diskOf } from "../alerts/evaluator.ts";
 import { runtimeName, serve, type Served } from "../runtime.ts";
 import { validateSettings } from "../settings.ts";
 import { BatchShapeError, validateBatch } from "../validate.ts";
@@ -160,6 +162,8 @@ export interface App {
 	readonly live: LiveHub;
 	/** Server metrics (GET /v1/admin/stats): requests, queries, inserts, latency, memory. */
 	readonly metrics: ServerMetrics;
+	/** Backend alerts (src/alerts): rules over the backend's own data. Undefined without the fleet part (its alert store). */
+	readonly backendAlerts?: BackendAlerts;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
 	readonly remoteDebug?: RemoteDebugHub;
 	/** Plans/25 "Instant wake": the wake publisher (off without OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID). */
@@ -291,6 +295,21 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	});
 	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert) }) : undefined;
 	const access = AccessStore.at(config.dataDir, clock);
+	// Backend alerts: once a minute, rules over the error tables, the fleet, ingest, these metrics and the disk, raised
+	// through the fleet's alert store (the Fleet page, the stream, the bus and the webhook, like the kernel's).
+	const backendAlerts = fleet
+		? new BackendAlerts({
+				db: sqlite,
+				fleet: true,
+				analytics: () => warehouse !== undefined && analytics === "ready",
+				metrics: () => metrics.view("1h"),
+				disk: () => diskOf(config.dataDir),
+				settings: () => runtime.get("backendAlerts"),
+				raise: (alert) => fleet.serverAlert(alert),
+				clock,
+				log,
+			})
+		: undefined;
 	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
 	const remoteDebug = fleet ? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit") }) : undefined;
 	// Plans/25 "Instant wake": with OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID, a watch that starts on a server
@@ -1782,6 +1801,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (!window) return json(400, { error: `window must be one of ${STATS_WINDOWS.join(", ")}` });
 				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName() });
 			}
+			if (path === "/v1/admin/alert-rules") {
+				if (method !== "GET") return json(405, { error: "GET only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				return backendAlerts ? json(200, backendAlerts.status()) : json(404, { error: "backend alerts need the fleet part (its alert store)" });
+			}
 			if (path === "/v1/admin/settings/test-alert") {
 				if (method !== "POST") return json(405, { error: "POST only" });
 				const admin = manage();
@@ -1929,6 +1954,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (warehouse) startWarehouseJobs(warehouse);
 		const jobs = [setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000), setInterval(() => metrics.sample(), 1000)];
 		if (fleet) jobs.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
+		if (backendAlerts) jobs.push(setInterval(() => void backendAlerts.tick().catch((e) => log(`backend alerts failed: ${(e as Error).message}`)), ALERT_TICK_MS));
 		for (const t of jobs) t.unref?.();
 		timers.push(...jobs);
 	}
@@ -2057,6 +2083,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		access,
 		live,
 		metrics,
+		...(backendAlerts ? { backendAlerts } : {}),
 		...(central ? { central: { fingerprint: central.key.fingerprint, report: () => central.reporter.report(), devices: central.devices } } : {}),
 		sessionCount: () => sessions.size,
 		sessions,

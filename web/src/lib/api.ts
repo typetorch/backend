@@ -5,6 +5,7 @@
  * server's own message.
  */
 import type {
+	AlertRulesStatus,
 	AuthInfo,
 	BackendStats,
 	BackfillResult,
@@ -229,6 +230,8 @@ export function createApi(options: ApiOptions = {}) {
 			request<SettingsView>("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(changes), ...(signal ? { signal } : {}) }),
 		/** One test alert through the saved webhook (the backend allows 3 a minute). */
 		testAlert: (signal?: AbortSignal) => post<TestAlertResult>("/v1/admin/settings/test-alert", {}, signal),
+		/** The backend alert rules' state on the last run (the rules themselves are the backendAlerts setting). */
+		alertRules: (signal?: AbortSignal) => get<AlertRulesStatus>("/v1/admin/alert-rules", signal),
 		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */
 		backendStats: (window: StatsWindow, signal?: AbortSignal) => get<BackendStats>(`/v1/admin/stats${qs({ window })}`, signal),
 		/** Sign in with typetorch.dev: the browsers trusted for full admin (owners only). */

@@ -18,6 +18,7 @@
  */
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { BACKEND_ALERTS_ENV, checkAlertSettings, defaultAlertSettings, rulesMeta, type BackendAlertSettings } from "../alerts/rules.ts";
 import { isHttpsUrl, parseUserIds, type ServerConfig } from "./config.ts";
 import { ipAllowed, parseIpRules, type IpRule } from "./ipfilter.ts";
 
@@ -57,10 +58,12 @@ export interface RuntimeValues {
 	errorKeepDays: number;
 	errorMaxKinds: number;
 	errorRowsPerDay: number;
+	/** The backend alert rules (src/alerts/rules.ts): on/off, levels and thresholds. */
+	backendAlerts: BackendAlertSettings;
 }
 export type RuntimeKey = keyof RuntimeValues;
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingGroup = "alerts" | "access" | "limits" | "retention";
+export type SettingGroup = "alerts" | "backendAlerts" | "access" | "limits" | "retention";
 
 interface BaseDef {
 	key: RuntimeKey;
@@ -78,13 +81,15 @@ export type SettingDef =
 	| (BaseDef & { kind: "ips"; maxEntries: number })
 	| (BaseDef & { kind: "users"; maxEntries: number })
 	| (BaseDef & { kind: "switch" })
-	| (BaseDef & { kind: "number"; min: number; max: number; unit: string; zero?: string });
+	| (BaseDef & { kind: "number"; min: number; max: number; unit: string; zero?: string })
+	| (BaseDef & { kind: "alertRules" });
 
 /** The editable settings, in the order the Settings page shows them. Bounds apply to values saved from the dashboard. */
 export const SETTINGS: readonly SettingDef[] = [
 	{ key: "alertWebhookUrl", env: "TYPETORCH_ALERT_WEBHOOK_URL", group: "alerts", kind: "secret", label: "Alert webhook", help: "A Discord, Slack or JSON webhook (https). Never shown again once saved." },
 	{ key: "alertWebhookFormat", env: "TYPETORCH_ALERT_WEBHOOK_FORMAT", group: "alerts", kind: "choice", options: WEBHOOK_FORMATS, label: "Webhook format", help: "auto picks Discord or Slack from the URL, else JSON." },
 	{ key: "alertWebhookLevels", env: "TYPETORCH_ALERT_WEBHOOK_LEVELS", group: "alerts", kind: "levels", options: ALERT_LEVELS, label: "Alert levels sent", help: "Which alert levels go to the webhook." },
+	{ key: "backendAlerts", env: BACKEND_ALERTS_ENV, group: "backendAlerts", kind: "alertRules", label: "Backend alert rules", help: "Alerts the backend raises from its own data (errors, players online, ingest, its own health, disk)." },
 	{ key: "adminAllowIps", env: "TYPETORCH_ADMIN_ALLOW_IPS", group: "access", kind: "ips", maxEntries: ALLOW_LIST_MAX, label: "Admin allow list", help: "Addresses and CIDR ranges that may reach the explorer and admin routes; empty = any address. Game routes stay open." },
 	{ key: "tokenLogin", env: "TYPETORCH_TOKEN_LOGIN", group: "access", kind: "switch", label: "Admin token login", help: "The explorer's paste-the-token login. The CLI's Bearer token works either way." },
 	{ key: "webViewers", env: "TYPETORCH_WEB_VIEWERS", group: "access", kind: "users", maxEntries: VIEWERS_MAX, label: "Viewers (read-only)", help: "Roblox UserIds who may sign in with Roblox and see everything but change nothing (the web role). Owners from the access list are admins either way." },
@@ -180,6 +185,8 @@ export type SettingView = {
 	zero?: string;
 	unit?: string;
 	maxEntries?: number;
+	/** alertRules: the rule definitions (labels, thresholds and their bounds). */
+	rules?: ReturnType<typeof rulesMeta>;
 } & ({ set: boolean; fallbackSet: boolean } | { value: unknown; fallback: unknown; fallbackSource: "env" | "default" });
 
 export interface PatchResult {
@@ -221,8 +228,8 @@ function parseAllowList(def: SettingDef & { kind: "ips" }, raw: unknown): string
 	return out;
 }
 
-/** Checks one value strictly; returns it normalised. Throws SettingsError (never with the secret in it). */
-export function checkSetting(def: SettingDef, raw: unknown): RuntimeValues[RuntimeKey] {
+/** Checks one value strictly; returns it normalised (`base`: what a partial alertRules value keeps). Throws SettingsError (never with the secret in it). */
+export function checkSetting(def: SettingDef, raw: unknown, base?: unknown): RuntimeValues[RuntimeKey] {
 	switch (def.kind) {
 		case "secret": {
 			if (typeof raw !== "string") throw new SettingsError(`${def.key} is a string: an https:// URL, or "" for none`, 400, def.key);
@@ -254,6 +261,12 @@ export function checkSetting(def: SettingDef, raw: unknown): RuntimeValues[Runti
 		case "switch":
 			if (typeof raw !== "boolean") throw new SettingsError(`${def.key} is true or false`, 400, def.key);
 			return raw;
+		case "alertRules":
+			try {
+				return checkAlertSettings(raw, base as BackendAlertSettings | undefined);
+			} catch (error) {
+				throw new SettingsError((error as Error).message, 400, def.key);
+			}
 		case "number": {
 			const range = `${def.min} to ${def.max}${def.zero ? ` (or 0 = ${def.zero})` : ""}`;
 			if (typeof raw !== "number" || !Number.isSafeInteger(raw)) throw new SettingsError(`${def.key} must be a whole number from ${range}`, 400, def.key);
@@ -282,6 +295,7 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		errorKeepDays: config.errorKeepDays,
 		errorMaxKinds: config.errorMaxKinds,
 		errorRowsPerDay: config.errorRowsPerDay,
+		backendAlerts: config.backendAlerts ?? defaultAlertSettings(),
 	};
 }
 
@@ -384,6 +398,7 @@ export class RuntimeSettings {
 				...(def.kind === "choice" || def.kind === "levels" ? { options: [...def.options] } : {}),
 				...(def.kind === "number" ? { min: def.min, max: def.max, unit: def.unit, ...(def.zero ? { zero: def.zero } : {}) } : {}),
 				...(def.kind === "ips" || def.kind === "users" ? { maxEntries: def.maxEntries } : {}),
+				...(def.kind === "alertRules" ? { rules: rulesMeta() } : {}),
 			};
 			if (def.kind === "secret") return { ...meta, set: this.get(def.key) !== "", fallbackSet: this.fallback[def.key] !== "" };
 			const copy = (v: unknown) => (Array.isArray(v) ? [...v] : v);
@@ -409,7 +424,7 @@ export class RuntimeSettings {
 				delete next[def.key];
 				touched.set(def.key, "reset");
 			} else {
-				(next as Record<string, unknown>)[def.key] = checkSetting(def, raw);
+				(next as Record<string, unknown>)[def.key] = checkSetting(def, raw, this.get(def.key));
 				touched.set(def.key, "set");
 			}
 		}
@@ -496,7 +511,7 @@ export class RuntimeSettings {
 				continue;
 			}
 			try {
-				(this.stored as Record<string, unknown>)[def.key] = checkSetting(def, raw);
+				(this.stored as Record<string, unknown>)[def.key] = checkSetting(def, raw, this.fallback[def.key]);
 			} catch (error) {
 				this.log(`runtime settings: ignored the stored ${def.key} (${(error as Error).message})`);
 			}

@@ -7,6 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, RotateCcw, Save, Send, Undo2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { alertRulesChange, BackendAlertRules, type AlertRulesDraft } from "@/components/BackendAlertRules";
 import { CentralLoginSection } from "@/components/CentralLoginSection";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
@@ -25,6 +26,7 @@ export const SETTINGS_KEY = ["admin-settings"] as const;
 
 const GROUPS: { id: RuntimeSetting["group"]; title: string; description: string }[] = [
 	{ id: "alerts", title: "Alerts", description: "Where fleet alerts go, and which ones." },
+	{ id: "backendAlerts", title: "Backend alerts", description: "Alerts the backend raises from its own data, checked once a minute. They show on the Fleet page and go to the webhook like the game's." },
 	{ id: "access", title: "Access", description: "Who may reach the explorer, and how owners sign in." },
 	{ id: "limits", title: "Rate limits", description: "Per minute. Game servers past a limit get 429 and retry." },
 	{ id: "retention", title: "Retention and error budgets", description: "How long data is kept, and how much error data is stored." },
@@ -77,6 +79,10 @@ export function buildChanges(settings: RuntimeSetting[], draft: Draft, newSecret
 			const problem = numberProblem(setting, String(value));
 			if (problem) problems[key] = problem;
 			else changes[key] = Number(String(value).trim());
+		} else if (setting.kind === "alertRules" && setting.rules) {
+			const result = alertRulesChange(setting.rules, value as AlertRulesDraft);
+			if ("problem" in result) problems[key] = `a valid value (${result.problem})`;
+			else changes[key] = result.value;
 		} else if (setting.kind === "ips" || setting.kind === "users") changes[key] = splitList(String(value));
 		else changes[key] = value;
 	}
@@ -328,6 +334,8 @@ function SettingsForm({ data }: { data: SettingsView }) {
 			);
 		const shown = Object.hasOwn(draft, setting.key) ? (draft[setting.key] === null ? setting.fallback : draft[setting.key]) : setting.value;
 		switch (setting.kind) {
+			case "alertRules":
+				return setting.rules ? <BackendAlertRules meta={setting.rules} value={shown as AlertRulesDraft} disabled={disabled} onChange={(v) => set(setting.key, v)} /> : null;
 			case "number":
 				return (
 					<Input
