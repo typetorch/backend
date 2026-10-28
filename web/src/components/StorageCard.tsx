@@ -97,6 +97,13 @@ function Body({ r }: { r: StorageReport }) {
 						<div className="text-xs text-muted-foreground">of {fmtBytes(r.disk.totalBytes)}</div>
 					</div>
 				) : null}
+				{r.disk && r.disk.totalBytes > 0 ? (
+					<div>
+						<div className="text-xs text-muted-foreground">Disk used</div>
+						<div className="text-2xl font-semibold tabular-nums">{fmtBytes(r.disk.totalBytes - r.disk.freeBytes)}</div>
+						<div className="text-xs text-muted-foreground">{fmtPct((r.disk.totalBytes - r.disk.freeBytes) / r.disk.totalBytes)} of the disk (everything on it, not only TypeTorch)</div>
+					</div>
+				) : null}
 			</div>
 			<Breakdown parts={r.parts} total={r.totalBytes} />
 			<div className="flex flex-wrap gap-x-6 gap-y-1">

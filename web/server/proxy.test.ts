@@ -72,6 +72,7 @@ describe("explorer proxy guard", () => {
 		expect(guardRequest({ method: "GET", url: "/v1/storage", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/admin/stats?window=5m", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/admin/stats", headers: same }, true)).toMatchObject({ ok: false, status: 403 });
+		expect(guardRequest({ method: "GET", url: "/v1/admin/alert-rules", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/identity?uid=1", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "GET", url: "/v1/identity/pid-abc_123/profile", headers: same }, true)).toEqual({ ok: true });
 		expect(guardRequest({ method: "POST", url: "/v1/identity/pid-abc_123/profile", headers: same }, true)).toMatchObject({ ok: false, status: 403 });

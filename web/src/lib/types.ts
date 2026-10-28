@@ -1255,13 +1255,67 @@ export interface ErrorDetail {
 
 /** "dashboard" = saved on the Settings page; "env" = the environment; "default" = neither (the built-in default). */
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number";
+export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number" | "alertRules";
+
+/** One threshold of a backend alert rule (or a general value: repeatMinutes, perHour). */
+export interface AlertParamDef {
+	key: string;
+	env: string;
+	label: string;
+	unit: string;
+	min: number;
+	max: number;
+	default: number;
+	zero?: string;
+}
+
+export type AlertLevelName = "critical" | "warning" | "info";
+
+export interface AlertRuleDef {
+	id: string;
+	code: string;
+	env: string;
+	group: "errors" | "players" | "ingest" | "backend" | "disk";
+	label: string;
+	help: string;
+	level: AlertLevelName;
+	on: boolean;
+	needs: ("analytics" | "fleet")[];
+	params: AlertParamDef[];
+}
+
+/** The backend alert rules' definitions (on the backendAlerts setting). */
+export interface AlertRulesMeta {
+	general: AlertParamDef[];
+	rules: AlertRuleDef[];
+}
+
+/** The backendAlerts setting's value. */
+export interface BackendAlertSettings {
+	on: boolean;
+	repeatMinutes: number;
+	perHour: number;
+	rules: Record<string, { on: boolean; level: AlertLevelName; params: Record<string, number> }>;
+}
+
+/** GET /v1/admin/alert-rules: what each rule saw on the last run. */
+export interface AlertRulesStatus {
+	on: boolean;
+	tickSeconds: number;
+	lastRunAt: string | null;
+	lastRunMs: number | null;
+	raised: number;
+	deduped: number;
+	throttled: number;
+	failed: number;
+	rules: { id: string; state: "off" | "unavailable" | "waiting" | "ok" | "firing"; note: string; lastRaisedAt: string | null }[];
+}
 
 interface SettingBase {
 	key: string;
 	/** The environment variable that gives the default. */
 	env: string;
-	group: "alerts" | "access" | "limits" | "retention";
+	group: "alerts" | "backendAlerts" | "access" | "limits" | "retention";
 	label: string;
 	help: string;
 	kind: SettingKind;
@@ -1273,6 +1327,8 @@ interface SettingBase {
 	zero?: string;
 	unit?: string;
 	maxEntries?: number;
+	/** alertRules: the rule definitions. */
+	rules?: AlertRulesMeta;
 }
 
 /** A secret (the alert webhook): only whether it is set, never the value. */
