@@ -46,6 +46,8 @@ const router = createBrowserRouter([
 		children: [
 			{ index: true, lazy: page(() => import("@/pages/Overview")) },
 			{ path: "roblox", lazy: page(() => import("@/pages/Roblox")) },
+			{ path: "economy", lazy: page(() => import("@/pages/Economy")) },
+			{ path: "monetization", lazy: page(() => import("@/pages/Monetization")) },
 			{ path: "retention", lazy: page(() => import("@/pages/Retention")) },
 			{ path: "funnels", lazy: page(() => import("@/pages/Funnels")) },
 			{ path: "players", lazy: page(() => import("@/pages/Players")) },

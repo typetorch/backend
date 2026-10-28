@@ -530,6 +530,98 @@ export interface TrendsResult {
 	days: { date: string; total: TrendValues; bySource: Record<string, TrendValues> }[];
 }
 
+export interface EconomyDay {
+	date: string;
+	earned: number;
+	spent: number;
+	net: number;
+	/** The net added up from the range start to the end of this day (games log flows, not balances). */
+	balance: number;
+	players: number;
+	activePlayers: number;
+	earnedPerActive: number;
+}
+
+export interface EconomyFlow {
+	reason: string;
+	amount: number;
+	rows: number;
+	players: number;
+	share: number;
+}
+
+export interface EconomyResult {
+	from: string;
+	to: string;
+	currency: string | null;
+	currencies: { currency: string; rows: number; earned: number; spent: number; players: number }[];
+	totals: {
+		earned: number;
+		spent: number;
+		net: number;
+		rows: number;
+		players: number;
+		earners: number;
+		spenders: number;
+		activePlayers: number;
+		earnedPerActive: number;
+		spentPerActive: number;
+		avgNetPerPlayer: number;
+		medianNetPerPlayer: number;
+		sinkRatio: number;
+	};
+	days: EconomyDay[];
+	sources: EconomyFlow[];
+	sinks: EconomyFlow[];
+}
+
+export interface MonetizationDay {
+	date: string;
+	robux: number;
+	purchases: number;
+	payers: number;
+	activePlayers: number;
+	arpdau: number;
+}
+
+export interface MonetizationProduct {
+	kind: string;
+	product: string | null;
+	robux: number;
+	purchases: number;
+	payers: number;
+	share: number;
+}
+
+export interface MonetizationResult {
+	from: string;
+	to: string;
+	totals: {
+		robux: number;
+		purchases: number;
+		payers: number;
+		activePlayers: number;
+		playerDays: number;
+		payerConversion: number;
+		arppu: number;
+		arpdau: number;
+		arpu: number;
+		repeatPayers: number;
+		repeatRate: number;
+		purchasesPerPayer: number;
+	};
+	days: MonetizationDay[];
+	products: MonetizationProduct[];
+	firstPurchase: {
+		newPlayers: number;
+		payers: number;
+		conversion: number;
+		medianMinutes: number | null;
+		avgMinutes: number | null;
+		bySession: { session: string; payers: number; share: number }[];
+	};
+}
+
 /** Every named query and its result. */
 export interface QueryResults {
 	overview: OverviewResult;
@@ -558,6 +650,8 @@ export interface QueryResults {
 	"perf-client": PerfSeriesResult;
 	"perf-server": PerfSeriesResult;
 	"perf-compare": PerfCompareResult;
+	economy: EconomyResult;
+	monetization: MonetizationResult;
 }
 
 export type QueryName = keyof QueryResults;
