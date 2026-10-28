@@ -2,12 +2,14 @@
 import { normalizeFilters, type Filters, type NormalizedFilters } from "../sql/filters.ts";
 import { benchmarks, realtime, trends } from "./benchmarks.ts";
 import { confusion } from "./confusion.ts";
+import { economy } from "./economy.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment, experimentPlayers } from "./experiment.ts";
 import { events, players, values } from "./explore.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
+import { monetization } from "./monetization.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
 import { perfClient, perfCompare, perfServer } from "./perf.ts";
@@ -39,6 +41,8 @@ export const QUERIES = {
 	"perf-client": perfClient,
 	"perf-server": perfServer,
 	"perf-compare": perfCompare,
+	economy,
+	monetization,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;
