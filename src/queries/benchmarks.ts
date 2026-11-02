@@ -74,7 +74,7 @@ export interface Retention extends Rate {
 /** Roblox keeps 30% of developer product and pass sales; the creator gets the rest. */
 export const DEFAULT_CREATOR_SHARE = 0.7;
 
-function shareOption(value: unknown): number {
+export function shareOption(value: unknown): number {
 	if (value === undefined || value === null) return DEFAULT_CREATOR_SHARE;
 	const n = typeof value === "string" ? Number(value) : value;
 	if (typeof n !== "number" || !Number.isFinite(n) || n <= 0 || n > 1) throw new Error("creatorShare must be a number above 0 and at most 1");

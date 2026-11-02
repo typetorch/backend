@@ -9,7 +9,7 @@ import { events, players, values } from "./explore.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
-import { monetization } from "./monetization.ts";
+import { monetization, monetizationPlayers } from "./monetization.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
 import { perfClient, perfCompare, perfServer } from "./perf.ts";
@@ -43,6 +43,7 @@ export const QUERIES = {
 	"perf-compare": perfCompare,
 	economy,
 	monetization,
+	"monetization-players": monetizationPlayers,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;

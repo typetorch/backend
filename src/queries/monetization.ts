@@ -5,16 +5,19 @@
  *
  * Purchases follow the other revenue queries: server-sent rows only (SERVER_PURCHASE), each distinct row once (no
  * receipt id exists; a resent copy is an exact duplicate, as in `players`), player rows only (pid and sid set).
- *   - payer conversion = payers / active players (any row in the range); ARPPU = Robux / payers;
- *   - ARPDAU = Robux / player-days (each day's active players added up), so it is the average day's Robux per DAU;
+ *   - `robux` is what players paid; `revenue` is what the creator keeps: robux x `creatorShare` (0.7 by default:
+ *     Roblox keeps 30% of developer product and pass sales), as on the Roblox page (benchmarks.ts);
+ *   - payer conversion = payers / active players (any row in the range); ARPPU = revenue / payers;
+ *   - ARPDAU = revenue / player-days (each day's active players added up), so it is the average day's revenue per DAU;
  *   - repeat purchase rate = payers with 2+ purchases in the range / payers;
  *   - first purchase: new players (first-ever session, `newp`, in the range) whose first purchase in the range came
  *     after they joined: the time from their first row to it, and which of their sessions it was in (1 = the first).
  */
 import { PROP_KEYS } from "../schema.ts";
+import { shareOption } from "./benchmarks.ts";
 import { DAY_MS, assertSafeKey } from "../sql/dialect.ts";
 import type { NormalizedFilters } from "../sql/filters.ts";
-import { dayOf, defineQuery, eventsTable, intOption, iso, isoDay, num, playerRows, ratio, round, SERVER_PURCHASE, str, strOrNull, type QueryContext } from "./core.ts";
+import { dayOf, defineQuery, eventsTable, intOption, iso, isoDay, lit, num, playerRows, ratio, round, SERVER_PURCHASE, str, strOrNull, type QueryContext } from "./core.ts";
 
 /** Dense day series up to this many days; a longer range lists only days with rows. */
 const DENSE_DAYS = 400;
@@ -36,16 +39,21 @@ export interface MonetizationOptions {
 	productKey: string;
 	/** Products listed (default 25, at most 100). */
 	top: number;
+	/** Share of the price the creator keeps (default 0.7); revenue = robux x this. */
+	creatorShare: number;
 }
 
 export interface MonetizationDay {
 	date: string;
+	/** Robux players paid. */
 	robux: number;
+	/** What the creator keeps: robux x creatorShare. */
+	revenue: number;
 	purchases: number;
 	payers: number;
 	/** Players with any row that day. */
 	activePlayers: number;
-	/** robux / activePlayers (0 without any). */
+	/** revenue / activePlayers (0 without any). */
 	arpdau: number;
 }
 
@@ -55,6 +63,8 @@ export interface MonetizationProduct {
 	/** The product id as logged (text), null when the row had none. */
 	product: string | null;
 	robux: number;
+	/** robux x creatorShare. */
+	revenue: number;
 	purchases: number;
 	payers: number;
 	/** Of all Robux, 0-1. */
@@ -64,8 +74,13 @@ export interface MonetizationProduct {
 export interface MonetizationResult {
 	from: string;
 	to: string;
+	/** Share of the price the creator keeps. */
+	creatorShare: number;
 	totals: {
+		/** Robux players paid. */
 		robux: number;
+		/** What the creator keeps: robux x creatorShare. */
+		revenue: number;
 		purchases: number;
 		payers: number;
 		activePlayers: number;
@@ -73,11 +88,11 @@ export interface MonetizationResult {
 		playerDays: number;
 		/** payers / activePlayers. */
 		payerConversion: number;
-		/** Robux per payer (0 without payers). */
+		/** Revenue per payer (0 without payers). */
 		arppu: number;
-		/** Robux per player-day (0 without players). */
+		/** Revenue per player-day (0 without players). */
 		arpdau: number;
-		/** Robux per active player. */
+		/** Revenue per active player. */
 		arpu: number;
 		repeatPayers: number;
 		/** repeatPayers / payers. */
@@ -103,7 +118,7 @@ export interface MonetizationResult {
 }
 
 /** `ev(pid, sid, t, newp, kind, props, esrc)`: player rows; `p(pid, sid, t, kind, robux, product)`: the distinct server-sent purchases. */
-function purchaseCtes(ctx: QueryContext, f: NormalizedFilters, o: MonetizationOptions): string {
+function purchaseCtes(ctx: QueryContext, f: NormalizedFilters, o: Pick<MonetizationOptions, "robuxKey" | "productKey">): string {
 	const d = ctx.dialect;
 	// A product id may be logged as a number or a string: the text, else the number as digits (Basin's json_get_str skips numbers).
 	const product = `COALESCE(${d.jsonText("props", o.productKey)}, CAST(CAST(${d.jsonNumber("props", o.productKey)} AS BIGINT) AS VARCHAR))`;
@@ -122,6 +137,7 @@ export const monetization = defineQuery<MonetizationOptions, MonetizationResult>
 		robuxKey: assertSafeKey(input.robuxKey ?? PROP_KEYS.purchaseRobux, "robuxKey"),
 		productKey: assertSafeKey(input.productKey ?? PROP_KEYS.purchaseProduct, "productKey"),
 		top: intOption(input.top, "top", 25, 1, 100),
+		creatorShare: shareOption(input.creatorShare),
 	}),
 	statements(ctx, f, o) {
 		const lim = ctx.dialect.limit;
@@ -158,9 +174,10 @@ export const monetization = defineQuery<MonetizationOptions, MonetizationResult>
 				`WITH ${ctes}, ${firstCtes} SELECT b, COUNT(*) AS payers FROM (SELECT CASE ${nth} ELSE 1 END AS b FROM k) x GROUP BY b ORDER BY b ${lim(FIRST_PURCHASE_SESSIONS.length)}`,
 		};
 	},
-	shape(rows, _ctx, f) {
+	shape(rows, _ctx, f, o) {
 		const t = rows.totals[0] ?? {};
 		const robux = num(t.robux);
+		const revenue = robux * o.creatorShare;
 		const purchases = num(t.purchases);
 		const payers = num(t.payers);
 		const repeatPayers = num(t.repeat_payers);
@@ -175,7 +192,16 @@ export const monetization = defineQuery<MonetizationOptions, MonetizationResult>
 			const r = found.get(day);
 			const act = active.get(day) ?? 0;
 			const dayRobux = num(r?.robux);
-			return { date: isoDay(day), robux: round(dayRobux), purchases: num(r?.purchases), payers: num(r?.payers), activePlayers: act, arpdau: act ? round(dayRobux / act, 4) : 0 };
+			const dayRevenue = dayRobux * o.creatorShare;
+			return {
+				date: isoDay(day),
+				robux: round(dayRobux),
+				revenue: round(dayRevenue),
+				purchases: num(r?.purchases),
+				payers: num(r?.payers),
+				activePlayers: act,
+				arpdau: act ? round(dayRevenue / act, 4) : 0,
+			};
 		});
 		const ft = rows.firstTotals[0] ?? {};
 		const firstPayers = num(ft.payers);
@@ -184,16 +210,18 @@ export const monetization = defineQuery<MonetizationOptions, MonetizationResult>
 		return {
 			from: iso(f.from),
 			to: iso(f.to),
+			creatorShare: o.creatorShare,
 			totals: {
 				robux: round(robux),
+				revenue: round(revenue),
 				purchases,
 				payers,
 				activePlayers,
 				playerDays,
 				payerConversion: ratio(payers, activePlayers),
-				arppu: payers ? round(robux / payers) : 0,
-				arpdau: playerDays ? round(robux / playerDays, 4) : 0,
-				arpu: activePlayers ? round(robux / activePlayers) : 0,
+				arppu: payers ? round(revenue / payers) : 0,
+				arpdau: playerDays ? round(revenue / playerDays, 4) : 0,
+				arpu: activePlayers ? round(revenue / activePlayers) : 0,
 				repeatPayers,
 				repeatRate: ratio(repeatPayers, payers),
 				purchasesPerPayer: payers ? round(purchases / payers) : 0,
@@ -203,6 +231,7 @@ export const monetization = defineQuery<MonetizationOptions, MonetizationResult>
 				kind: str(r.kind),
 				product: strOrNull(r.product)?.slice(0, 64) ?? null,
 				robux: round(num(r.robux)),
+				revenue: round(num(r.robux) * o.creatorShare),
 				purchases: num(r.purchases),
 				payers: num(r.payers),
 				share: robux > 0 ? round(num(r.robux) / robux, 4) : 0,
@@ -219,5 +248,103 @@ export const monetization = defineQuery<MonetizationOptions, MonetizationResult>
 				}),
 			},
 		};
+	},
+});
+
+// monetization-players ---------------------------------------------------------------------------------------------------
+
+/** Most players one monetization -> players read lists (the cap). */
+export const MONETIZATION_PLAYERS_MAX = 200;
+
+export interface MonetizationPlayersOptions {
+	robuxKey: string;
+	productKey: string;
+	creatorShare: number;
+	/** The purchase kind (`product`, `gamepass`, ...); all kinds when unset. */
+	kind?: string;
+	/** The product id as text (as `monetization` lists it); every product when unset. */
+	product?: string;
+	/** Most rows listed (1-200, default 200). */
+	limit: number;
+}
+
+/** One buyer: what they bought (of the selected product, or of everything) in the range. */
+export interface MonetizationPlayer {
+	pid: string;
+	purchases: number;
+	/** Robux they paid. */
+	robux: number;
+	/** robux x creatorShare. */
+	revenue: number;
+	/** Distinct products they bought (kind + id). */
+	products: number;
+	firstAt: string;
+	lastAt: string;
+	/** Joined in by the server route: the UserId (identity table) and Roblox names (profile cache), when known. */
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+export interface MonetizationPlayersResult {
+	kind: string | null;
+	product: string | null;
+	creatorShare: number;
+	/** Buyers matching; `more` of them are not listed. */
+	total: number;
+	more: number;
+	players: MonetizationPlayer[];
+}
+
+/**
+ * The buyers of one product (or kind, or of anything): the same purchases as `monetization` (server-sent, each distinct
+ * row once), per player: purchases, Robux paid, revenue, distinct products, first and last purchase. Biggest spenders
+ * first; the total rides along as a window count.
+ */
+export const monetizationPlayers = defineQuery<MonetizationPlayersOptions, MonetizationPlayersResult>({
+	name: "monetization-players",
+	summary: "who bought one product (or kind, or anything): purchases, Robux paid, revenue, first and last purchase per player (at most 200)",
+	defaultDays: 30,
+	options: (input = {}) => {
+		const out: MonetizationPlayersOptions = {
+			robuxKey: assertSafeKey(input.robuxKey ?? PROP_KEYS.purchaseRobux, "robuxKey"),
+			productKey: assertSafeKey(input.productKey ?? PROP_KEYS.purchaseProduct, "productKey"),
+			creatorShare: shareOption(input.creatorShare),
+			limit: intOption(input.limit, "limit", MONETIZATION_PLAYERS_MAX, 1, MONETIZATION_PLAYERS_MAX),
+		};
+		for (const key of ["kind", "product"] as const) {
+			const v: unknown = input[key];
+			if (v === undefined || v === null || v === "") continue;
+			const text = typeof v === "number" && Number.isFinite(v) ? String(v) : v;
+			if (typeof text !== "string" || text.length > 64) throw new Error(`${key} must be text of at most 64 characters`);
+			out[key] = text;
+		}
+		return out;
+	},
+	statements(ctx, f, o) {
+		const conds = [o.kind !== undefined ? `kind = ${lit(o.kind)}` : "", o.product !== undefined ? `product = ${lit(o.product)}` : ""].filter(Boolean);
+		return {
+			players:
+				`WITH ${purchaseCtes(ctx, f, o)}, q AS (SELECT * FROM p${conds.length ? ` WHERE ${conds.join(" AND ")}` : ""}) ` +
+				`SELECT pid, COUNT(*) AS purchases, SUM(robux) AS robux, COUNT(DISTINCT kind || ':' || COALESCE(product, '')) AS products, ` +
+				`MIN(t) AS first_t, MAX(t) AS last_t, COUNT(*) OVER () AS total FROM q GROUP BY pid ` +
+				`ORDER BY SUM(robux) DESC, MAX(t) DESC, pid ${ctx.dialect.limit(o.limit)}`,
+		};
+	},
+	shape(rows, _ctx, _f, o) {
+		const total = num(rows.players[0]?.total);
+		const players = rows.players.map((r) => {
+			const robux = num(r.robux);
+			return {
+				pid: str(r.pid),
+				purchases: num(r.purchases),
+				robux: round(robux),
+				revenue: round(robux * o.creatorShare),
+				products: num(r.products),
+				firstAt: iso(num(r.first_t)),
+				lastAt: iso(num(r.last_t)),
+			};
+		});
+		return { kind: o.kind ?? null, product: o.product ?? null, creatorShare: o.creatorShare, total, more: Math.max(0, total - players.length), players };
 	},
 });

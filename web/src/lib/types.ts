@@ -608,7 +608,10 @@ export interface EconomyResult {
 
 export interface MonetizationDay {
 	date: string;
+	/** Robux players paid. */
 	robux: number;
+	/** What the creator keeps: robux x creatorShare. */
+	revenue: number;
 	purchases: number;
 	payers: number;
 	activePlayers: number;
@@ -619,6 +622,7 @@ export interface MonetizationProduct {
 	kind: string;
 	product: string | null;
 	robux: number;
+	revenue: number;
 	purchases: number;
 	payers: number;
 	share: number;
@@ -627,8 +631,11 @@ export interface MonetizationProduct {
 export interface MonetizationResult {
 	from: string;
 	to: string;
+	/** Share of the price the creator keeps (0.7: Roblox keeps 30%). */
+	creatorShare: number;
 	totals: {
 		robux: number;
+		revenue: number;
 		purchases: number;
 		payers: number;
 		activePlayers: number;
@@ -651,6 +658,31 @@ export interface MonetizationResult {
 		avgMinutes: number | null;
 		bySession: { session: string; payers: number; share: number }[];
 	};
+}
+
+/** One buyer (the `monetization-players` query): what they bought, of one product or of everything. */
+export interface MonetizationPlayer {
+	pid: string;
+	purchases: number;
+	robux: number;
+	revenue: number;
+	/** Distinct products bought. */
+	products: number;
+	firstAt: string;
+	lastAt: string;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+/** The `monetization-players` query: the buyers of one product (or of anything), biggest spenders first; at most 200. */
+export interface MonetizationPlayers {
+	kind: string | null;
+	product: string | null;
+	creatorShare: number;
+	total: number;
+	more: number;
+	players: MonetizationPlayer[];
 }
 
 /** Every named query and its result. */
@@ -683,6 +715,7 @@ export interface QueryResults {
 	"perf-compare": PerfCompareResult;
 	economy: EconomyResult;
 	monetization: MonetizationResult;
+	"monetization-players": MonetizationPlayers;
 }
 
 export type QueryName = keyof QueryResults;

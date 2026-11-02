@@ -63,16 +63,18 @@ describe("monetization", () => {
 
 	test("totals: revenue, payers, conversion, ARPPU, ARPDAU, repeat rate", async () => {
 		const r = await store.query("monetization", RANGE);
+		expect(r.creatorShare).toBe(0.7);
 		expect(r.totals).toEqual({
 			robux: 797,
+			revenue: 557.9,
 			purchases: 4,
 			payers: 3,
 			activePlayers: 4,
 			playerDays: 6,
 			payerConversion: 0.75,
-			arppu: 265.67,
-			arpdau: 132.8333,
-			arpu: 199.25,
+			arppu: 185.97,
+			arpdau: 92.9833,
+			arpu: 139.48,
 			repeatPayers: 1,
 			repeatRate: 0.3333,
 			purchasesPerPayer: 1.33,
@@ -82,17 +84,17 @@ describe("monetization", () => {
 	test("per day", async () => {
 		const r = await store.query("monetization", RANGE);
 		expect(r.days).toEqual([
-			{ date: "2026-10-03", robux: 99, purchases: 1, payers: 1, activePlayers: 3, arpdau: 33 },
-			{ date: "2026-10-04", robux: 698, purchases: 3, payers: 3, activePlayers: 3, arpdau: 232.6667 },
+			{ date: "2026-10-03", robux: 99, revenue: 69.3, purchases: 1, payers: 1, activePlayers: 3, arpdau: 23.1 },
+			{ date: "2026-10-04", robux: 698, revenue: 488.6, purchases: 3, payers: 3, activePlayers: 3, arpdau: 162.8667 },
 		]);
 	});
 
 	test("by product, numbers and text ids alike", async () => {
 		const r = await store.query("monetization", RANGE);
 		expect(r.products).toEqual([
-			{ kind: "gamepass", product: "77", robux: 400, purchases: 1, payers: 1, share: 0.5019 },
-			{ kind: "product", product: "555", robux: 199, purchases: 1, payers: 1, share: 0.2497 },
-			{ kind: "product", product: "1234", robux: 198, purchases: 2, payers: 2, share: 0.2484 },
+			{ kind: "gamepass", product: "77", robux: 400, revenue: 280, purchases: 1, payers: 1, share: 0.5019 },
+			{ kind: "product", product: "555", robux: 199, revenue: 139.3, purchases: 1, payers: 1, share: 0.2497 },
+			{ kind: "product", product: "1234", robux: 198, revenue: 138.6, purchases: 2, payers: 2, share: 0.2484 },
 		]);
 		expect((await store.query("monetization", RANGE, { top: 1 })).products).toHaveLength(1);
 	});
@@ -116,20 +118,51 @@ describe("monetization", () => {
 		});
 	});
 
+	test("creatorShare sets the creator's cut; 1 is the Robux paid", async () => {
+		const full = await store.query("monetization", RANGE, { creatorShare: 1 });
+		expect(full.totals).toMatchObject({ robux: 797, revenue: 797, arppu: 265.67, arpdau: 132.8333, arpu: 199.25 });
+		expect(() => store.render("monetization", {}, { creatorShare: 0 })).toThrow(/creatorShare/);
+	});
+
 	test("filters apply; an empty range is all zeros", async () => {
 		const returning = await store.query("monetization", { ...RANGE, players: "returning" });
 		expect(returning.totals).toMatchObject({ robux: 400 + 99 + 199, payers: 3 });
 		const none = await store.query("monetization", { from: "2026-09-01", to: "2026-09-02" });
-		expect(none.totals).toMatchObject({ robux: 0, purchases: 0, payers: 0, payerConversion: 0, arppu: 0, arpdau: 0, repeatRate: 0 });
+		expect(none.totals).toMatchObject({ robux: 0, revenue: 0, purchases: 0, payers: 0, payerConversion: 0, arppu: 0, arpdau: 0, repeatRate: 0 });
 		expect(none.products).toEqual([]);
 		expect(none.firstPurchase).toMatchObject({ payers: 0, medianMinutes: null, avgMinutes: null });
 		expect(none.days.every((d) => d.robux === 0)).toBe(true);
+	});
+
+	test("monetization-players: who bought what, biggest spenders first", async () => {
+		const all = await store.query("monetization-players", RANGE);
+		expect(all).toMatchObject({ kind: null, product: null, creatorShare: 0.7, total: 3, more: 0 });
+		expect(all.players).toEqual([
+			{ pid: "new1", purchases: 2, robux: 499, revenue: 349.3, products: 2, firstAt: new Date(D1 + 10 * HOUR + 10 * MIN).toISOString(), lastAt: new Date(D2 + 10 * HOUR + 5 * MIN).toISOString() },
+			{ pid: "old1", purchases: 1, robux: 199, revenue: 139.3, products: 1, firstAt: new Date(D2 + 12 * HOUR + MIN).toISOString(), lastAt: new Date(D2 + 12 * HOUR + MIN).toISOString() },
+			{ pid: "new2", purchases: 1, robux: 99, revenue: 69.3, products: 1, firstAt: new Date(D2 + 15 * HOUR + 5 * MIN).toISOString(), lastAt: new Date(D2 + 15 * HOUR + 5 * MIN).toISOString() },
+		]);
+		const product = await store.query("monetization-players", RANGE, { kind: "product", product: "1234" });
+		expect(product.players.map((p) => [p.pid, p.purchases, p.robux])).toEqual([
+			// Same spend: the latest buyer first.
+			["new2", 1, 99],
+			["new1", 1, 99],
+		]);
+		// A number id is the same product as its text; the kind narrows.
+		expect((await store.query("monetization-players", RANGE, { product: 77 as never })).players.map((p) => p.pid)).toEqual(["new1"]);
+		expect((await store.query("monetization-players", RANGE, { kind: "gamepass", product: "1234" })).total).toBe(0);
+		const capped = await store.query("monetization-players", RANGE, { limit: 1 });
+		expect(capped).toMatchObject({ total: 3, more: 2 });
+		expect(() => store.render("monetization-players", {}, { product: "x".repeat(65) })).toThrow(/product/);
 	});
 
 	test("the Basin SQL gives the same answer", async () => {
 		const basin = await basinOver(connection, NOW);
 		for (const [filters, options] of [[RANGE, {}], [{ ...RANGE, players: "returning" }, {}]] as const) {
 			expect(await basin.query("monetization", filters, options)).toEqual(await store.query("monetization", filters, options));
+		}
+		for (const options of [{}, { kind: "product", product: "1234" }] as const) {
+			expect(await basin.query("monetization-players", RANGE, options)).toEqual(await store.query("monetization-players", RANGE, options));
 		}
 	});
 
