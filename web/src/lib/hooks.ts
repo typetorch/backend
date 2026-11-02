@@ -1,5 +1,5 @@
 /** React hooks: the URL-backed filters and cached analytics queries (TanStack Query). */
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router";
 import { api } from "./api";
@@ -52,6 +52,6 @@ export function useAnalytics<N extends QueryName>(name: N, options: object = {},
 		queryKey: ["query", name, filters, options],
 		queryFn: ({ signal }) => api.query(name, filters, options, signal),
 		enabled: opts.enabled ?? true,
-		...(opts.keepPrevious ? { placeholderData: (previous: QueryResults[N] | undefined) => previous } : {}),
+		placeholderData: opts.keepPrevious ? keepPreviousData : undefined,
 	});
 }
