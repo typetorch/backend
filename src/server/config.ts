@@ -47,6 +47,13 @@ export const CLOUDFLARE_IPS = [
 	"2c0f:f248::/32",
 ] as const;
 
+/**
+ * TYPETORCH_GEOIP: `dbip` (DB-IP's free City Lite and ASN Lite databases, downloaded into `dir` and refreshed monthly;
+ * the default in production), `off` (the default elsewhere), or the path of a City .mmdb file used as it is (never
+ * downloaded; TYPETORCH_GEOIP_ASN may name an ASN one).
+ */
+export type GeoIpConfig = { mode: "off" } | { mode: "dbip"; dir: string } | { mode: "file"; city: string; asn?: string };
+
 /** Shortest accepted API key and admin token. */
 export const MIN_SECRET_LENGTH = 32;
 
@@ -119,6 +126,8 @@ export interface ServerConfig {
 	/** Disk space (server/disk.ts): free percent under which the explorer warns and a `disk_low` alert is raised (0 = never). */
 	diskWarnFreePercent: number;
 	diskCriticalFreePercent: number;
+	/** Game server locations (server/geoip.ts): the offline IP database. */
+	geoip: GeoIpConfig;
 	/** Gzip body cap and inflated cap, bytes. */
 	maxBodyBytes: number;
 	maxInflateBytes: number;
@@ -457,6 +466,13 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		if (existsSync(resolve(dir, "index.html"))) webDir = dir;
 	}
 
+	const geoRaw = (env.TYPETORCH_GEOIP ?? "").trim();
+	let geoip: GeoIpConfig;
+	if (geoRaw === "") geoip = env.NODE_ENV === "production" ? { mode: "dbip", dir: resolve(dataDir, "geoip") } : { mode: "off" };
+	else if (FALSE.includes(geoRaw.toLowerCase())) geoip = { mode: "off" };
+	else if (geoRaw.toLowerCase() === "dbip" || TRUE.includes(geoRaw.toLowerCase())) geoip = { mode: "dbip", dir: resolve(dataDir, "geoip") };
+	else geoip = { mode: "file", city: resolve(geoRaw), ...(env.TYPETORCH_GEOIP_ASN ? { asn: resolve(env.TYPETORCH_GEOIP_ASN) } : {}) };
+
 	const config: ServerConfig = {
 		dataDir,
 		host,
@@ -486,6 +502,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		backupHours: num(env, "TYPETORCH_BACKUP_HOURS", 24, 0, 24 * 365),
 		diskWarnFreePercent: num(env, "TYPETORCH_DISK_WARN_PERCENT", 15, 0, 99),
 		diskCriticalFreePercent: num(env, "TYPETORCH_DISK_CRITICAL_PERCENT", 5, 0, 99),
+		geoip,
 		maxBodyBytes: num(env, "TYPETORCH_MAX_BODY", 2 * 1024 * 1024, 1024, 64 * 1024 * 1024),
 		maxInflateBytes: num(env, "TYPETORCH_MAX_INFLATE", 16 * 1024 * 1024, 1024, 256 * 1024 * 1024),
 		ipPerMinute: num(env, "TYPETORCH_IP_PER_MINUTE", 6000, 1, 1_000_000),
@@ -557,6 +574,7 @@ export function describeConfig(config: ServerConfig): string {
 		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
 		`trust proxy=${config.trustProxy || "off"}${config.trustedProxies ? ` (from ${config.trustedProxies.length} proxy rule(s))` : ""}`,
 		`cloudflare=${config.cloudflareIps ? "on" : "off"}`,
+		`geoip=${config.geoip.mode === "file" ? `file${config.geoip.asn ? " + asn" : ""}` : config.geoip.mode}`,
 		`public url=${config.publicUrl ?? "not set"}`,
 		`erasure webhook secret=${yes(config.webhookSecret)}`,
 		`open cloud key=${yes(config.openCloudKey)}`,

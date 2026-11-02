@@ -35,6 +35,8 @@ interface Route {
 	body?: Schema;
 	/** The success answer, when it isn't a plain 200 JSON object. */
 	ok?: { status: number; description: string; contentType?: string };
+	/** The success answer's JSON schema, when it is documented (default: any object). */
+	response?: Schema;
 }
 
 const str = (description?: string): Schema => ({ type: "string", ...(description ? { description } : {}) });
@@ -55,6 +57,50 @@ const WINDOW: Param[] = [
 	q("realm", "server or client", { type: "string", enum: ["server", "client"] }),
 ];
 const JOB = p("jobId", "a game server's JobId");
+const ref = (name: string): Schema => ({ $ref: `#/components/schemas/${name}` });
+const nullable = (type: string, description?: string): Schema => ({ type: [type, "null"], ...(description ? { description } : {}) });
+
+/** The fleet's server shapes (fleet/service.ts serverInfo): the fields documented here, the rest stay open. */
+const SCHEMAS: Record<string, Schema> = {
+	ServerLocation: {
+		type: "object",
+		description: "Where a server's latest address is, from the backend's offline IP database (city level at best). Credit the source GeoStatus names (DB-IP Lite: CC BY 4.0).",
+		properties: {
+			country: nullable("string", "ISO 3166-1 alpha-2"),
+			countryName: nullable("string"),
+			region: nullable("string", "the first subdivision (state, province)"),
+			city: nullable("string"),
+			lat: nullable("number"),
+			lon: nullable("number"),
+			asn: nullable("integer", "the autonomous system (with an ASN database)"),
+			org: nullable("string", "the autonomous system's organization"),
+		},
+	},
+	GeoStatus: {
+		type: "object",
+		description: "Whether locations can be shown: ready (a database is loaded), missing (on, no database yet), off (TYPETORCH_GEOIP=off); the source and the attribution its licence asks for.",
+		properties: {
+			state: { type: "string", enum: ["ready", "missing", "off"] },
+			source: nullable("string"),
+			attribution: nullable("string"),
+			attributionUrl: nullable("string"),
+			built: nullable("string", "ISO time the database was built"),
+		},
+		required: ["state"],
+	},
+	FleetServer: {
+		type: "object",
+		additionalProperties: true,
+		description: "One game server (more fields than listed: branch, artifact, players, health, TPS, memory, budget, reasons...).",
+		properties: {
+			job: str("the JobId"),
+			ip: nullable("string", "admin role only: the public address its heartbeats come from (latest; resolved through the trusted proxies / Cloudflare)"),
+			firstIp: nullable("string", "admin role only: the first address it was seen from"),
+			ipChangedAt: nullable("string", "ISO time the address last changed (null: never)"),
+			location: { oneOf: [ref("ServerLocation"), { type: "null" }], description: "every signed-in role; null while unknown" },
+		},
+	},
+};
 const SAVED_ID = p("id", "the saved query's id", int());
 const SAVED_QUERY_BODY = (required: string[]): Schema =>
 	obj({ name: str(`1 to ${SAVED_QUERY_NAME_MAX} characters`), sql: str("one SELECT or WITH"), chart: { type: ["string", "null"], enum: [...SAVED_QUERY_CHARTS, null] }, pinned: { type: "boolean" } }, required);
@@ -293,9 +339,20 @@ const ROUTES: Route[] = [
 		tag: "fleet",
 		roles: ["admin", "web"],
 		summary: "Live game servers (or gone ones)",
+		description: "`{ servers, players, byArtifact, byHealth, geo }` (gone=1: `{ servers }`). Each server's `location` goes to every signed-in role; its addresses (`ip`, `firstIp`) to the admin role only.",
 		params: [q("branch", "one branch"), q("maxAge", "seconds since the last heartbeat", int()), q("gone", "1: closed and lost servers instead"), q("limit", "with gone", int())],
+		response: obj({ servers: arr(ref("FleetServer")), players: int(), geo: ref("GeoStatus") }),
 	},
-	{ method: "get", path: "/v1/fleet/servers/{jobId}", tag: "fleet", roles: ["admin", "web"], summary: "One server: heartbeats, debug state, offline history", params: [JOB] },
+	{
+		method: "get",
+		path: "/v1/fleet/servers/{jobId}",
+		tag: "fleet",
+		roles: ["admin", "web"],
+		summary: "One server: heartbeats, debug state, offline history",
+		description: "`{ server, state, history, debug, geo }`; the web role gets the server without `ip` / `firstIp`.",
+		params: [JOB],
+		response: obj({ server: { oneOf: [ref("FleetServer"), { type: "null" }] }, state: str("live, closed, lost, gone or unknown"), history: obj(), debug: obj(), geo: ref("GeoStatus") }),
+	},
 	{ method: "get", path: "/v1/fleet/servers/{jobId}/metrics", tag: "fleet", roles: ["admin", "web"], summary: "One server's TPS / memory / players history", params: [JOB, q("since", TIME)] },
 	{ method: "get", path: "/v1/fleet/servers/{jobId}/bundles", tag: "fleet", roles: ["admin", "web"], summary: "One server's debug bundles", params: [JOB] },
 	{ method: "get", path: "/v1/fleet/bundles/{id}", tag: "fleet", roles: ["admin", "web"], summary: "One debug bundle (the web role gets no playerLogs)", params: [p("id", "the bundle id")] },
@@ -308,7 +365,7 @@ const ROUTES: Route[] = [
 		params: [q("branch", "one branch"), q("before", "the page before this seq (the last page's next)", int()), q("limit", "rows (50, at most 100)", int())],
 	},
 	{ method: "get", path: "/v1/fleet/deploys/{seq}", tag: "fleet", roles: ["admin", "web"], summary: "One deploy: outcome, report, alerts, previous / next", params: [p("seq", "the deploy #seq", int())] },
-	{ method: "get", path: "/v1/fleet/reports", tag: "fleet", roles: ["admin", "web"], summary: "Deploy reports", params: [q("seq", "a deploy #seq", int()), q("artifact", "an artifact id"), q("branch", "one branch")] },
+	{ method: "get", path: "/v1/fleet/reports", tag: "fleet", roles: ["admin", "web"], summary: "Deploy reports", description: "`behind` lists live servers (FleetServer); the web role gets them without `ip` / `firstIp`.", params: [q("seq", "a deploy #seq", int()), q("artifact", "an artifact id"), q("branch", "one branch")] },
 	{
 		method: "get",
 		path: "/v1/fleet/alerts",
@@ -326,7 +383,7 @@ const ROUTES: Route[] = [
 		summary: "Chart marks: releases, kernel publishes, backup refreshes",
 		params: [q("since", TIME), q("until", TIME), q("branch", "one branch"), q("kinds", "comma-separated kinds"), q("limit", "rows", int())],
 	},
-	{ method: "get", path: "/v1/fleet/stream", tag: "fleet", roles: ["admin", "web"], summary: "Server-Sent Events of fleet changes", ok: { status: 200, description: "an event stream", contentType: "text/event-stream" } },
+	{ method: "get", path: "/v1/fleet/stream", tag: "fleet", roles: ["admin", "web"], summary: "Server-Sent Events of fleet changes", description: "A `server` event carries a FleetServer; the web role gets it without `ip` / `firstIp`.", ok: { status: 200, description: "an event stream", contentType: "text/event-stream" } },
 	{ method: "post", path: "/v1/fleet/servers/{jobId}/watch", tag: "fleet", roles: ["admin"], summary: "Remote debug: watch a server", params: [JOB] },
 	{ method: "post", path: "/v1/fleet/servers/{jobId}/commands", tag: "fleet", roles: ["admin"], summary: "Remote debug: queue a read-only command", params: [JOB], body: obj({ op: str(), args: obj() }, ["op"]) },
 	{ method: "get", path: "/v1/fleet/servers/{jobId}/commands/{id}", tag: "fleet", roles: ["admin"], summary: "Remote debug: one command's answer", params: [JOB, p("id", "the command id")] },
@@ -441,7 +498,7 @@ function security(roles: Role[]): Record<string, string[]>[] {
 function operation(r: Route): Schema {
 	const ok = r.ok ?? { status: 200, description: "OK" };
 	const responses: Record<string, Schema> = {
-		[String(ok.status)]: { description: ok.description, ...(ok.status >= 300 && ok.status < 400 ? {} : { content: { [ok.contentType ?? "application/json"]: { schema: ok.contentType ? str() : obj() } } }) },
+		[String(ok.status)]: { description: ok.description, ...(ok.status >= 300 && ok.status < 400 ? {} : { content: { [ok.contentType ?? "application/json"]: { schema: ok.contentType ? str() : (r.response ?? obj()) } } }) },
 		"400": { $ref: "#/components/responses/Error" },
 	};
 	if (!r.roles.includes("open")) {
@@ -496,6 +553,7 @@ export function openApiSpec(o: DocsOptions = {}): Schema {
 				lookupToken: { type: "http", scheme: "bearer", description: "TYPETORCH_LOOKUP_TOKEN: GET /v1/identity/resolve only (for scripts and LLM agents)." },
 				session: { type: "apiKey", in: "cookie", name: "tt_session", description: "An explorer session (admin for owners, web for viewers). A mutation from a cookie needs a same-origin request." },
 			},
+			schemas: SCHEMAS,
 			responses: {
 				Error: { description: "An error", content: { "application/json": { schema: obj({ error: str() }, ["error"]) } } },
 			},

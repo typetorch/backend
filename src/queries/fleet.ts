@@ -92,6 +92,31 @@ export interface ServerInfo {
 	 * crossed; empty when nothing tripped.
 	 */
 	reasons?: HealthReason[];
+	/**
+	 * Fleet API only, the admin role only (the read-only web role gets the location without them): the public address
+	 * the server's heartbeats come from (latest), the first one it was seen from, and when it last changed (null: never).
+	 */
+	ip?: string | null;
+	firstIp?: string | null;
+	ipChangedAt?: string | null;
+	/**
+	 * Fleet API only: where the latest address is, from the backend's offline IP database (fleet/geo.ts); null while
+	 * unknown (no database, not looked up yet, or a private address).
+	 */
+	location?: ServerLocation | null;
+}
+
+/** A server's location (city level at best). */
+export interface ServerLocation {
+	/** ISO 3166-1 alpha-2. */
+	country: string | null;
+	countryName: string | null;
+	region: string | null;
+	city: string | null;
+	lat: number | null;
+	lon: number | null;
+	asn: number | null;
+	org: string | null;
 }
 
 /** Unix seconds or ms -> ms (the kernel sends seconds). */

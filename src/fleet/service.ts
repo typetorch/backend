@@ -9,8 +9,9 @@
  * `k` in a heartbeat is a private server's access code: accepted, never stored, never returned.
  */
 import { DEPLOY_RESULTS } from "../schema.ts";
-import { toMs, type ServerInfo } from "../queries/fleet.ts";
+import { toMs, type ServerInfo, type ServerLocation } from "../queries/fleet.ts";
 import type { FleetDb, SqlValue } from "./db.ts";
+import { GEO_OFF, IP_GEO_SCHEMA, type GeoSink, type GeoStatus } from "./geo.ts";
 import { ADDED_DEPLOY_HISTORY_COLUMNS, DEPLOY_ROW_COLUMNS, deployRecords, freezeSummaries, KEEP_DEPLOYS_DAYS, listDeploys, pruneDeploys, type DeployListOptions, type DeployRecord, type DeployRow } from "./deploys.ts";
 import { healthReasons } from "./health.ts";
 import type { Notifier } from "./notify.ts";
@@ -281,6 +282,11 @@ export interface ParsedHeartbeat {
 	/** Kernel 0.4.0 (`bu.mem`): total memory and the Lua heap, MB. */
 	memMb: number | null;
 	luaMb: number | null;
+	/**
+	 * The public address the heartbeat came from, normalized (fleet/geo.ts normalizeIp). Never from the body: the HTTP
+	 * edge sets it from the connection (trusted proxies, Cloudflare). Null or missing: unknown (kept as it was).
+	 */
+	ip?: string | null;
 }
 
 /** One point of a server's metrics history (`GET /v1/fleet/servers/<job>/metrics`); t = when it arrived (unix ms). */
@@ -761,11 +767,31 @@ interface ServerRow {
 	last_seen: number;
 	closed_at: number | null;
 	lost_at: number | null;
+	ip?: string | null;
+	first_ip?: string | null;
+	ip_changed_at?: number | null;
+	/** From the ip_geo join on the latest address (null: no lookup stored). */
+	geo_country?: string | null;
+	geo_country_name?: string | null;
+	geo_region?: string | null;
+	geo_city?: string | null;
+	geo_lat?: number | null;
+	geo_lon?: number | null;
+	geo_asn?: number | null;
+	geo_org?: string | null;
+	geo_at?: number | null;
 }
 
-/** Columns read for servers. The access code is not among them because it is never stored. */
+/**
+ * Columns read for servers (from SERVERS_FROM: the row and its latest address' stored lookup). The access code is not
+ * among them because it is never stored.
+ */
 const SERVER_COLUMNS =
-	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, place_version, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen, closed_at, lost_at";
+	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, place_version, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen, closed_at, lost_at, " +
+	"servers.ip AS ip, first_ip, ip_changed_at, g.country AS geo_country, g.country_name AS geo_country_name, g.region AS geo_region, g.city AS geo_city, g.lat AS geo_lat, g.lon AS geo_lon, g.asn AS geo_asn, g.org AS geo_org, g.looked_up AS geo_at";
+
+/** servers with the stored lookup of each row's latest address (ip_geo, fleet/geo.ts). */
+const SERVERS_FROM = "servers LEFT JOIN ip_geo g ON g.ip = servers.ip";
 
 /** Kernel 0.4.0 and 0.4.2 columns (and `pv`'s place_version), added to fleet files made before them (name, type). */
 const ADDED_SERVER_COLUMNS: [string, string][] = [
@@ -776,7 +802,36 @@ const ADDED_SERVER_COLUMNS: [string, string][] = [
 	["mem_mb", "REAL"],
 	["lua_mb", "REAL"],
 	["place_version", "INTEGER"],
+	// The public address heartbeats come from (latest and first) and when it last changed.
+	["ip", "TEXT"],
+	["first_ip", "TEXT"],
+	["ip_changed_at", "INTEGER"],
 ];
+
+/** The stored lookup as the API's location, or null (none stored, or the database knew nothing). */
+function locationOfRow(r: ServerRow): ServerLocation | null {
+	if (r.geo_at === null || r.geo_at === undefined) return null;
+	const loc: ServerLocation = {
+		country: r.geo_country ?? null,
+		countryName: r.geo_country_name ?? null,
+		region: r.geo_region ?? null,
+		city: r.geo_city ?? null,
+		lat: r.geo_lat ?? null,
+		lon: r.geo_lon ?? null,
+		asn: r.geo_asn ?? null,
+		org: r.geo_org ?? null,
+	};
+	return Object.values(loc).some((v) => v !== null) ? loc : null;
+}
+
+/**
+ * A server without its addresses: what the read-only web role gets (the location stays). The HTTP routes apply it;
+ * the service always returns them.
+ */
+export function withoutIps<T extends { ip?: unknown; firstIp?: unknown }>(server: T): Omit<T, "ip" | "firstIp"> {
+	const { ip: _ip, firstIp: _first, ...rest } = server;
+	return rest;
+}
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 
@@ -809,6 +864,10 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		memMb: r.mem_mb ?? null,
 		luaMb: r.lua_mb ?? null,
 		reasons: healthReasons({ health: r.health, tps: r.tps ?? null, memMb: r.mem_mb ?? null, lastSeen: r.last_seen, closed: r.closed_at !== null && r.closed_at !== undefined }, now),
+		ip: r.ip ?? null,
+		firstIp: r.first_ip ?? null,
+		ipChangedAt: iso(r.ip_changed_at),
+		location: locationOfRow(r),
 	};
 }
 
@@ -912,7 +971,7 @@ CREATE TABLE IF NOT EXISTS servers (
 	job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
 	last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
 	last_error TEXT, server_version INTEGER, sent_at INTEGER, budget TEXT, tps REAL, tps_min REAL, phys_fps REAL, mem_mb REAL, lua_mb REAL,
-	place_version INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
+	place_version INTEGER, ip TEXT, first_ip TEXT, ip_changed_at INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
 CREATE INDEX IF NOT EXISTS servers_open ON servers (last_seen) WHERE closed_at IS NULL AND lost_at IS NULL;
@@ -998,6 +1057,8 @@ export interface FleetServiceOptions {
 	deployKeepDays?: number | (() => number);
 	/** Deploy history rows at most (default DEPLOYS_MAX_ROWS). */
 	deploysMaxRows?: number;
+	/** Locations (fleet/geo.ts GeoLocator on the same db): told each heartbeat's address; none = locations stay unknown. */
+	geo?: GeoSink;
 }
 
 /** gzip / gunzip through the web's CompressionStream (Bun, Node 18+, Workers: no Node APIs here). */
@@ -1076,7 +1137,16 @@ export class FleetService {
 		// Release kinds for the deploy marks, then the deploy history's columns, to deploys tables made before them.
 		await addColumns(options.db, "deploys", ADDED_DEPLOY_COLUMNS);
 		await addColumns(options.db, "deploys", ADDED_DEPLOY_HISTORY_COLUMNS);
+		// Server locations (fleet/geo.ts): always made, so the server reads can join it with or without a database.
+		await options.db.exec(IP_GEO_SCHEMA);
+		// After addColumns (older files get the columns first): the hourly prune of ip_geo looks rows up by address.
+		await options.db.exec("CREATE INDEX IF NOT EXISTS servers_ip ON servers (ip); CREATE INDEX IF NOT EXISTS servers_first_ip ON servers (first_ip);");
 		return service;
+	}
+
+	/** Whether locations can be shown and which database to credit (GET /v1/fleet/servers' `geo`). */
+	geoStatus(): GeoStatus {
+		return this.options.geo?.status() ?? GEO_OFF;
 	}
 
 	// Events (Server-Sent Events) ---------------------------------------------------------------------------------------
@@ -1116,14 +1186,18 @@ export class FleetService {
 
 	async applyHeartbeat(p: ParsedHeartbeat): Promise<void> {
 		const now = this.clock();
-		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, now, now];
+		const ip = p.ip ?? null;
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, p.experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, ip, ip, now, now];
 		const job = p.job;
-		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
+		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		// One commit: the row, the history point (kernel 0.4.2: one per heartbeat) and the per-server cap on points.
+		// The address: an unknown one (null) keeps the stored one; first_ip is set once; ip_changed_at when it moves.
 		await this.db.transaction((tx) => {
 			tx.run(
-				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, place_version, first_seen, last_seen) ` +
-					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
+				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, place_version, ip, first_ip, first_seen, last_seen) ` +
+					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
+					`ip = COALESCE(excluded.ip, servers.ip), first_ip = COALESCE(servers.first_ip, excluded.ip), ` +
+					`ip_changed_at = CASE WHEN excluded.ip IS NOT NULL AND servers.ip IS NOT NULL AND excluded.ip <> servers.ip THEN excluded.last_seen ELSE servers.ip_changed_at END, ` +
 					`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
 					`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
 					`applied_seq = excluded.applied_seq, generation = excluded.generation, health = excluded.health, last_error = excluded.last_error, ` +
@@ -1134,14 +1208,16 @@ export class FleetService {
 			tx.run("INSERT INTO server_metrics (job, t, tps, tps_min, phys_fps, mem_mb, lua_mb, players) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [job, now, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.players]);
 			tx.run("DELETE FROM server_metrics WHERE job = ? AND id <= (SELECT id FROM server_metrics WHERE job = ? ORDER BY id DESC LIMIT 1 OFFSET ?)", [job, job, METRICS_MAX_POINTS]);
 		});
+		// The location: a Map check here; a new address is looked up and stored later (fleet/geo.ts), never waited on.
+		if (ip) this.options.geo?.note(ip);
 		if (!this.listeners.size) return;
-		const after = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
+		const after = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		if (!after) return;
 		let change: "new" | "update" | "back" | undefined;
 		if (!before || before.closed_at !== null) change = "new";
 		else if (before.lost_at !== null) change = "back";
 		else {
-			const keys: (keyof ServerRow)[] = ["branch", "artifact", "players", "applied_seq", "generation", "health", "last_error", "kernel", "experiment"];
+			const keys: (keyof ServerRow)[] = ["branch", "artifact", "players", "applied_seq", "generation", "health", "last_error", "kernel", "experiment", "ip"];
 			if (keys.some((k) => before[k] !== after[k])) change = "update";
 		}
 		if (change) this.emit({ type: "server", change, server: serverInfo(after, now) });
@@ -1301,7 +1377,7 @@ export class FleetService {
 		if (heartbeat) await this.applyHeartbeat(heartbeat);
 		const now = this.clock();
 		await this.db.run("UPDATE servers SET closed_at = ?, last_seen = ? WHERE job = ?", [now, now, job]);
-		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
+		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		if (row) this.emit({ type: "server", change: "closed", server: serverInfo(row, now) });
 	}
 
@@ -1436,11 +1512,11 @@ export class FleetService {
 
 	// Reads (admin) -----------------------------------------------------------------------------------------------------
 
-	async servers(options: { branch?: string; maxAgeSeconds?: number } = {}): Promise<{ servers: ServerInfo[]; players: number; byArtifact: { artifact: string; servers: number; players: number }[]; byHealth: Record<string, number> }> {
+	async servers(options: { branch?: string; maxAgeSeconds?: number } = {}): Promise<{ servers: ServerInfo[]; players: number; byArtifact: { artifact: string; servers: number; players: number }[]; byHealth: Record<string, number>; geo: GeoStatus }> {
 		const now = this.clock();
 		const since = now - (options.maxAgeSeconds ?? LOST_AFTER_MS / 1000) * 1000;
 		const params: SqlValue[] = [since];
-		let sql = `SELECT ${SERVER_COLUMNS} FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ?`;
+		let sql = `SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ?`;
 		if (options.branch) {
 			sql += " AND branch = ?";
 			params.push(options.branch);
@@ -1462,6 +1538,7 @@ export class FleetService {
 			players: servers.reduce((sum, s) => sum + (s.players ?? 0), 0),
 			byArtifact: [...art].map(([artifact, v]) => ({ artifact, ...v })).sort((a, b) => b.servers - a.servers),
 			byHealth,
+			geo: this.geoStatus(),
 		};
 	}
 
@@ -1500,16 +1577,16 @@ export class FleetService {
 	 * reports, debug bundles, swaps, the metrics' time range). Without a servers row (gone past KEEP_GONE_SERVERS_MS or
 	 * GONE_SERVERS_MAX) the state is "gone" while any of that still mentions the JobId, else "unknown".
 	 */
-	async server(job: string): Promise<{ server: (ServerInfo & { closedAt: string | null; lostAt: string | null; firstSeen: string }) | null; state: ServerState; history: ServerHistory }> {
+	async server(job: string): Promise<{ server: (ServerInfo & { closedAt: string | null; lostAt: string | null; firstSeen: string }) | null; state: ServerState; history: ServerHistory; geo: GeoStatus }> {
 		const now = this.clock();
-		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE job = ?`, [job]);
+		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		const history = await this.history(job);
 		if (!row) {
 			const any = history.alerts.length || history.reports.length || history.bundles.length || history.metrics.from !== null;
-			return { server: null, state: any ? "gone" : "unknown", history };
+			return { server: null, state: any ? "gone" : "unknown", history, geo: this.geoStatus() };
 		}
 		const state: ServerState = row.closed_at !== null ? "closed" : row.lost_at !== null || now - row.last_seen > LOST_AFTER_MS ? "lost" : "live";
-		return { server: { ...serverInfo(row, now), closedAt: iso(row.closed_at), lostAt: iso(row.lost_at), firstSeen: new Date(row.first_seen).toISOString() }, state, history };
+		return { server: { ...serverInfo(row, now), closedAt: iso(row.closed_at), lostAt: iso(row.lost_at), firstSeen: new Date(row.first_seen).toISOString() }, state, history, geo: this.geoStatus() };
 	}
 
 	/** What the fleet holds about a JobId, newest first (the server page's Timeline, Debug bundles and charts). */
@@ -1549,7 +1626,7 @@ export class FleetService {
 	async goneServers(options: { branch?: string; limit?: number } = {}): Promise<{ servers: GoneServer[] }> {
 		const now = this.clock();
 		const params: SqlValue[] = [];
-		let sql = `SELECT ${SERVER_COLUMNS} FROM servers WHERE (closed_at IS NOT NULL OR lost_at IS NOT NULL)`;
+		let sql = `SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE (closed_at IS NOT NULL OR lost_at IS NOT NULL)`;
 		if (options.branch) {
 			sql += " AND branch = ?";
 			params.push(options.branch);
@@ -1609,7 +1686,7 @@ export class FleetService {
 			return i < 0 ? 99 : i;
 		};
 		const params: SqlValue[] = [now - LOST_AFTER_MS, seq];
-		let sql = `SELECT ${SERVER_COLUMNS} FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ? AND (applied_seq IS NULL OR applied_seq < ?)`;
+		let sql = `SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ? AND (applied_seq IS NULL OR applied_seq < ?)`;
 		if (branch) {
 			sql += " AND branch = ?";
 			params.push(branch);
@@ -1705,7 +1782,7 @@ export class FleetService {
 	async sweep(): Promise<{ lost: number; stuck: number }> {
 		const now = this.clock();
 		// server_lost: no heartbeat for 90 s and no closing message.
-		const lostRows = await this.db.all<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen < ?`, [now - LOST_AFTER_MS]);
+		const lostRows = await this.db.all<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen < ?`, [now - LOST_AFTER_MS]);
 		const groups = new Map<string, ServerRow[]>();
 		for (const r of lostRows) {
 			// Only if still unmarked: during a deploy's handover two servers sweep the same file, and one alert is enough.
@@ -1794,6 +1871,10 @@ export class FleetService {
 			const topRollup = await this.db.first<{ id: number | null }>("SELECT MAX(id) AS id FROM server_metrics_5m");
 			if (topRollup?.id && topRollup.id > rollupCap) await this.db.run("DELETE FROM server_metrics_5m WHERE id <= ?", [topRollup.id - rollupCap]);
 			await this.pruneBundles(now);
+			// Stored locations of addresses no servers row names any more (the rows above are bounded, so this is too).
+			await this.db.run(
+				"DELETE FROM ip_geo WHERE NOT EXISTS (SELECT 1 FROM servers s WHERE s.ip = ip_geo.ip) AND NOT EXISTS (SELECT 1 FROM servers s WHERE s.first_ip = ip_geo.ip)",
+			);
 		}
 		return { lost: [...groups.values()].reduce((n, rows) => n + rows.length, 0), stuck };
 	}
@@ -1846,6 +1927,7 @@ export class FleetService {
 
 	async close(): Promise<void> {
 		this.listeners.clear();
+		this.options.geo?.stop();
 		await this.db.close();
 	}
 }

@@ -763,6 +763,37 @@ export interface FleetServer {
 	luaMb?: number | null;
 	/** Why the server needs a look (backend fleet/health.ts); empty or missing when nothing tripped. */
 	reasons?: HealthReason[];
+	/**
+	 * The public address its heartbeats come from (latest and first), and when it last changed. Owners (the admin role)
+	 * only: missing for the read-only web role.
+	 */
+	ip?: string | null;
+	firstIp?: string | null;
+	ipChangedAt?: string | null;
+	/** Where the latest address is (the backend's offline IP database); null or missing while unknown. */
+	location?: ServerLocation | null;
+}
+
+/** A server's location, city level at best. */
+export interface ServerLocation {
+	/** ISO 3166-1 alpha-2. */
+	country: string | null;
+	countryName: string | null;
+	region: string | null;
+	city: string | null;
+	lat: number | null;
+	lon: number | null;
+	asn: number | null;
+	org: string | null;
+}
+
+/** Whether locations can be shown and the database to credit (DB-IP Lite: CC BY 4.0, shown next to locations). */
+export interface GeoStatus {
+	state: "ready" | "missing" | "off";
+	source: string | null;
+	attribution: string | null;
+	attributionUrl: string | null;
+	built: string | null;
 }
 
 /** One signal behind a server's health: its reading and the line it crossed. */
@@ -820,6 +851,8 @@ export interface FleetServerDetail {
 	state: ServerState;
 	debug: DebugStatus;
 	history?: ServerHistory;
+	/** Older backends: missing. */
+	geo?: GeoStatus;
 }
 
 /** What the fleet still holds about a JobId, newest first. */
@@ -1169,6 +1202,8 @@ export interface FleetServers {
 	players: number;
 	byArtifact: { artifact: string; servers: number; players: number }[];
 	byHealth: Record<string, number>;
+	/** Older backends: missing. */
+	geo?: GeoStatus;
 }
 
 export interface FleetAlert {

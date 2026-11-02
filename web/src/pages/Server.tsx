@@ -18,6 +18,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ErrorState, KeyValue, LoadingBlock, PageHeader, Section } from "@/components/common";
 import { HealthBadge, ReasonList, reasonLines } from "@/components/HealthReasons";
+import { GeoCredit, LocationLabel, networkText } from "@/components/ServerLocation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -132,6 +133,22 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 					<KeyValue label="Place version">{placeVersion ?? "–"}</KeyValue>
 					<KeyValue label="Last heartbeat">{fmtAgo(s.lastSeen)}</KeyValue>
 					<KeyValue label="Type">{s.serverType ?? "–"}</KeyValue>
+					<KeyValue label="Location">
+						<LocationLabel location={s.location} />
+					</KeyValue>
+					{networkText(s.location) ? <KeyValue label="Network">{networkText(s.location)}</KeyValue> : null}
+					{/* Owners only: the backend leaves the addresses out for the read-only role. */}
+					{s.ip !== undefined ? (
+						<KeyValue label="IP">
+							<span className="font-mono text-xs break-all">{s.ip ?? "–"}</span>
+							{s.firstIp && s.ip && s.firstIp !== s.ip ? (
+								<span className="ml-1.5 text-xs font-normal text-muted-foreground">
+									first <span className="font-mono">{s.firstIp}</span>
+									{s.ipChangedAt ? `, changed ${fmtAgo(s.ipChangedAt)}` : ""}
+								</span>
+							) : null}
+						</KeyValue>
+					) : null}
 				</div>
 			) : detail?.state === "gone" ? (
 				<div className="flex flex-wrap gap-x-6 gap-y-1.5">
@@ -140,6 +157,7 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 					</KeyValue>
 				</div>
 			) : null}
+			{s?.location ? <GeoCredit geo={detail?.geo} /> : null}
 			{s && live && reasonLines(s).length ? (
 				<section aria-label="Why this server needs a look" className="space-y-1">
 					<div className="text-xs font-medium text-muted-foreground">Why it is {s.health && s.health !== "ok" ? s.health : "flagged"}</div>

@@ -4,8 +4,8 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DataTable } from "@/components/data-table";
 import { reasonLines, reasonText } from "@/components/HealthReasons";
-import type { FleetServer, HealthReason } from "@/lib/types";
-import { budgetPressure, budgetText, memoryHigh, SERVER_COLUMNS, tpsLow, tpsText } from "./Fleet";
+import type { FleetServer, FleetServers, HealthReason } from "@/lib/types";
+import { budgetPressure, budgetText, ByCountry, countriesText, memoryHigh, SERVER_COLUMNS, serverColumns, tpsLow, tpsText } from "./Fleet";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -165,5 +165,58 @@ describe("the fleet servers table", () => {
 		expect(screen.getByRole("columnheader", { name: /Health/ })).toBeTruthy();
 		expect(screen.getByRole("columnheader", { name: /^TPS/ })).toBeTruthy();
 		expect(screen.getByRole("columnheader", { name: /Memory/ })).toBeTruthy();
+	});
+});
+
+describe("server locations", () => {
+	const US = { country: "US", countryName: "United States", region: "Virginia", city: "Sterling", lat: 39, lon: -77, asn: 22697, org: "Roblox" };
+	const DE = { country: "DE", countryName: "Germany", region: "Hesse", city: "Frankfurt am Main", lat: 50, lon: 8, asn: null, org: null };
+	const located = [
+		server("job-a", { location: US, ip: "192.0.2.7", firstIp: "192.0.2.7" }),
+		server("job-b", { location: DE, ip: "198.51.100.1", firstIp: "192.0.2.9", ipChangedAt: "2026-10-09T11:00:00Z" }),
+		server("job-c", { location: null, ip: null }),
+		server("job-d", { location: US, ip: "192.0.2.8" }),
+	];
+
+	it("shows the country chip and the place, and sorts by the country code (unknown last)", () => {
+		mount(located);
+		expect(cells("Country")).toEqual(["USSterling, Virginia", "DEFrankfurt am Main, Hesse", "–", "USSterling, Virginia"]);
+		sortBy("Country");
+		expect(jobs()).toEqual(["job-b", "job-a", "job-d", "job-c"]);
+	});
+
+	it("owners get an IP column (a moved server says so); the read-only role's columns have none", () => {
+		mount(located);
+		expect(cells("IP")).toEqual(["192.0.2.7", "198.51.100.1 (moved)", "–", "192.0.2.8"]);
+		expect(serverColumns(false).some((c) => c.id === "ip")).toBe(true);
+		expect(serverColumns(true).some((c) => c.id === "ip")).toBe(false);
+		expect(serverColumns(true).some((c) => c.id === "country")).toBe(true);
+	});
+
+	it("the Countries metric and the By country table group the live list, with the DB-IP credit", () => {
+		expect(countriesText(located)).toBe("US (2), DE (1)");
+		expect(countriesText([server("x", { location: null })])).toBe("unknown");
+		const data: FleetServers = {
+			servers: located,
+			players: 0,
+			byArtifact: [],
+			byHealth: {},
+			geo: { state: "ready", source: "DB-IP City Lite", attribution: "IP geolocation by DB-IP", attributionUrl: "https://db-ip.com", built: null },
+		};
+		render(
+			<MemoryRouter>
+				<ByCountry data={data} />
+			</MemoryRouter>,
+		);
+		expect(screen.getByText("By country")).toBeTruthy();
+		expect(screen.getByText("United States")).toBeTruthy();
+		expect(screen.getByRole("link", { name: "IP geolocation by DB-IP" })).toBeTruthy();
+		cleanup();
+		const { container } = render(
+			<MemoryRouter>
+				<ByCountry data={{ ...data, servers: [server("x", { location: null })] }} />
+			</MemoryRouter>,
+		);
+		expect(container.textContent).toBe("");
 	});
 });
