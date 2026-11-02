@@ -5,7 +5,7 @@
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | mark     API key (game role)
  *   POST /v1/fleet/bundle                                           API key; kernel 0.5.3 debug bundle (<= 512 KB, also inflated;
  *                                                                   Content-Encoding: gzip like /v1/errors) -> 202 { ok, id }
- *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token
+ *   GET  /v1/fleet/servers?branch=&maxAge=                          admin token (servers carry `location`; `ip` / `firstIp` only when canSeeIps)
  *   GET  /v1/fleet/servers?gone=1&branch=&limit=                    closed and lost servers, the most recently gone first
  *   GET  /v1/fleet/servers/<jobId>/metrics?since=<unix ms>         kernel 0.4.2: { points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] };
  *                                                                   a since older than 2 h adds 5-minute rollups (`rolledUntil`)
@@ -19,7 +19,8 @@
  *   POST /v1/fleet/alerts/<id>/ack   { by? }
  *   GET  /v1/fleet/stream?branch=&types=server,alert,...            Server-Sent Events
  */
-import { BUNDLE_BODY_MAX, FleetInputError, JOB_ID_MAX, parseBundle, parseClosing, parseDeploy, parseHeartbeat, parseMark, parseReport, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
+import { normalizeIp } from "./geo.ts";
+import { BUNDLE_BODY_MAX, FleetInputError, JOB_ID_MAX, parseBundle, parseClosing, parseDeploy, parseHeartbeat, parseMark, parseReport, withoutIps, type AlertLevel, type DeployMessage, type FleetEvent, type FleetService, type HeartbeatMessage } from "./service.ts";
 
 export const FLEET_BODY_LIMIT = 16 * 1024;
 
@@ -121,6 +122,8 @@ export interface FleetHttpOptions {
 	heartbeatReply?(job: string): Record<string, unknown> | undefined;
 	/** A debug bundle's `playerLogs` go to owners (the admin role) only; the read-only web role gets the body without them. Default: nobody. */
 	canReadPlayerLogs?(req: Request): boolean;
+	/** Game servers' addresses (`ip`, `firstIp`) go to owners (the admin role) only; the web role gets their locations. Default: nobody. */
+	canSeeIps?(req: Request): boolean;
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -258,13 +261,16 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 			const accept = o.accept ?? ((_topic, message) => o.service.apply(message));
 			// Validated here, committed by whoever subscribes (the fleet store; the others only watch).
 			if (kind === "heartbeat") {
-				const heartbeat = parseHeartbeat(body, header);
+				// The address is the connection's (resolved by the host), never anything the body says.
+				const heartbeat = { ...parseHeartbeat(body, header), ip: normalizeIp(ip) };
 				await accept("heartbeat", { kind: "heartbeat", heartbeat });
 				return json(202, { ok: true, ...(o.heartbeatReply?.(heartbeat.job) ?? {}) });
 			}
 			if (kind === "report") await accept("deploy", { kind: "report", report: parseReport(body) });
-			else if (kind === "closing") await accept("heartbeat", { kind: "closing", ...parseClosing(body, header) });
-			else if (kind === "deploy") await accept("deploy", { kind: "start", deploy: parseDeploy(body) });
+			else if (kind === "closing") {
+				const closing = parseClosing(body, header);
+				await accept("heartbeat", { kind: "closing", job: closing.job, ...(closing.heartbeat ? { heartbeat: { ...closing.heartbeat, ip: normalizeIp(ip) } } : {}) });
+			} else if (kind === "deploy") await accept("deploy", { kind: "start", deploy: parseDeploy(body) });
 			else if (kind === "mark") await accept("deploy", { kind: "mark", mark: parseMark(body) });
 			else if (kind === "bundle") {
 				// Straight into the store (like alerts): a repeat id is accepted again and stores nothing.
@@ -285,13 +291,16 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		}
 		if (req.method !== "GET") return json(405, { error: "method not allowed" });
 		const q = url.searchParams;
+		const ips = o.canSeeIps?.(req) ?? false;
 		if (route === "servers" && (q.get("gone") === "1" || q.get("gone") === "true")) {
 			const limit = intParam(q.get("limit"), "limit");
-			return json(200, await o.service.goneServers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(limit !== undefined ? { limit } : {}) }));
+			const gone = await o.service.goneServers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(limit !== undefined ? { limit } : {}) });
+			return json(200, ips ? gone : { ...gone, servers: gone.servers.map(withoutIps) });
 		}
 		if (route === "servers") {
 			const maxAge = intParam(q.get("maxAge"), "maxAge");
-			return json(200, await o.service.servers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(maxAge !== undefined ? { maxAgeSeconds: maxAge } : {}) }));
+			const live = await o.service.servers({ ...(q.get("branch") ? { branch: q.get("branch") as string } : {}), ...(maxAge !== undefined ? { maxAgeSeconds: maxAge } : {}) });
+			return json(200, ips ? live : { ...live, servers: live.servers.map(withoutIps) });
 		}
 		// Kernel 0.4.2: one server's TPS / memory / players history, oldest first (the explorer's /servers/<JobId> graphs).
 		const metrics = /^servers\/([^/]+)\/metrics$/.exec(route);
@@ -310,14 +319,13 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 		}
 		if (route === "reports") {
 			const seq = intParam(q.get("seq"), "seq");
-			return json(
-				200,
-				await o.service.reports({
-					...(seq !== undefined ? { seq } : {}),
-					...(q.get("artifact") ? { artifact: q.get("artifact") as string } : {}),
-					...(q.get("branch") ? { branch: q.get("branch") as string } : {}),
-				}),
-			);
+			const reports = await o.service.reports({
+				...(seq !== undefined ? { seq } : {}),
+				...(q.get("artifact") ? { artifact: q.get("artifact") as string } : {}),
+				...(q.get("branch") ? { branch: q.get("branch") as string } : {}),
+			});
+			// `behind` lists live servers (with their addresses): the web role gets them without.
+			return json(200, ips ? reports : { ...reports, behind: reports.behind.map(withoutIps) });
 		}
 		// The deploy history (deploys.ts): one page newest first, and one release with its report and alerts.
 		if (route === "deploys") {
@@ -364,7 +372,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 				}),
 			});
 		}
-		if (route === "stream") return stream(req, url, o);
+		if (route === "stream") return stream(req, url, o, ips);
 		return json(404, { error: "not found" });
 	} catch (error) {
 		if (error instanceof BodyTooLarge) return json(413, { error: "body too large" });
@@ -373,7 +381,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 	}
 }
 
-function stream(req: Request, url: URL, o: FleetHttpOptions): Response {
+function stream(req: Request, url: URL, o: FleetHttpOptions, ips: boolean): Response {
 	const branch = url.searchParams.get("branch");
 	const types = new Set((url.searchParams.get("types") ?? "").split(",").filter(Boolean));
 	const encoder = new TextEncoder();
@@ -410,7 +418,7 @@ function stream(req: Request, url: URL, o: FleetHttpOptions): Response {
 											: event.branch;
 					if (b !== branch) return;
 				}
-				send(event.type, event);
+				send(event.type, event.type === "server" && !ips ? { ...event, server: withoutIps(event.server) } : event);
 			});
 			ping = setInterval(() => {
 				try {

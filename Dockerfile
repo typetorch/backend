@@ -8,6 +8,10 @@
 # Debian-based (glibc), so DuckDB's prebuilt linux binding loads. Runs as the non-root `bun` user (uid 1000); the data
 # folder is /data (mount a volume there: a bind mount must be writable by uid 1000). No secret is baked in: every setting
 # comes from the environment at run time (README "Settings").
+#
+# Game server locations: no IP database is baked in (the build stays offline and reproducible). With NODE_ENV=production
+# the server downloads DB-IP's free City Lite and ASN Lite files into /data/geoip/ a minute after start and refreshes them
+# monthly (README "Game server addresses and locations"); TYPETORCH_GEOIP=off turns that off.
 
 # 1. Build the explorer (web/) into web/dist. --bun runs Vite under Bun: this image has no Node.
 FROM oven/bun:1.3 AS explorer

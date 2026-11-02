@@ -260,3 +260,32 @@ describe("the server page", () => {
 		for (const word of [/^Set$/, /^Rename$/, /^Destroy$/, /^Delete$/, /^Kick$/]) expect(screen.queryByRole("button", { name: word })).toBeNull();
 	});
 });
+
+describe("the server's location", () => {
+	const location = { country: "US", countryName: "United States", region: "Virginia", city: "Sterling", lat: 39.0067, lon: -77.4291, asn: 22697, org: "Roblox" };
+	const geo = { state: "ready" as const, source: "DB-IP City Lite + ASN Lite", attribution: "IP geolocation by DB-IP", attributionUrl: "https://db-ip.com", built: "2026-11-01T00:00:00.000Z" };
+
+	it("owners see the place, the network and the address (and where it started out), with the DB-IP credit", async () => {
+		mockApi(detail({ server: { ...row, location, ip: "192.0.2.8", firstIp: "192.0.2.7", ipChangedAt: new Date(Date.now() - 120_000).toISOString() }, geo }));
+		mount();
+		expect(await screen.findByText("Sterling, Virginia")).toBeTruthy();
+		expect(screen.getByLabelText("United States (US)").textContent).toBe("US");
+		expect(screen.getByText("AS22697 Roblox")).toBeTruthy();
+		expect(screen.getByText("192.0.2.8")).toBeTruthy();
+		expect(screen.getByText("192.0.2.7")).toBeTruthy();
+		expect(screen.getByRole("link", { name: "IP geolocation by DB-IP" }).getAttribute("href")).toBe("https://db-ip.com");
+	});
+
+	it("the read-only role (no address in the answer) sees the place but no IP row; an unknown location says so", async () => {
+		mockApi(detail({ server: { ...row, location }, geo }));
+		mount();
+		expect(await screen.findByText("Sterling, Virginia")).toBeTruthy();
+		expect(screen.queryByText("IP")).toBeNull();
+		cleanup();
+		mockApi(detail({ server: { ...row, location: null, ip: null }, geo }));
+		mount();
+		expect(await screen.findByText("unknown")).toBeTruthy();
+		expect(screen.getByText("IP")).toBeTruthy();
+		expect(screen.queryByRole("link", { name: "IP geolocation by DB-IP" })).toBeNull();
+	});
+});

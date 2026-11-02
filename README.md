@@ -40,7 +40,7 @@ is the same command.
 - [Queries](#queries) (with example output)
 - [Cloudflare Basin setup](#cloudflare-basin-setup)
 - [The analytics part (DuckDB)](#the-analytics-part-duckdb)
-- [The fleet API (SQLite)](#the-fleet-api-sqlite)
+- [The fleet API (SQLite)](#the-fleet-api-sqlite) ([game server addresses and locations](#game-server-addresses-and-locations))
 - [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
@@ -145,6 +145,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
 | `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds per minute the fleet API lets in, and (counted on their own) the error logs. |
 | `TYPETORCH_SQLITE` | `<data dir>/fleet.sqlite` | The SQLite file (fleet, identities, error logs). |
+| `TYPETORCH_GEOIP`, `TYPETORCH_GEOIP_ASN` | `dbip` in production (`NODE_ENV=production`, as in the image), else `off` | [Game server locations](#game-server-addresses-and-locations): `dbip` downloads DB-IP's free City Lite and ASN Lite databases into `<data dir>/geoip/` and refreshes them monthly; a path uses that City `.mmdb` file as it is (e.g. MaxMind GeoLite2, kept fresh by `geoipupdate`; `TYPETORCH_GEOIP_ASN` names an ASN one); `off` shows no locations. Lookups never leave the server. |
 | `TYPETORCH_ALERT_WEBHOOK_FORMAT`, `TYPETORCH_ALERT_WEBHOOK_LEVELS` | detected, `critical` | `discord`, `slack` or `json`; which levels are sent. |
 | `TYPETORCH_ERASURE_DELETE_LINK` | `0` | `1` also deletes the DataStore link on erasure. |
 | `TYPETORCH_ERROR_KEEP_DAYS`, `TYPETORCH_ERROR_MAX_KINDS` | `30`, `5000` | Error log retention and the most kinds stored. |
@@ -374,7 +375,9 @@ needs the admin or the web role. `GET /v1/auth/check` and the login routes only 
 
 To let someone look at the explorer without letting them change anything, give them the **web** role. It sees the game's
 data (the queries, the SQL page, the rollups, error logs, the live stream, the fleet lists and streams, a server's page with
-its heartbeats) and nothing about the server itself. Two rules, both enforced in the backend before any handler runs:
+its heartbeats and its location) and nothing about the server itself. Game servers' IP addresses are for owners: the web
+role gets every server's location but no `ip` / `firstIp` (lists, a server's view, deploy reports, the fleet stream).
+Two rules, both enforced in the backend before any handler runs:
 
 - **Reads only, by method.** A web session may send `GET` / `HEAD`, plus the two read-only query routes that take their
   filters in a `POST` body (`POST /v1/query/<name>`, `POST /v1/sql`: one SELECT over the two analytics views, in a
@@ -563,7 +566,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
 | `GET /v1/fleet/deploys`, `GET /v1/fleet/deploys/<seq>` | admin, web | the [deploy history](#deploy-history): releases newest first, paged; one release with its report, alerts and neighbors |
 | `POST /v1/fleet/alerts/<id>/ack` | admin | alert acknowledgement |
-| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state, its [offline history](#debug-bundles-and-offline-history)) |
+| `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state, its [offline history](#debug-bundles-and-offline-history)); the web role gets its location but not its [addresses](#game-server-addresses-and-locations) |
 | `GET /v1/fleet/servers/<jobId>/bundles`, `GET /v1/fleet/bundles/<id>` | admin, web | [debug bundles](#debug-bundles-and-offline-history); the web role gets a bundle's body without `playerLogs` |
 | `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
 | `GET /v1/access` | admin | the owner list |
@@ -1384,7 +1387,7 @@ section it still writes for kernels before 0.4), so it works even when a game's 
 | `POST /v1/fleet/closing` | game | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
 | `POST /v1/fleet/deploy` | game | `{ s, b, a, ch, t, k?, fr?, m?, by? }` from the CLI after a release (stuck detection's start time, a chart mark and a deploy history row): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `by` who or what started it (64: a user, `ci`, `auto_rollback`); `t` unix ms or s (a clock a day off is replaced by the backend's) |
 | `POST /v1/fleet/mark` | game | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
-| `GET /v1/fleet/servers?branch=&maxAge=` | admin, web | `{ servers: [...], players, byArtifact, byHealth }` (live: seen in the last 90 s, not closed) |
+| `GET /v1/fleet/servers?branch=&maxAge=` | admin, web | `{ servers: [...], players, byArtifact, byHealth, geo }` (live: seen in the last 90 s, not closed). Each server has `location` and, for the admin role only, `ip`, `firstIp`, `ipChangedAt` ([addresses and locations](#game-server-addresses-and-locations)); `geo` = `{ state: ready\|missing\|off, source, attribution, attributionUrl, built }` |
 | `GET /v1/fleet/servers?gone=1&branch=&limit=` | admin, web | `{ servers: [...rows + closedAt, lostAt, state: closed\|lost, firstSeen] }`: servers that closed or were lost (kept 30 days), the most recently gone first (`limit` 200, at most 1,000) |
 | `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin, web | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }`. A `since` older than the 2-hour raw window adds the 5-minute rollups before it (one point per bucket, `t` = the bucket's start) and `rolledUntil` (unix ms: where the raw points take over) |
 | `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin, web | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
@@ -1448,6 +1451,36 @@ gets 400 before any limiter sees it.
 
 The fleet core (`src/fleet/service.ts`, `http.ts`) uses no Node APIs (async SQLite interface, Web Request/Response),
 so it can move to a Cloudflare Worker with D1 later; SSE would then need a Durable Object.
+
+### Game server addresses and locations
+
+Every heartbeat's public address is stored on the server's row: `ip` (the latest), `firstIp` (the first one seen) and
+`ipChangedAt` (when it last moved; null: never). The address is the connection's, resolved like every other client address
+(`TYPETORCH_TRUST_PROXY` / `TYPETORCH_TRUSTED_PROXIES` / `TYPETORCH_CLOUDFLARE`): never anything the body says, and
+nothing changes in the kernel. Behind a proxy without `TYPETORCH_TRUST_PROXY`, every server shows the proxy's private
+address and no location. Roblox game servers reach the internet through Roblox's own egress, so the location is the
+data center's region, which is what it is for: where the fleet runs.
+
+Locations come from an offline IP database, so no address is sent anywhere: `TYPETORCH_GEOIP=dbip` (the default in the
+image) uses DB-IP's free [IP to City Lite and IP to ASN Lite](https://db-ip.com/db/lite.php) databases (CC BY 4.0: the
+explorer credits DB-IP wherever it shows a location). The server keeps them in `<data dir>/geoip/` (about 140 MB on the
+volume, memory-mapped: the OS pages in what lookups touch): a minute after start and then daily it downloads the month's
+release (`https://download.db-ip.com/free/dbip-{city,asn}-lite-YYYY-MM.mmdb.gz`; the previous month's while a first
+install finds this one not out yet) when a file is missing or from an earlier month, streams it through gunzip
+(size-capped, 15 minutes at most), checks it opens as the right kind of database and renames it over the old one. A
+failed download keeps the old file and tries again the next day. To refresh by hand, delete the files and restart; to
+use MaxMind GeoLite2 instead, set `TYPETORCH_GEOIP=/path/GeoLite2-City.mmdb` (and `TYPETORCH_GEOIP_ASN`). Backups leave
+`geoip/` out (it is downloaded again).
+
+A heartbeat never waits for a lookup: it only checks an in-memory map, and a new address is looked up and written to the
+`ip_geo` table shortly after, in batches of 250 (an address is looked up again after 30 days). At most 2,000 addresses
+wait (more are dropped until their next heartbeat), and `ip_geo` only keeps addresses a servers row still names (pruned
+hourly). Without a database (missing, still downloading, `off`) locations are null and `geo.state` says why; when one is
+loaded, the stored servers' addresses are looked up then.
+
+The Fleet page shows a Country column (sortable, filterable; City, Network and, for owners, IP columns in the column
+picker), a Countries tile and a **By country** table; a server's page shows its location, network and, for owners, its
+address and the one it started from.
 
 ### Deploy history
 
@@ -1677,6 +1710,8 @@ the backend reads them for the Roblox page's **Acquisition, from Roblox** sectio
 - **Backups** hold what the data folder held when they were made, including players erased later: after restoring an
   older backup, erase those players again (the erasure log in `erasure/` of the live volume lists when). Local ones rotate out after
   `TYPETORCH_BACKUP_KEEP` backups; a downloaded copy is the owner's to delete.
+- **Game server addresses** (Roblox's, not players') are stored on the fleet's server rows for owners only and looked
+  up in a local database; no address leaves the server.
 - **Remote debug answers** (player names, logs, state) stay in the backend's memory for at most 3 minutes and in the
   owner's open page; they are never stored. The audit keeps who asked what, never a player's UserId or an answer.
 - Turning it off: the framework option `identity: false` stops sending identity rows; deleting

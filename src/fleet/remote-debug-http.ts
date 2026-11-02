@@ -19,7 +19,7 @@
  *   GET  /v1/fleet/debug/audit?limit=                 -> { entries }
  */
 import type { FleetService } from "./service.ts";
-import { JOB_ID_MAX } from "./service.ts";
+import { JOB_ID_MAX, withoutIps } from "./service.ts";
 import { RemoteDebugInputError, type Caller, type RemoteDebugHub } from "./remote-debug.ts";
 import type { RemoteDebugWaker } from "./remote-debug-wake.ts";
 
@@ -61,7 +61,7 @@ export interface RemoteDebugHttpOptions {
 	 * The signed-in gate: the caller, or the answer to send (401/403/404/429). `read` (one server's view) lets the
 	 * read-only web role in; `manage` (a watch, a command, a command's answer, the audit with its addresses) is for admins.
 	 */
-	admin(req: Request, need: "read" | "manage"): { caller: Caller } | { response: Response };
+	admin(req: Request, need: "read" | "manage"): { caller: Caller; /** The caller may see game servers' addresses (the admin role). */ ips?: boolean } | { response: Response };
 	limiters: RemoteDebugLimiters;
 	/** Plans/25 "Instant wake": publishes a wake when a watch starts on a job that isn't polling (none: heartbeats only). */
 	waker?: Pick<RemoteDebugWaker, "wake" | "waking">;
@@ -150,7 +150,9 @@ export async function handleRemoteDebug(req: Request, url: URL, path: string, o:
 		const part = m[2];
 		if (!part) {
 			if (method !== "GET") return json(405, { error: "GET only" });
-			return json(200, { ...(await o.fleet.server(job)), debug: o.hub.status(job) });
+			const found = await o.fleet.server(job);
+			// The server's addresses are for owners; the read-only web role gets its location.
+			return json(200, { ...found, server: found.server && !gate.ips ? withoutIps(found.server) : found.server, debug: o.hub.status(job) });
 		}
 		if (part === "watch") {
 			if (method !== "POST" || m[3]) return json(405, { error: "POST only" });

@@ -7,7 +7,9 @@ import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { HealthBadge } from "@/components/HealthReasons";
+import { CountryCode, countryCounts, GeoCredit, LocationLabel, locationText, networkText, placeText, type CountryCount } from "@/components/ServerLocation";
 import { api } from "@/lib/api";
+import { isReadOnly, useAuth } from "@/lib/auth";
 import { fmtAgo, fmtDuration, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
 import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, GoneServer, ServerBudget } from "@/lib/types";
@@ -275,6 +277,30 @@ export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 		className: "tabular-nums",
 	},
 	{ id: "kernel", header: "Kernel", type: "enum", accessor: (s) => s.kernel, className: "text-xs" },
+	// Where the server is: its address looked up in the backend's offline IP database (the country, then the place).
+	{
+		id: "country",
+		header: "Country",
+		type: "enum",
+		accessor: (s) => s.location?.country ?? null,
+		cell: (s) => (s.location ? <LocationLabel location={s.location} /> : <span className="text-muted-foreground">–</span>),
+		format: (_v, s) => locationText(s.location),
+		searchText: (s) => [s.location?.countryName, placeText(s.location)].filter(Boolean).join(" "),
+		exportValue: (s) => s.location?.country ?? null,
+		className: "text-xs whitespace-nowrap",
+	},
+	{ id: "place", header: "City", type: "text", filter: "text", accessor: (s) => placeText(s.location), defaultHidden: true, className: "text-xs" },
+	{ id: "network", header: "Network", type: "text", filter: "text", accessor: (s) => networkText(s.location), defaultHidden: true, className: "max-w-60 truncate text-xs" },
+	// Owners only: the backend leaves addresses out for the read-only role, and serverColumns drops the column there.
+	{
+		id: "ip",
+		header: "IP",
+		type: "text",
+		filter: "text",
+		accessor: (s) => s.ip ?? null,
+		cell: (s) => <IpText server={s} />,
+		className: "font-mono text-xs whitespace-nowrap",
+	},
 	{
 		id: "budget",
 		header: "Budget",
@@ -294,12 +320,29 @@ export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 	{ id: "lastError", header: "Last error", accessor: (s) => s.lastError, defaultHidden: true, className: "max-w-80 truncate text-xs" },
 ];
 
+/** The address, marked when the server started out on another one (the tooltip says which, and when it changed). */
+function IpText({ server: s }: { server: FleetServer }) {
+	const moved = !!s.firstIp && !!s.ip && s.firstIp !== s.ip;
+	return (
+		<span title={moved ? `First seen from ${s.firstIp}${s.ipChangedAt ? `, changed ${fmtAgo(s.ipChangedAt)}` : ""}` : undefined}>
+			{s.ip ?? "–"}
+			{moved ? <span className="text-muted-foreground"> (moved)</span> : null}
+		</span>
+	);
+}
+
+/** The live servers' columns for this session: the read-only role gets no addresses, so no IP column. */
+export function serverColumns(readOnly: boolean): DataColumn<FleetServer>[] {
+	return readOnly ? SERVER_COLUMNS.filter((c) => c.id !== "ip") : SERVER_COLUMNS;
+}
+
 function Servers({ data }: { data: FleetServers }) {
+	const readOnly = isReadOnly(useAuth());
 	return (
 		<DataTable
 			id="fleet-servers"
 			label="Live servers"
-			columns={SERVER_COLUMNS}
+			columns={serverColumns(readOnly)}
 			data={data.servers}
 			rowId={(s) => s.job}
 			empty={<EmptyState>No live servers (a server shows up within 30 s of its first heartbeat, and leaves 90 s after its last).</EmptyState>}
@@ -478,6 +521,15 @@ export const GONE_COLUMNS: DataColumn<GoneServer>[] = [
 	{ id: "branch", header: "Branch", type: "enum", accessor: (s) => s.branch },
 	{ id: "artifact", header: "Artifact", type: "enum", accessor: (s) => s.artifact, className: "font-mono text-xs" },
 	{ id: "health", header: "Last health", type: "enum", accessor: (s) => s.health ?? "unknown", className: "text-xs" },
+	{
+		id: "country",
+		header: "Country",
+		type: "enum",
+		accessor: (s) => s.location?.country ?? null,
+		cell: (s) => (s.location ? <LocationLabel location={s.location} /> : <span className="text-muted-foreground">–</span>),
+		format: (_v, s) => locationText(s.location),
+		className: "text-xs whitespace-nowrap",
+	},
 	{ id: "players", header: "Players", accessor: (s) => s.players, defaultHidden: true },
 	{ id: "kernel", header: "Kernel", type: "enum", accessor: (s) => s.kernel, className: "text-xs" },
 	{ id: "lastError", header: "Last error", accessor: (s) => s.lastError, defaultHidden: true, className: "max-w-80 truncate text-xs" },
@@ -497,6 +549,47 @@ function RecentlyGone({ servers }: { servers: GoneServer[] }) {
 			empty={<EmptyState>No server closed or was lost in the last 30 days.</EmptyState>}
 		/>
 	);
+}
+
+const COUNTRY_COLUMNS: DataColumn<CountryCount>[] = [
+	{
+		id: "country",
+		header: "Country",
+		accessor: (c) => c.country,
+		cell: (c) => (
+			<span className="inline-flex items-center gap-1.5">
+				<CountryCode code={c.country === "??" ? null : c.country} name={c.countryName} />
+				<span>{c.countryName ?? c.country}</span>
+			</span>
+		),
+		format: (_v, c) => c.countryName ?? c.country,
+		className: "text-xs whitespace-nowrap",
+	},
+	{ id: "servers", header: "Servers", type: "number", accessor: (c) => c.servers },
+	{ id: "players", header: "Players", type: "number", accessor: (c) => c.players },
+	{ id: "places", header: "Where", accessor: (c) => c.places.slice(0, 5).join("; ") || null, className: "max-w-96 text-xs whitespace-normal text-muted-foreground" },
+];
+
+/** Live servers by country (the list grouped), once some location is known. */
+export function ByCountry({ data }: { data: FleetServers }) {
+	if (!data.servers.some((s) => s.location)) return null;
+	return (
+		<Section title="By country" description="Live servers grouped by where their address is.">
+			<DataTable id="fleet-countries" label="Servers by country" columns={COUNTRY_COLUMNS} data={countryCounts(data.servers)} rowId={(c) => c.country} defaultSort={[{ id: "servers", desc: true }]} maxHeight="20rem" />
+			<GeoCredit geo={data.geo} />
+		</Section>
+	);
+}
+
+/** The Countries metric's line: "US (12), DE (3)". */
+export function countriesText(servers: readonly FleetServer[]): string {
+	const rows = countryCounts(servers).filter((c) => c.country !== "??");
+	if (!rows.length) return "unknown";
+	return rows
+		.slice(0, 6)
+		.map((c) => `${c.country} (${c.servers})`)
+		.join(", ")
+		.concat(rows.length > 6 ? ", ..." : "");
 }
 
 function Alerts({ alerts }: { alerts: FleetAlert[] }) {
@@ -551,7 +644,7 @@ export default function Fleet() {
 			<QueryState query={servers}>
 				{(data) => (
 					<>
-						<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+						<div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
 							<Metric label="Live servers" value={fmtInt(data.servers.length)} />
 							<Metric label="Players" value={fmtInt(data.players)} />
 							<Metric
@@ -567,10 +660,17 @@ export default function Fleet() {
 										.join(", ") || "–"
 								}
 							/>
+							<Metric
+								label="Countries"
+								value={fmtInt(countryCounts(data.servers).filter((c) => c.country !== "??").length)}
+								sub={data.geo?.state === "off" ? "locations are off" : data.geo?.state === "missing" ? "no IP database yet" : countriesText(data.servers)}
+							/>
 						</div>
 						<Section title="Servers">
 							<Servers data={data} />
+							{data.servers.some((s) => s.location) ? <GeoCredit geo={data.geo} /> : null}
 						</Section>
+						<ByCountry data={data} />
 					</>
 				)}
 			</QueryState>
@@ -605,7 +705,14 @@ export default function Fleet() {
 				<QueryState query={alerts}>{(data) => <Alerts alerts={data} />}</QueryState>
 			</Section>
 			<Section title="Recently gone" description="Servers that closed or stopped sending heartbeats, the most recent first (kept 30 days): their pages show what happened.">
-				<QueryState query={gone}>{(data) => <RecentlyGone servers={data} />}</QueryState>
+				<QueryState query={gone}>
+					{(data) => (
+						<>
+							<RecentlyGone servers={data} />
+							{data.some((s) => s.location) ? <GeoCredit geo={servers.data?.geo} /> : null}
+						</>
+					)}
+				</QueryState>
 			</Section>
 		</>
 	);

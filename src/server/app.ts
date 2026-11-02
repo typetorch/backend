@@ -88,6 +88,7 @@ import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { DataFolderLocked } from "../duckdb/lock.ts";
 import { openSqlite } from "../fleet/db.ts";
 import { IdentityStore, parseIdentities, parseUid, PID_PATTERN } from "../fleet/identity.ts";
+import { GeoLocator } from "../fleet/geo.ts";
 import { FLEET_LIMITS, handleFleet, NewJobLimiter } from "../fleet/http.ts";
 import { createNotifier, type Notifier } from "../fleet/notify.ts";
 import { FleetService, type Alert } from "../fleet/service.ts";
@@ -131,6 +132,7 @@ import { measureStorage, type StorageReport } from "./storage.ts";
 import type { BackendBus, BackendTopics } from "./topics.ts";
 import { RawLogClosed } from "./raw.ts";
 import { Warehouse } from "./warehouse.ts";
+import { GeoIpUpdater } from "./geoip.ts";
 
 export interface AppOptions {
 	clock?: () => number;
@@ -164,6 +166,9 @@ export interface App {
 	/** The analytics warehouse; undefined when the part is off, or in handover until DuckDB is open. */
 	readonly warehouse?: Warehouse;
 	readonly fleet?: FleetService;
+	/** Game server locations: the address lookups (fleet/geo.ts) and the database's loader / downloader (server/geoip.ts). */
+	readonly geo: GeoLocator;
+	readonly geoip: GeoIpUpdater;
 	/** The alert webhook sender (always there; it skips alerts while no webhook URL is set). */
 	readonly notifier: Notifier;
 	/** The runtime settings (the explorer's Settings page): current values over the environment's. */
@@ -328,7 +333,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	const savedQueryLimiter = new RateLimiter(SAVED_QUERY_WRITES_PER_MINUTE, clock);
-	const fleet = config.parts.has("fleet") ? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert), deployKeepDays: () => runtime.get("deployKeepDays") }) : undefined;
+	// Game server locations (fleet/geo.ts, server/geoip.ts): an offline IP database, looked up after each new address.
+	const geo = new GeoLocator({ db: sqlite, enabled: config.geoip.mode !== "off", clock, log });
+	const fleet = config.parts.has("fleet")
+		? await FleetService.open({ db: sqlite, clock, log, publishAlert: (alert) => bus.publish("alert", alert), deployKeepDays: () => runtime.get("deployKeepDays"), geo })
+		: undefined;
+	const geoip = new GeoIpUpdater({ config: config.geoip, locator: geo, ...(options.fetch ? { fetch: options.fetch } : {}), clock, log });
+	if (fleet) {
+		await geoip.load();
+		const g = geo.status();
+		if (config.geoip.mode !== "off") log(g.state === "ready" ? `geoip: ${g.source} (built ${g.built ?? "?"})` : `geoip: no database yet${config.geoip.mode === "dbip" ? " (downloading DB-IP Lite into the data folder a minute after start)" : ` (${config.geoip.city} is missing)`}: locations unknown until then`);
+	}
 	const access = AccessStore.at(config.dataDir, clock);
 	// Backend alerts: once a minute, rules over the error tables, the fleet, ingest, these metrics and the disk, raised
 	// through the fleet's alert store (the Fleet page, the stream, the bus and the webhook, like the kernel's).
@@ -2012,7 +2027,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 					if ("response" in gate) return gate;
 					const user = gate.principal.user;
 					const caller: Caller = user.kind === "roblox" ? { kind: "roblox", userId: user.userId } : { kind: "token" };
-					return { caller };
+					return { caller, ips: gate.principal.role === "admin" };
 				},
 				limiters: debugLimiters,
 				...(waker?.enabled ? { waker } : {}),
@@ -2051,6 +2066,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 						heartbeatReply: (job) => remoteDebug?.heartbeatReply(job),
 						// A debug bundle's player logs (what each client logged) are for owners: the web role reads the rest.
 						canReadPlayerLogs: () => gate !== undefined && "principal" in gate && gate.principal.role === "admin",
+						// Game servers' addresses likewise (their locations go to every signed-in role).
+						canSeeIps: () => gate !== undefined && "principal" in gate && gate.principal.role === "admin",
 					},
 					ip,
 				)) ?? json(404, { error: "not found" })
@@ -2310,6 +2327,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (backendAlerts) jobs.push(setInterval(() => void backendAlerts.tick().catch((e) => log(`backend alerts failed: ${(e as Error).message}`)), ALERT_TICK_MS));
 		for (const t of jobs) t.unref?.();
 		timers.push(...jobs);
+		// TYPETORCH_GEOIP=dbip: the download a minute after start when the files are missing or from an earlier month, then daily.
+		if (fleet) geoip.start();
 	}
 	// Sign in with typetorch.dev: the origin report right after the start (never awaited: the start never waits on
 	// typetorch.dev), then daily; after a failure again in 10 minutes. POST /v1/central/report sends one now.
@@ -2403,6 +2422,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (reportTimer) clearTimeout(reportTimer);
 		live.stop();
 		remoteDebug?.stop();
+		geoip.stop();
 		const drainUntil = Date.now() + STOP_DRAIN_MS;
 		while (inflight > 0 && Date.now() < drainUntil) await new Promise((done) => setTimeout(done, 20));
 		await served.stop();
@@ -2427,6 +2447,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return warehouse;
 		},
 		...(fleet ? { fleet } : {}),
+		geo,
+		geoip,
 		notifier,
 		settings: runtime,
 		...(remoteDebug ? { remoteDebug } : {}),
