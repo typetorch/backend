@@ -328,6 +328,8 @@ export interface ErrorParams {
 	realm?: string;
 	q?: string;
 	limit?: number;
+	/** The list's order: count, lastAt, firstAt, total or realm, `-` in front for largest first (default -count). */
+	sort?: string;
 	bucket?: number;
 }
 

@@ -279,7 +279,7 @@ const ROUTES: Route[] = [
 		tag: "errors",
 		roles: ["admin", "web"],
 		summary: "Error kinds with counts",
-		params: [...WINDOW, q("q", "search, at most 100 characters"), q("limit", "1 to 500 (100)", int()), q("bucket", "seconds, 60 to 86400", int())],
+		params: [...WINDOW, q("q", "search, at most 100 characters"), q("limit", "1 to 500 (100)", int()), q("sort", "count, lastAt, firstAt, total or realm; - in front for largest first (default -count)"), q("bucket", "seconds, 60 to 86400", int())],
 	},
 	{ method: "get", path: "/v1/errors/{fp}", tag: "errors", roles: ["admin", "web"], summary: "One error kind", params: [p("fp", "the fingerprint"), ...WINDOW, q("bucket", "seconds, 60 to 86400", int())] },
 	{ method: "get", path: "/v1/errors/{fp}/players", tag: "errors", roles: ["admin", "web"], summary: "The players who hit an error kind", params: [p("fp", "the fingerprint"), ...WINDOW, q("limit", "at most 200", int())] },

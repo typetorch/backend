@@ -258,6 +258,20 @@ export const ERROR_QUEUE_MAX = 64;
 export const ERROR_ROWS_PER_DAY = 2_000_000;
 
 /** The store's queue is full: answer 429. */
+/** The columns the error list orders by (the explorer's sortable headers), and their SQL. */
+const ERROR_ORDER = { count: "n", lastAt: "k.last_at", firstAt: "k.first_at", total: "k.total", realm: "k.realm" } as const;
+export type ErrorSortColumn = keyof typeof ERROR_ORDER;
+export const ERROR_SORT_COLUMNS = Object.keys(ERROR_ORDER) as ErrorSortColumn[];
+export interface ErrorSort {
+	by: ErrorSortColumn;
+	desc: boolean;
+}
+
+/** `<column> ASC|DESC, ` for a sort, or "" (the default order follows). */
+function errorOrder(sort: ErrorSort | undefined): string {
+	return sort ? `${ERROR_ORDER[sort.by]} ${sort.desc ? "DESC" : "ASC"}, ` : "";
+}
+
 export class ErrorQueueFull extends Error {
 	override name = "ErrorQueueFull";
 }
@@ -545,8 +559,8 @@ export class ErrorStore {
 		return { fromMinute, toMinute, bucketMinutes, buckets: end - start + 1, start };
 	}
 
-	/** Error kinds seen inside the window, most frequent first. */
-	async list(w: ErrorWindow, filter: ErrorFilter = {}, options: { limit?: number; search?: string } = {}): Promise<ErrorList> {
+	/** Error kinds seen inside the window, most frequent first, or by `sort` (ties: most frequent, then latest). */
+	async list(w: ErrorWindow, filter: ErrorFilter = {}, options: { limit?: number; search?: string; sort?: ErrorSort } = {}): Promise<ErrorList> {
 		const limit = Math.min(Math.max(1, options.limit ?? 100), 500);
 		const idx = this.bucketIndex(w);
 		const f = this.where(filter, "c");
@@ -555,7 +569,7 @@ export class ErrorStore {
 		const searchParams: SqlValue[] = search ? [`%${search.replace(/[\\%_]/g, "\\$&")}%`, search] : [];
 		const rows = await this.db.all<{ fp: string; n: number; template: string; stack: string | null; realm: string; first_at: number; last_at: number; total: number }>(
 			"SELECT k.fp, SUM(c.n) AS n, k.template, k.stack, k.realm, k.first_at, k.last_at, k.total FROM error_counts c JOIN error_kinds k ON k.fp = c.fp " +
-				`WHERE c.minute BETWEEN ? AND ?${f.sql}${searchSql} GROUP BY k.fp ORDER BY n DESC, k.last_at DESC LIMIT ?`,
+				`WHERE c.minute BETWEEN ? AND ?${f.sql}${searchSql} GROUP BY k.fp ORDER BY ${errorOrder(options.sort)}n DESC, k.last_at DESC, k.fp LIMIT ?`,
 			[idx.fromMinute, idx.toMinute, ...f.params, ...searchParams, limit + 1],
 		);
 		const shown = rows.slice(0, limit);

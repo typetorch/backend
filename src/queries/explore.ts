@@ -21,7 +21,25 @@ export interface PlayersOptions {
 	limit: number;
 	/** `recent` (default): last seen first. `robux`: most Robux spent first, then last seen. */
 	sort: PlayersSort;
+	/** A column to order by instead (the explorer's sortable headers); ties go to last seen, then pid. */
+	orderBy?: PlayersOrder;
+	/** With orderBy: largest, latest or Z first (default true). */
+	desc?: boolean;
 }
+
+/** The columns `orderBy` takes, and their SQL. */
+const PLAYERS_ORDER = {
+	pid: "p.pid",
+	lastSeen: "p.last_t",
+	firstSeen: "p.first_t",
+	sessions: "sp.sessions",
+	playtime: "sp.playtime_ms",
+	robux: "COALESCE(pu.robux, 0)",
+	events: "p.events",
+	new: "p.isnew",
+} as const;
+export type PlayersOrder = keyof typeof PLAYERS_ORDER;
+export const PLAYERS_ORDERS = Object.keys(PLAYERS_ORDER) as PlayersOrder[];
 
 export const PLAYERS_SORTS = ["recent", "robux"] as const;
 export type PlayersSort = (typeof PLAYERS_SORTS)[number];
@@ -51,12 +69,18 @@ export interface PlayersResult {
 
 export const players = defineQuery<PlayersOptions, PlayersResult>({
 	name: "players",
-	summary: "players seen in the range, most recent first or sort=robux for top spenders (pid, sessions, playtime, Robux spent); search = part of a pid",
+	summary: "players seen in the range, most recent first, sort=robux for top spenders, or orderBy=<column> with desc=true|false (pid, lastSeen, firstSeen, sessions, playtime, robux, events, new); search = part of a pid",
 	defaultDays: 30,
 	options: (input = {}) => {
 		const sort = input.sort ?? "recent";
 		if (!PLAYERS_SORTS.includes(sort as PlayersSort)) throw new Error(`sort must be one of ${PLAYERS_SORTS.join(", ")}`);
 		const out: PlayersOptions = { limit: intOption(input.limit, "limit", 50, 1, 1000), sort: sort as PlayersSort };
+		if (input.orderBy !== undefined) {
+			if (!PLAYERS_ORDERS.includes(input.orderBy as PlayersOrder)) throw new Error(`orderBy must be one of ${PLAYERS_ORDERS.join(", ")}`);
+			if (input.desc !== undefined && typeof input.desc !== "boolean") throw new Error("desc must be true or false");
+			out.orderBy = input.orderBy as PlayersOrder;
+			out.desc = input.desc !== false;
+		}
 		if (input.search !== undefined && input.search !== "") {
 			if (typeof input.search !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(input.search)) throw new Error("search must be 1-64 characters of letters, digits, _ or -");
 			out.search = input.search;
@@ -72,7 +96,11 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 		const search = parts.length > 1 ? `(${parts.join(" OR ")})` : (parts[0] ?? "");
 		const table = eventsTable(ctx, f);
 		const robux = ctx.dialect.jsonNumber("props", PROP_KEYS.purchaseRobux);
-		const order = o.sort === "robux" ? "COALESCE(pu.robux, 0) DESC, p.last_t DESC, p.pid" : "p.last_t DESC, p.pid";
+		const order = o.orderBy
+			? `${PLAYERS_ORDER[o.orderBy]} ${o.desc === false ? "ASC" : "DESC"}, p.last_t DESC, p.pid`
+			: o.sort === "robux"
+				? "COALESCE(pu.robux, 0) DESC, p.last_t DESC, p.pid"
+				: "p.last_t DESC, p.pid";
 		return {
 			players:
 				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp FROM ${table} e WHERE ${playerRows(f, ctx, search)}), ` +

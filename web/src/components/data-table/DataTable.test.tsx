@@ -404,3 +404,24 @@ describe("DataTable copy and export", () => {
 		await act(async () => {});
 	});
 });
+
+describe("server sort", () => {
+	it("asks the server for a header's order, keeps the rows as they came, and only sorts the columns it names", async () => {
+		const onChange = vi.fn();
+		render(
+			<DataTable id="srv" label="Servers" columns={columns} data={servers} rowId={(s) => s.job} urlSync={false} persist={false} serverSort={{ columns: ["players", "job"], onChange }} />,
+		);
+		const t = screen.getByRole("table", { name: "Servers" });
+		const jobs = () => [...t.querySelectorAll("tbody tr")].map((r) => r.querySelector("td")?.textContent);
+		await waitFor(() => expect(onChange).toHaveBeenCalledWith(undefined));
+		fireEvent.click(within(t).getByTitle(/^Sort by Players/));
+		await waitFor(() => expect(onChange).toHaveBeenLastCalledWith({ id: "players", desc: true }));
+		// Not re-sorted here: the server sends the next page in that order.
+		expect(jobs()).toEqual(["job-10", "job-2", "job-1", "job-3"]);
+		expect(within(t).getByRole("columnheader", { name: /Players/ }).getAttribute("aria-sort")).toBe("descending");
+		expect(within(t).queryByTitle(/^Sort by TPS/)).toBeNull();
+		// One column at a time.
+		fireEvent.click(within(t).getByTitle(/^Sort by Job/), { shiftKey: true });
+		await waitFor(() => expect(onChange).toHaveBeenLastCalledWith({ id: "job", desc: false }));
+	});
+});

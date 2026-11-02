@@ -215,6 +215,17 @@ describe("error kinds, counts and the admin reads", () => {
 		expect((await get("/v1/errors?window=1h&branch=nowhere")).kinds).toEqual([]);
 	});
 
+	test("sort: the database orders the whole window before the limit", async () => {
+		// Most frequent first by default: the hour-old kind is first, the two-hour-old one second.
+		expect((await get("/v1/errors?window=24h&limit=1")).kinds.map((x: { fp: string }) => x.fp)).toEqual(["fp-boom"]);
+		// Oldest first asks for the kind last seen longest ago, not a re-sort of the first page.
+		expect((await get("/v1/errors?window=24h&limit=1&sort=lastAt")).kinds.map((x: { fp: string }) => x.fp)).toEqual(["fp-two"]);
+		expect((await get("/v1/errors?window=24h&sort=-lastAt")).kinds.map((x: { fp: string }) => x.fp)).toEqual(["fp-boom", "fp-two"]);
+		expect((await get("/v1/errors?window=24h&limit=1&sort=count")).kinds.map((x: { fp: string }) => x.fp)).toEqual(["fp-two"]);
+		expect((await h.call("/v1/errors?window=24h&sort=players", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/errors?window=24h&sort=count;drop", { headers: bearer(ADMIN) })).status).toBe(400);
+	});
+
 	test("artifact filter: builds in the window, most recent first; the build filter keeps the list and combines", async () => {
 		const all = await get("/v1/errors?window=1h");
 		// b2-000043 was last seen at T0-1m, a1b2c3d-000042 at T0-2m.

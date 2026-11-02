@@ -13,7 +13,7 @@ import { cn } from "cn";
 import { ChangeChip } from "@/components/ChangeChip";
 import { CompareToggle } from "@/components/CompareToggle";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
-import { DataTable, type DataColumn } from "@/components/data-table";
+import { DataTable, type DataColumn, type SortSpec } from "@/components/data-table";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { DeployMarksToggle, MarkHoverCard, markerLines, useDeployMarks, useOpenDeploy, type MarkHover } from "@/components/DeployMarkers";
 import { UserIdLink } from "@/components/Identity";
@@ -146,7 +146,10 @@ function kindColumns(bucketSeconds: number): DataColumn<ErrorKind>[] {
 	];
 }
 
-function Kinds({ data, selected, onSelect }: { data: ErrorList; selected: string; onSelect(fp: string): void }) {
+/** The columns the server orders the list by (GET /v1/errors?sort=). */
+const KIND_SORT_COLUMNS = ["count", "lastAt", "firstAt", "total", "realm"];
+
+function Kinds({ data, selected, onSelect, onSort }: { data: ErrorList; selected: string; onSelect(fp: string): void; onSort(sort: SortSpec | undefined): void }) {
 	const columns = useMemo(() => kindColumns(data.window.bucketSeconds), [data.window.bucketSeconds]);
 	if (!data.kinds.length) return <EmptyState>No errors in this window. (Game servers send them as they happen; a new kind shows up within a minute.)</EmptyState>;
 	return (
@@ -158,6 +161,7 @@ function Kinds({ data, selected, onSelect }: { data: ErrorList; selected: string
 			rowId={(k) => k.fp}
 			// The server already sends the most frequent first; clearing the sort brings that order back.
 			defaultSort={[{ id: "count", desc: true }]}
+			serverSort={{ columns: KIND_SORT_COLUMNS, onChange: onSort }}
 			onRowClick={(k) => onSelect(selected === k.fp ? "" : k.fp)}
 			rowActionLabel={(k) => `Open error: ${k.template.slice(0, 120)}`}
 			isRowSelected={(k) => selected === k.fp}
@@ -408,7 +412,15 @@ export default function Errors() {
 	const params: ErrorParams = { window, ...(realm ? { realm } : {}), ...(branch ? { branch } : {}), ...(build ? { build } : {}), ...(q ? { q } : {}) };
 	// The search only picks which kinds are listed; one kind's reads take the window and the other filters.
 	const { q: _search, ...kindParams } = params;
-	const list = useQuery({ queryKey: ["errors", "list", params], queryFn: ({ signal }) => api.errors({ ...params, limit: 200 }, signal), refetchInterval: 30_000 });
+	// 200 kinds come back, so a header click asks the server for the 200 first in that order (Kinds below).
+	const [sort, setSort] = useState<SortSpec | undefined>();
+	const sortParam = sort ? `${sort.desc ? "-" : ""}${sort.id}` : undefined;
+	const list = useQuery({
+		queryKey: ["errors", "list", params, sortParam],
+		queryFn: ({ signal }) => api.errors({ ...params, limit: 200, ...(sortParam ? { sort: sortParam } : {}) }, signal),
+		refetchInterval: 30_000,
+		placeholderData: (previous) => previous,
+	});
 	const artifacts = artifactOptions(list.data?.builds, build);
 	const [compare] = useCompare();
 	const before = list.data ? previousWindow(list.data.window) : undefined;
@@ -481,7 +493,7 @@ export default function Errors() {
 							<Metric label="Trend step" value={bucketLabel(data.window.bucketSeconds)} sub={`${data.window.buckets} steps`} />
 						</div>
 						<Section title="Error kinds" description="Most frequent first. Open a row for its stack, where it happens and the players who hit it.">
-							<Kinds data={data} selected={selected} onSelect={setSelected} />
+							<Kinds data={data} selected={selected} onSelect={setSelected} onSort={setSort} />
 						</Section>
 					</>
 				)}

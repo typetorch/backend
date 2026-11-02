@@ -1,6 +1,6 @@
 /**
  * Error log reads (admin):
- *   GET /v1/errors?window=24h|from=&to=&branch=&build=&realm=&q=&limit=&bucket=   -> kinds with counts, players, sparkline,
+ *   GET /v1/errors?window=24h|from=&to=&branch=&build=&realm=&q=&limit=&sort=&bucket= -> kinds with counts, players, sparkline,
  *     and the builds (artifact ids) with errors in the window, most recent first (for the build filter)
  *   GET /v1/errors/<fp>?window=|from=&to=&branch=&build=&realm=&bucket=             -> one kind: sample stack, series, where
  *   GET /v1/errors/<fp>/players?window=|from=&to=&branch=&build=&realm=&limit=       -> the players who hit it (at most 200),
@@ -12,7 +12,7 @@
  * `window` is a number and a unit (30m, 6h, 7d); without `from` the window ends now. Times are unix ms or ISO.
  */
 import { ERROR_JOB_PATTERN, ErrorInputError, FP_PATTERN } from "./parse.ts";
-import { chooseBucket, ERROR_PLAYERS_MAX, PLAYER_ERRORS_MAX, SERVER_ERRORS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
+import { chooseBucket, ERROR_PLAYERS_MAX, ERROR_SORT_COLUMNS, type ErrorSort, type ErrorSortColumn, PLAYER_ERRORS_MAX, SERVER_ERRORS_MAX, type ErrorFilter, type ErrorStore, type ErrorWindow } from "./store.ts";
 
 /** What the server knows about a pid: its UserId and Roblox names (when linked), or that it was erased (left out). */
 export interface PlayerIdentity {
@@ -108,7 +108,14 @@ export async function handleErrorReads(store: ErrorStore, url: URL, o: ErrorRead
 		if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new ErrorInputError("limit is a whole number from 1 to 500");
 		const search = q.get("q") ?? undefined;
 		if (search && search.length > 100) throw new ErrorInputError("q is at most 100 characters");
-		return json(200, await store.list(window, filter, { limit, ...(search ? { search } : {}) }));
+		const sortText = q.get("sort");
+		let sort: ErrorSort | undefined;
+		if (sortText) {
+			const by = sortText.replace(/^-/, "") as ErrorSortColumn;
+			if (!ERROR_SORT_COLUMNS.includes(by)) throw new ErrorInputError(`sort is one of ${ERROR_SORT_COLUMNS.join(", ")}, with - in front for largest first`);
+			sort = { by, desc: sortText.startsWith("-") };
+		}
+		return json(200, await store.list(window, filter, { limit, ...(search ? { search } : {}), ...(sort ? { sort } : {}) }));
 	} catch (error) {
 		if (error instanceof ErrorInputError) return json(400, { error: error.message });
 		throw error;

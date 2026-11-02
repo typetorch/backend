@@ -79,6 +79,12 @@ export interface DataTableProps<T> {
 	empty?: ReactNode;
 	/** The sort a first visit starts with, e.g. [{ id: "count", desc: true }]. Removing every sort restores the data's own order. */
 	defaultSort?: readonly SortSpec[];
+	/**
+	 * The rows are a page the server picked and ordered (a limit), so re-sorting them here would only order that page.
+	 * Then a header click asks the server instead: `onChange` gets the sort (undefined: the server's default order) and the
+	 * rows are shown as they come. Only `columns` sort, one at a time.
+	 */
+	serverSort?: { columns: readonly string[]; onChange: (sort: SortSpec | undefined) => void };
 	/** Rows per page (default 50; the user can pick 25 to 500). */
 	pageSize?: number;
 	/** The scroll area's max height (CSS), default 70vh; the header sticks inside it. */
@@ -156,6 +162,7 @@ function TableImpl<T>({
 	loading = false,
 	empty,
 	defaultSort,
+	serverSort,
 	pageSize: pageSizeProp,
 	maxHeight = "70vh",
 	search: searchMode = "auto",
@@ -202,31 +209,42 @@ function TableImpl<T>({
 	const pageCount = Math.max(1, Math.ceil(entries.length / view.pageSize));
 	const page = Math.min(pageIndex, pageCount - 1);
 
+	const serverColumns = serverSort ? serverSort.columns.join("\n") : undefined;
+	const serverSortable = useCallback((columnId: string) => serverColumns === undefined || serverColumns.split("\n").includes(columnId), [serverColumns]);
+	// The server's sort: one column it can order by.
+	const sorting = useMemo(() => (serverColumns === undefined ? view.sort : view.sort.filter((s) => serverSortable(s.id)).slice(0, 1)), [view.sort, serverColumns, serverSortable]);
+	const onServerSort = useRef(serverSort?.onChange);
+	onServerSort.current = serverSort?.onChange;
+	const sortRequest = serverColumns === undefined ? undefined : JSON.stringify(sorting[0] ?? null);
+	useEffect(() => {
+		if (sortRequest !== undefined) onServerSort.current?.((JSON.parse(sortRequest) as SortSpec | null) ?? undefined);
+	}, [sortRequest]);
+
 	const columnDefs = useMemo<ColumnDef<Entry<T>>[]>(
 		() =>
 			resolved.map((c) => ({
 				id: c.id,
 				accessorFn: (e: Entry<T>) => c.norm(e.row),
 				header: c.header,
-				enableSorting: c.sortable,
+				enableSorting: c.sortable && serverSortable(c.id),
 				enableHiding: c.hideable,
 				sortUndefined: "last" as const,
 				sortDescFirst: (c.spec.firstSort ?? (c.type === "number" || c.type === "date" ? "desc" : "asc")) === "desc",
 				sortingFn: (a, b, columnId) => compareNormalised(a.getValue(columnId), b.getValue(columnId), c.spec.order),
 			})),
-		[resolved],
+		[resolved, serverSortable],
 	);
 	const table = useReactTable<Entry<T>>({
 		data: entries,
 		columns: columnDefs,
 		state: {
-			sorting: view.sort,
+			sorting,
 			columnVisibility: Object.fromEntries(resolved.map((c) => [c.id, isVisible(c, view)])),
 			pagination: { pageIndex: page, pageSize: view.pageSize },
 		},
 		onSortingChange: (change) => {
 			setPageIndex(0);
-			update((v) => ({ ...v, sort: typeof change === "function" ? change(view.sort) : change }));
+			update((v) => ({ ...v, sort: typeof change === "function" ? change(sorting) : change }));
 		},
 		getCoreRowModel: getCoreRowModel(),
 		getSortedRowModel: getSortedRowModel(),
@@ -234,7 +252,8 @@ function TableImpl<T>({
 		getRowId: (e) => ids[e.i] ?? String(e.i),
 		autoResetPageIndex: false,
 		enableSortingRemoval: true,
-		enableMultiSort: true,
+		enableMultiSort: serverSort === undefined,
+		manualSorting: serverSort !== undefined,
 	});
 
 	const [notice, setNotice] = useState("");
@@ -445,7 +464,7 @@ function TableImpl<T>({
 										onFilter={(f) => setFilter(col.id, f)}
 										width={view.sizes[col.id]}
 										onResize={(px) => setSize(col.id, px)}
-										multi={view.sort.length > 1}
+										multi={sorting.length > 1}
 										pad={cellPad}
 									/>
 								);

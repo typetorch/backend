@@ -1,13 +1,12 @@
 import { ListPlus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { DataTable, type DataColumn } from "@/components/data-table";
+import { DataTable, type DataColumn, type SortSpec } from "@/components/data-table";
 import { IdentityStatus } from "@/components/Identity";
 import { PlayerDetail } from "@/components/player-detail/PlayerDetail";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { FunnelProgressBar } from "@/components/FunnelProgressBar";
 import { FunnelStepList, FunnelStepsHeaderTip, HoverPopover, type FunnelStepName } from "@/components/FunnelSteps";
-import { ToggleChip } from "@/components/ToggleChip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
@@ -43,16 +42,17 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 		const timer = setTimeout(() => setSearch(text.trim()), 400);
 		return () => clearTimeout(timer);
 	}, [text]);
-	const [topSpenders, setTopSpenders] = useState(false);
+	const [sort, setSort] = useState<SortSpec | undefined>();
 	const valid = search === "" || PID.test(search);
-	// The server returns 100 players: top spenders asks it for the 100 who spent most, not the 100 most recent re-sorted.
-	const q = useAnalytics("players", { limit: 100, ...(search ? { search } : {}), ...(topSpenders ? { sort: "robux" } : {}) }, { enabled: valid });
+	// The server returns 100 players, so a header click asks it for the 100 first in that order (Robux spent: the top
+	// spenders), not the 100 most recent re-sorted.
+	const q = useAnalytics("players", { limit: 100, ...(search ? { search } : {}), ...(sort ? { orderBy: sort.id, desc: sort.desc } : {}) }, { enabled: valid, keepPrevious: true });
 	const [funnels, setFunnels] = useFunnelColumns();
 	const columns = useFunnelProgressColumns(q.data?.players, funnels);
 	return (
 		<Section
 			title="Players"
-			description={topSpenders ? "Most Robux spent first. Search by part of a pid, or by a UserId." : "Most recent first. Search by part of a pid, or by a UserId."}
+			description="The 100 first in the sort you pick (most recent by default). Search by part of a pid, or by a UserId."
 			contentClassName="space-y-3"
 		>
 			<div className="flex gap-2">
@@ -75,9 +75,6 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 						Open
 					</Button>
 				) : null}
-				<ToggleChip pressed={topSpenders} className="h-8" onClick={() => setTopSpenders((v) => !v)}>
-					Top spenders
-				</ToggleChip>
 			</div>
 			{!valid ? <p className="text-xs text-muted-foreground">A pid has only letters, digits, _ and -.</p> : null}
 			{missing ? <p className="text-xs text-muted-foreground">No player found for UserId {missing}.</p> : null}
@@ -89,6 +86,7 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 						columns={columns}
 						columnsMenu={<AddFunnelMenu chosen={funnels} onChange={setFunnels} />}
 						data={data.players}
+						serverSort={{ columns: PLAYER_SORT_COLUMNS, onChange: setSort }}
 						rowId={(p) => p.pid}
 						density="compact"
 						onRowClick={(p) => onPick(p.pid)}
@@ -100,6 +98,9 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 		</Section>
 	);
 }
+
+/** The columns the server orders by (the players query's orderBy). */
+const PLAYER_SORT_COLUMNS = ["pid", "lastSeen", "firstSeen", "sessions", "playtime", "robux", "events", "new"];
 
 /** The player list: pid with its UserId under it, then when, how often, how long and how much Robux. Sorts by the numbers, not the text. */
 const PLAYER_COLUMNS: DataColumn<PlayerSummary>[] = [

@@ -80,6 +80,22 @@ describe("players: Robux spent", () => {
 		expect(r.players[0]).toMatchObject({ pid: "buyer-0001", robux: 598 });
 	});
 
+	test("orderBy orders the whole range in the database, not the page the limit keeps", async () => {
+		const top = await store.query("players", {}, { limit: 1, orderBy: "robux", desc: true });
+		expect(top.players.map((p) => p.pid)).toEqual(["whale-00002"]);
+		const fewest = await store.query("players", {}, { limit: 100, orderBy: "robux", desc: false });
+		expect(fewest.players.map((p) => p.robux)).toEqual([0, 0, 598, 1500]);
+		const firstSeen = await store.query("players", {}, { limit: 1, orderBy: "firstSeen", desc: false });
+		expect(firstSeen.players.map((p) => p.pid)).toEqual(["whale-00002"]);
+		const byPid = await store.query("players", {}, { limit: 100, orderBy: "pid", desc: false });
+		expect(byPid.players.map((p) => p.pid)).toEqual(["buyer-0001", "free-000004", "liar-000003", "whale-00002"]);
+	});
+
+	test("an unknown orderBy is refused", () => {
+		expect(() => store.render("players", {}, { orderBy: "pid; DROP TABLE events" } as never)).toThrow("orderBy");
+		expect(() => store.render("players", {}, { orderBy: "pid", desc: "yes" } as never)).toThrow("desc");
+	});
+
 	test("an unknown sort is refused", () => {
 		expect(() => store.render("players", {}, { sort: "robux DESC; DROP TABLE events" } as never)).toThrow("sort");
 	});

@@ -40,6 +40,8 @@ export interface AnalyticsOptions {
 	enabled?: boolean;
 	/** Use these filters instead of the filter bar's. */
 	filters?: Filters;
+	/** Keep showing the last answer while new options load (a re-sort), instead of a loading state. */
+	keepPrevious?: boolean;
 }
 
 /** A named query with the filter bar's filters (or `opts.filters`), cached by name + filters + options. */
@@ -50,5 +52,6 @@ export function useAnalytics<N extends QueryName>(name: N, options: object = {},
 		queryKey: ["query", name, filters, options],
 		queryFn: ({ signal }) => api.query(name, filters, options, signal),
 		enabled: opts.enabled ?? true,
+		...(opts.keepPrevious ? { placeholderData: (previous: QueryResults[N] | undefined) => previous } : {}),
 	});
 }
