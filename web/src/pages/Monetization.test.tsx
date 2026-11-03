@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
-import type { MonetizationPlayer, MonetizationResult } from "@/lib/types";
+import type { MonetizationPlayer, MonetizationPurchase, MonetizationResult } from "@/lib/types";
 import Monetization from "./Monetization";
 
 beforeAll(() => {
@@ -86,6 +86,13 @@ function mount(answer: MonetizationResult = result, url = "/monetization") {
 				: [buyer("pid-whale", 598, { name: "whale", products: 2, purchases: 3 }), buyer("pid-small", 99)];
 			return { kind: options.kind ?? null, product: options.product ?? null, creatorShare: 0.7, total: players.length, more: 0, players };
 		}
+		if (name === "monetization-purchases") {
+			const purchases: MonetizationPurchase[] = [
+				{ pid: "pid-whale", sid: "s1", at: "2026-10-04T12:00:00.000Z", kind: "gamepass", product: "77", robux: 400, revenue: 280, where: "shop", name: "whale" },
+				{ pid: "pid-small", sid: "s2", at: "2026-10-03T10:00:00.000Z", kind: "product", product: "1234", robux: 99, revenue: 69.3, where: null },
+			];
+			return { creatorShare: 0.7, total: 3, more: 1, purchases };
+		}
 		throw new Error(`unexpected query ${name}`);
 	}) as typeof api.query);
 	const products = vi.spyOn(api, "robloxProducts").mockResolvedValue([
@@ -132,6 +139,25 @@ describe("Monetization page", () => {
 		const link = await within(table).findByRole("link", { name: "@whale" });
 		expect(link.getAttribute("href")).toContain("pid=pid-whale");
 		expect(within(table).getByText("pid-small")).toBeTruthy();
+	});
+
+	it("latest purchases: who bought what and where, newest first", async () => {
+		mount();
+		const table = await screen.findByRole("table", { name: "Latest purchases" });
+		const rows = within(table).getAllByRole("row").slice(1);
+		expect(within(rows[0]).getByRole("link", { name: "@whale" }).getAttribute("href")).toContain("pid=pid-whale");
+		await waitFor(() => expect(within(rows[0]).getByText("VIP")).toBeTruthy());
+		expect(within(rows[0]).getByText("shop")).toBeTruthy();
+		expect(within(rows[0]).getByText("400")).toBeTruthy();
+		expect(within(rows[1]).getByText("100 Coins")).toBeTruthy();
+		expect(screen.getByText("The latest 2, of 3.")).toBeTruthy();
+	});
+
+	it("the buyers sheet's close button closes it", async () => {
+		mount(result, "/monetization?buyers=gamepass:77");
+		await screen.findByRole("table", { name: "Buyers of this product" });
+		fireEvent.click(screen.getByRole("button", { name: /close/i }));
+		await waitFor(() => expect(screen.queryByRole("table", { name: "Buyers of this product" })).toBeNull());
 	});
 
 	it("a product row opens its buyers", async () => {

@@ -941,7 +941,9 @@ row once, like the other revenue queries). Revenue, purchases, payers and ARPDAU
 icons and prices from Roblox through the product tooltip), payer conversion (payers / active players), ARPPU, the repeat
 purchase rate (payers who bought 2+ times), and the **first purchase**: how long new players (first-ever session in the range)
 took from joining to their first purchase (median and average), their conversion, and which of their sessions it happened in
-(1, 2, 3, 4-5, 6-10, 11+).
+(1, 2, 3, 4-5, 6-10, 11+). Who bought what: a product row or a chart bar opens its buyers in a side sheet, and **Top
+buyers** (the `monetization-players` query) sits beside **Latest purchases** (`monetization-purchases`: the newest purchases
+with player, product, Robux paid and the purchase's `where`).
 **Deploys** (`/deploys`, Observe group): the [deploy history](#deploy-history), newest first, 50 at a time (**Load older
 deploys**), with who started each release, its outcome and servers ok / failed / stuck and its top deploy error; a branch
 box filters it. A row opens **`/deploys/<seq>`**: the release, its servers' reports (while kept, else the counts the history
@@ -1113,6 +1115,8 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `perf-compare` | the client and server numbers side by side: `mode: "builds"` (`arts`, at most 6; default the 4 busiest) or `mode: "around"` (`at`, unix ms or ISO, e.g. a mark's time: before vs after over two windows of `hours` (1-168, 24), shortened to the time since `at`) | 7 days |
 | `economy` | one currency's economy from `currency` rows (`currency`; default the busiest; `currencies` lists them all): earned, spent, net and the running balance per UTC day (dense up to 400 days), top `top` (10, at most 50) sources and sinks by `reason` with their share, totals per active player and per player with the currency (earners, spenders, average / median net, `sinkRatio` = spent / earned). Rows without a player count in the flows, not per player. `deltaKey` / `reasonKey` name the props (default `delta`, `reason`). Server-sent distinct rows only | 30 days |
 | `monetization` | Robux from `purchase` rows: robux, purchases, payers and ARPDAU per UTC day, revenue by product (`products`, at most `top` (25, at most 100), with kind, share and payers), totals (payer conversion, ARPPU, ARPU, ARPDAU over player-days, repeat purchase rate) and the first purchase of new players (median / average minutes from their first row, conversion, by session number: 1, 2, 3, 4-5, 6-10, 11+). `robuxKey` / `productKey` name the props. Server-sent distinct player rows only, like `players` | 30 days |
+| `monetization-players` | who bought one product (`kind` + `product`) or anything: purchases, Robux paid, revenue, distinct products, first and last purchase per player, biggest spenders first (`limit`, at most 200) | 30 days |
+| `monetization-purchases` | the latest purchases, newest first: player, session, product, kind, Robux paid, revenue and `where` (`limit`, 50, at most 200) | 30 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
 once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can

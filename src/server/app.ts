@@ -13,7 +13,7 @@
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
  *   server's own configuration: the settings file, storage, the runtime settings, the access list, the debug audit
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
- *        (experiment-players, funnel-players and monetization-players get UserIds and cached Roblox names joined in, erased players left out)
+ *        (experiment-players, funnel-players, monetization-players and monetization-purchases get UserIds and cached Roblox names joined in, erased players left out)
  *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
  *   GET  /v1/storage                bytes and files per part of the data folder
@@ -81,7 +81,7 @@ import { handleErrorReads, handlePlayerErrors, handleServerErrors, type PlayerId
 import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import type { FunnelPlayersResult } from "../queries/funnel.ts";
-import type { MonetizationPlayersResult } from "../queries/monetization.ts";
+import type { MonetizationPlayersResult, MonetizationPurchasesResult } from "../queries/monetization.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { rollupDays } from "../sql/filters.ts";
@@ -1012,6 +1012,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			}
 			if (name === "experiment-players" || name === "funnel-players" || name === "monetization-players")
 				result = await withPlayerIdentities(result as ExperimentPlayersResult | FunnelPlayersResult | MonetizationPlayersResult);
+			if (name === "monetization-purchases") {
+				const found = result as MonetizationPurchasesResult;
+				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.purchases });
+				result = { ...found, total, more: Math.max(0, total - players.length), purchases: players };
+			}
 			if (name === "timeline" || name === "player-graph" || name === "player-stats") {
 				const r = result as { pid?: string; uid?: number };
 				const found = r.pid ? await identities.byPid(r.pid) : undefined;

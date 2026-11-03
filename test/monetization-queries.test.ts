@@ -156,6 +156,21 @@ describe("monetization", () => {
 		expect(() => store.render("monetization-players", {}, { product: "x".repeat(65) })).toThrow(/product/);
 	});
 
+	test("monetization-purchases: the latest purchases, newest first", async () => {
+		const latest = await store.query("monetization-purchases", RANGE);
+		expect(latest).toMatchObject({ creatorShare: 0.7, total: 4, more: 0 });
+		expect(latest.purchases.map((p) => [p.pid, p.kind, p.product, p.robux, p.revenue, p.where])).toEqual([
+			["new2", "product", "1234", 99, 69.3, "shop"],
+			["old1", "product", "555", 199, 139.3, null],
+			["new1", "gamepass", "77", 400, 280, null],
+			// The resent copy counts once.
+			["new1", "product", "1234", 99, 69.3, "shop"],
+		]);
+		expect(latest.purchases[0]?.at).toBe(new Date(D2 + 15 * HOUR + 5 * MIN).toISOString());
+		expect(await store.query("monetization-purchases", RANGE, { limit: 1 })).toMatchObject({ total: 4, more: 3 });
+		expect(() => store.render("monetization-purchases", {}, { limit: 0 })).toThrow(/limit/);
+	});
+
 	test("the Basin SQL gives the same answer", async () => {
 		const basin = await basinOver(connection, NOW);
 		for (const [filters, options] of [[RANGE, {}], [{ ...RANGE, players: "returning" }, {}]] as const) {
@@ -164,6 +179,7 @@ describe("monetization", () => {
 		for (const options of [{}, { kind: "product", product: "1234" }] as const) {
 			expect(await basin.query("monetization-players", RANGE, options)).toEqual(await store.query("monetization-players", RANGE, options));
 		}
+		expect(await basin.query("monetization-purchases", RANGE)).toEqual(await store.query("monetization-purchases", RANGE));
 	});
 
 	test("bad options are refused", () => {

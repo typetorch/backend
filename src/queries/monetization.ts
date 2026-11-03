@@ -117,7 +117,7 @@ export interface MonetizationResult {
 	};
 }
 
-/** `ev(pid, sid, t, newp, kind, props, esrc)`: player rows; `p(pid, sid, t, kind, robux, product)`: the distinct server-sent purchases. */
+/** `pr`: the purchase rows; `p(pid, sid, t, kind, robux, product, place)`: the distinct server-sent purchases (`place`: the `where` prop). */
 function purchaseCtes(ctx: QueryContext, f: NormalizedFilters, o: Pick<MonetizationOptions, "robuxKey" | "productKey">): string {
 	const d = ctx.dialect;
 	// A product id may be logged as a number or a string: the text, else the number as digits (Basin's json_get_str skips numbers).
@@ -125,7 +125,7 @@ function purchaseCtes(ctx: QueryContext, f: NormalizedFilters, o: Pick<Monetizat
 	return (
 		`pr AS (SELECT DISTINCT e.pid AS pid, e.sid AS sid, e.t AS t, e.name AS name, e.props AS props, e.src AS esrc FROM ${eventsTable(ctx, f)} e ` +
 		`WHERE ${playerRows(f, ctx)} AND e.kind = 'purchase'), ` +
-		`p AS (SELECT pid, sid, t, name AS kind, COALESCE(${d.jsonNumber("props", o.robuxKey)}, 0) AS robux, ${product} AS product FROM pr WHERE ${SERVER_PURCHASE})`
+		`p AS (SELECT pid, sid, t, name AS kind, COALESCE(${d.jsonNumber("props", o.robuxKey)}, 0) AS robux, ${product} AS product, ${d.jsonText("props", "where")} AS place FROM pr WHERE ${SERVER_PURCHASE})`
 	);
 }
 
@@ -346,5 +346,84 @@ export const monetizationPlayers = defineQuery<MonetizationPlayersOptions, Monet
 			};
 		});
 		return { kind: o.kind ?? null, product: o.product ?? null, creatorShare: o.creatorShare, total, more: Math.max(0, total - players.length), players };
+	},
+});
+
+// monetization-purchases -------------------------------------------------------------------------------------------------
+
+/** Most purchases one latest-purchases read lists. */
+export const MONETIZATION_PURCHASES_MAX = 200;
+
+export interface MonetizationPurchasesOptions {
+	robuxKey: string;
+	productKey: string;
+	creatorShare: number;
+	/** Most rows listed (1-200, default 50). */
+	limit: number;
+}
+
+/** One purchase: who bought what, when, for how much and where in the game. */
+export interface MonetizationPurchase {
+	pid: string;
+	sid: string;
+	at: string;
+	/** The purchase kind (`product`, `gamepass`, ...). */
+	kind: string;
+	/** The product id as text, null when the row had none. */
+	product: string | null;
+	/** Robux paid. */
+	robux: number;
+	/** robux x creatorShare. */
+	revenue: number;
+	/** The `where` prop (e.g. `shop`), null when unset. */
+	where: string | null;
+	/** Joined in by the server route, as for monetization-players. */
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+export interface MonetizationPurchasesResult {
+	creatorShare: number;
+	/** Purchases in the range; `more` of them are not listed. */
+	total: number;
+	more: number;
+	purchases: MonetizationPurchase[];
+}
+
+/** The latest purchases, newest first: the same purchases as `monetization` (server-sent, each distinct row once). */
+export const monetizationPurchases = defineQuery<MonetizationPurchasesOptions, MonetizationPurchasesResult>({
+	name: "monetization-purchases",
+	summary: "the latest purchases, newest first: player, product, Robux paid, revenue and where (at most 200)",
+	defaultDays: 30,
+	options: (input = {}) => ({
+		robuxKey: assertSafeKey(input.robuxKey ?? PROP_KEYS.purchaseRobux, "robuxKey"),
+		productKey: assertSafeKey(input.productKey ?? PROP_KEYS.purchaseProduct, "productKey"),
+		creatorShare: shareOption(input.creatorShare),
+		limit: intOption(input.limit, "limit", 50, 1, MONETIZATION_PURCHASES_MAX),
+	}),
+	statements(ctx, f, o) {
+		return {
+			purchases:
+				`WITH ${purchaseCtes(ctx, f, o)} SELECT pid, sid, t, kind, product, robux, place, COUNT(*) OVER () AS total FROM p ` +
+				`ORDER BY t DESC, pid, kind, product ${ctx.dialect.limit(o.limit)}`,
+		};
+	},
+	shape(rows, _ctx, _f, o) {
+		const total = num(rows.purchases[0]?.total);
+		const purchases = rows.purchases.map((r) => {
+			const robux = num(r.robux);
+			return {
+				pid: str(r.pid),
+				sid: str(r.sid),
+				at: iso(num(r.t)),
+				kind: str(r.kind),
+				product: strOrNull(r.product),
+				robux: round(robux),
+				revenue: round(robux * o.creatorShare),
+				where: strOrNull(r.place),
+			};
+		});
+		return { creatorShare: o.creatorShare, total, more: Math.max(0, total - purchases.length), purchases };
 	},
 });

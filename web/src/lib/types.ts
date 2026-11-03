@@ -685,6 +685,30 @@ export interface MonetizationPlayers {
 	players: MonetizationPlayer[];
 }
 
+/** One purchase (the `monetization-purchases` query): who bought what, when, for how much and where. */
+export interface MonetizationPurchase {
+	pid: string;
+	sid: string;
+	at: string;
+	kind: string;
+	product: string | null;
+	robux: number;
+	revenue: number;
+	/** The `where` prop (e.g. `shop`). */
+	where: string | null;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+/** The `monetization-purchases` query: the latest purchases, newest first; at most 200. */
+export interface MonetizationPurchases {
+	creatorShare: number;
+	total: number;
+	more: number;
+	purchases: MonetizationPurchase[];
+}
+
 /** Every named query and its result. */
 export interface QueryResults {
 	overview: OverviewResult;
@@ -716,6 +740,7 @@ export interface QueryResults {
 	economy: EconomyResult;
 	monetization: MonetizationResult;
 	"monetization-players": MonetizationPlayers;
+	"monetization-purchases": MonetizationPurchases;
 }
 
 export type QueryName = keyof QueryResults;

@@ -4,7 +4,8 @@
  * purchases, payers and ARPDAU per day, revenue by product (names from Roblox through the ProductId card), payer
  * conversion, ARPPU, the repeat purchase rate, and how long new players take to buy for the first time. Who bought
  * what (the `monetization-players` query): a product row opens its buyers in a side sheet (URL `buyers=<kind>:<id>`),
- * and a chart bar opens that day's buyers (`buyersDay=YYYY-MM-DD`), and the top buyers of everything are listed below. The filter bar applies.
+ * and a chart bar opens that day's buyers (`buyersDay=YYYY-MM-DD`); the top buyers of everything and the latest purchases
+ * (the `monetization-purchases` query) sit side by side below. The filter bar applies.
  */
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { DayBars } from "@/components/DayBars";
@@ -16,7 +17,8 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/
 import { describeRange } from "@/lib/filters";
 import { fmtAgo, fmtInt, fmtMinutes, fmtNum, fmtPct, fmtTime, plural, shortId } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
-import type { MonetizationDay, MonetizationPlayer, MonetizationProduct, MonetizationResult } from "@/lib/types";
+import type { MonetizationDay, MonetizationPlayer, MonetizationProduct, MonetizationPurchase, MonetizationResult } from "@/lib/types";
+import { useSearchParams } from "react-router";
 
 /** What to send when there are no purchase rows: the framework's server-side call (inside the empty state). */
 export function MonetizationEmpty() {
@@ -124,6 +126,66 @@ function Buyers({ kind, product, day, label }: { kind?: string; product?: string
 	);
 }
 
+const PURCHASE_COLUMNS: DataColumn<MonetizationPurchase>[] = [
+	{ id: "at", header: "When", type: "date", accessor: (p) => p.at, cell: (p) => when(p.at), format: (_v, p) => fmtTime(p.at), className: "text-xs whitespace-nowrap" },
+	{
+		id: "player",
+		header: "Player",
+		accessor: (p) => p.name ?? p.pid,
+		searchText: (p) => `${p.pid} ${p.displayName ?? ""} ${p.uid ?? ""}`,
+		cell: (p) => <PlayerPageLink row={p} />,
+		minWidth: 120,
+	},
+	{
+		id: "product",
+		header: "Product",
+		accessor: (p) => p.product,
+		searchText: (p) => `${p.product ?? ""} ${p.kind}`,
+		cell: (p) => (p.product === null ? <span className="text-xs text-muted-foreground">no id</span> : <ProductId id={p.product} kind={p.kind} showName />),
+		minWidth: 120,
+	},
+	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, format: (v) => kindLabel(String(v)), cell: (p) => kindLabel(p.kind), defaultHidden: true },
+	{ id: "robux", header: "Robux paid", type: "number", align: "right", accessor: (p) => p.robux, cell: (p) => fmtInt(p.robux) },
+	{ id: "revenue", header: "Revenue", type: "number", align: "right", accessor: (p) => p.revenue, cell: (p) => fmtInt(p.revenue), defaultHidden: true },
+	{ id: "where", header: "Where", type: "enum", accessor: (p) => p.where, cell: (p) => p.where ?? <span className="text-muted-foreground">-</span>, className: "text-xs" },
+	{
+		id: "uid",
+		header: "UserId",
+		accessor: (p) => p.uid ?? null,
+		cell: (p) => (p.uid === undefined ? <span className="text-xs text-muted-foreground">not linked</span> : <UserIdLink uid={p.uid} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline" />),
+		exportValue: (p) => (p.uid !== undefined ? String(p.uid) : ""),
+		defaultHidden: true,
+	},
+	{ id: "sid", header: "Session", accessor: (p) => p.sid, cell: (p) => <span className="font-mono text-xs">{shortId(p.sid, 10)}</span>, defaultHidden: true },
+];
+
+/** The latest purchases under the filter bar, newest first. */
+function LatestPurchases() {
+	const q = useAnalytics("monetization-purchases", { limit: 100 });
+	return (
+		<QueryState query={q} loadingRows={4}>
+			{(d) =>
+				d.purchases.length ? (
+					<div className="space-y-2">
+						<DataTable
+							id="monetization-purchases"
+							label="Latest purchases"
+							columns={PURCHASE_COLUMNS}
+							data={d.purchases}
+							rowId={(p) => `${p.at}:${p.pid}:${p.kind}:${p.product ?? ""}:${p.sid}`}
+							density="compact"
+							maxHeight="26rem"
+						/>
+						{d.more ? <p className="text-xs text-muted-foreground">{`The latest ${fmtInt(d.purchases.length)}, of ${fmtInt(d.total)}.`}</p> : null}
+					</div>
+				) : (
+					<EmptyState>No purchases in this range.</EmptyState>
+				)
+			}
+		</QueryState>
+	);
+}
+
 /** `buyers=<kind>:<id>` in the URL: the product whose buyers the side sheet shows. */
 function splitBuyers(value: string): { kind: string; product: string } | null {
 	const at = value.indexOf(":");
@@ -218,9 +280,14 @@ function Body({ data, onBuyers, onDay }: { data: MonetizationResult; onBuyers(va
 					maxHeight="26rem"
 				/>
 			</Section>
-			<Section title="Top buyers" description="Who spent the most in this range, on anything. A name opens the player.">
-				<Buyers label="Top buyers" />
-			</Section>
+			<div className="grid gap-3 xl:grid-cols-2">
+				<Section title="Top buyers" description="Who spent the most in this range, on anything. A name opens the player.">
+					<Buyers label="Top buyers" />
+				</Section>
+				<Section title="Latest purchases" description="Who bought what, newest first, with the Robux paid and where in the game (the purchase's where). A name opens the player.">
+					<LatestPurchases />
+				</Section>
+			</div>
 			<Section
 				title="First purchase"
 				description={`New players (first session in the range) who bought after joining: ${fmtInt(fp.payers)} of ${fmtInt(fp.newPlayers)} (${fmtPct(fp.conversion)}). Which of their sessions it was in:`}
@@ -246,6 +313,15 @@ export default function Monetization() {
 	const q = useAnalytics("monetization");
 	const [buyers, setBuyers] = useParam("buyers");
 	const [buyersDay, setBuyersDay] = useParam("buyersDay");
+	const [, setParams] = useSearchParams();
+	// One navigation: two setters in a row would each start from this render's URL, and the second would put `buyers` back.
+	const closeBuyers = () =>
+		setParams((current) => {
+			const next = new URLSearchParams(current);
+			next.delete("buyers");
+			next.delete("buyersDay");
+			return next;
+		});
 	return (
 		<>
 			<PageHeader title="Monetization" description={`Revenue from purchases, ${describeRange(state)}, after Roblox's cut. Server-sent purchases only, each counted once.`} />
@@ -255,10 +331,7 @@ export default function Monetization() {
 			<BuyersSheet
 				value={buyers}
 				day={buyersDay}
-				onClose={() => {
-					setBuyers("");
-					setBuyersDay("");
-				}}
+				onClose={closeBuyers}
 			/>
 		</>
 	);
