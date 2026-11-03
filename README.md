@@ -901,7 +901,12 @@ runtime settings: grouped fields with their source, Reset to env, Send test aler
 Events, Funnels, Flow, Retention, First session, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
 Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
 TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
-name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
+name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. **Ctrl+K**
+(Cmd+K on a Mac, also from inside a text field) or the header's **Search...** button opens the command palette: fuzzy search
+over every page (keeping the shared filters; owner-only pages only for owners), "Open player <pid or UserId>", the date-range
+presets, Clear filters, Copy link to this view, Refresh data, the theme and Sign out; arrows and Enter run, Escape closes, an
+empty query lists the recent commands first (remembered in the browser). Commands live in `web/src/lib/commands.ts`; a page
+adds its own with `useRegisterCommands` (the Players page: Copy this player's pid). The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
 with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker. Every JobId
 on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
 runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,

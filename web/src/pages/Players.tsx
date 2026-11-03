@@ -1,4 +1,4 @@
-import { ListPlus, Search } from "lucide-react";
+import { Copy, ListPlus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { DataTable, type DataColumn, type SortSpec } from "@/components/data-table";
@@ -14,6 +14,7 @@ import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSub, DropdownMe
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
+import { useRegisterCommands } from "@/lib/commands";
 import { fmtAgo, fmtInt, fmtMinutes, plural, shortId } from "@/lib/format";
 import { useAnalytics, useParam } from "@/lib/hooks";
 import type { FunnelProgress, PlayerSummary } from "@/lib/types";
@@ -254,6 +255,10 @@ export default function Players() {
 			copy.delete("find");
 			return copy;
 		});
+	useRegisterCommands(
+		pid ? [{ id: "players:copy-pid", title: "Copy this player's pid", group: "This page", icon: Copy, keywords: ["clipboard", "player", "id"], run: (ctx) => ctx.copy(pid) }] : [],
+		[pid],
+	);
 	// A pick in the list: the detail container is under the list, so bring it into view (phones especially).
 	const detailRef = useRef<HTMLDivElement>(null);
 	const pick = (next: string) => {

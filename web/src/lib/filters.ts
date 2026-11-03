@@ -9,6 +9,17 @@ import { DEVICES, type Device, type Filters } from "./types";
 export const RANGE_PRESETS = ["1h", "6h", "1d", "7d", "30d", "90d"] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number] | "custom";
 export const DEFAULT_RANGE: RangePreset = "30d";
+/** What the filter bar (and the command palette) calls each range. */
+export const RANGE_LABELS: Record<RangePreset, string> = {
+	"1h": "Last 1 hour",
+	"6h": "Last 6 hours",
+	"1d": "Today",
+	"7d": "Last 7 days",
+	"30d": "Last 30 days",
+	"90d": "Last 90 days",
+	custom: "Custom",
+};
+
 /** The presets that count hours back from now (the rest are days, today included). */
 export const HOUR_PRESETS: Partial<Record<RangePreset, number>> = { "1h": 1, "6h": 6 };
 

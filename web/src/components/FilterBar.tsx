@@ -4,22 +4,12 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { activeFilterCount, isoDate, rangeOnly, type FilterState, type RangePreset } from "@/lib/filters";
+import { activeFilterCount, isoDate, RANGE_LABELS, rangeOnly, type FilterState, type RangePreset } from "@/lib/filters";
 import { useAnalytics, useFilters } from "@/lib/hooks";
 import { DEVICES } from "@/lib/types";
 
 const ANY = "__any";
 const SEP = "|";
-
-const RANGE_LABELS: Record<RangePreset, string> = {
-	"1h": "Last 1 hour",
-	"6h": "Last 6 hours",
-	"1d": "Today",
-	"7d": "Last 7 days",
-	"30d": "Last 30 days",
-	"90d": "Last 90 days",
-	custom: "Custom",
-};
 
 /** A text filter with suggestions; commits after a short pause, on Enter or on blur. */
 function SuggestInput({

@@ -7,6 +7,7 @@ import { ExternalLink, LayoutDashboard, LogOut, Menu, Monitor, Moon, Sun } from 
 import { Suspense, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router";
 import { cn } from "cn";
+import { CommandPalette } from "@/components/CommandPalette";
 import { FilterBar } from "@/components/FilterBar";
 import { FindPlayer } from "@/components/Identity";
 import { PlaceCard, PlaceIconLink, usePageTitle } from "@/components/PlaceCard";
@@ -17,22 +18,15 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
-import { dashboardUrl, isReadOnly, userLabel, useAuth } from "@/lib/auth";
-import { FILTER_KEYS } from "@/lib/filters";
+import { dashboardUrl, isReadOnly, signOut, userLabel, useAuth } from "@/lib/auth";
+import { keptFilters } from "@/lib/commands";
 import { fmtInt } from "@/lib/format";
 import { findNavItem } from "@/lib/nav";
 import { useTheme, type Theme } from "@/lib/theme";
 
 /** Links keep the filter parameters (and drop page-only ones like pid). */
 function useFilterSearch(): string {
-	const { search } = useLocation();
-	const params = new URLSearchParams(search);
-	const kept = new URLSearchParams();
-	for (const key of FILTER_KEYS) {
-		const v = params.get(key);
-		if (v) kept.set(key, v);
-	}
-	const text = kept.toString();
+	const text = keptFilters(useLocation().search).toString();
 	return text ? `?${text}` : "";
 }
 
@@ -73,14 +67,7 @@ function UserMenu() {
 	const user = auth.user;
 	const label = userLabel(user, auth.via);
 	const readOnly = isReadOnly(auth);
-	const out = async () => {
-		try {
-			await api.logout();
-		} finally {
-			client.clear();
-			window.location.assign("/");
-		}
-	};
+	const out = () => signOut(client);
 	return (
 		<div className="flex items-center gap-2.5 px-1 text-sm" title={user?.kind === "roblox" ? `Roblox user ${user.userId}` : undefined}>
 			{user?.kind === "roblox" && user.avatar ? (
@@ -220,6 +207,7 @@ export function AppShell() {
 							<div className="truncate text-sm font-medium">{current?.label}</div>
 						</div>
 						<div className="flex min-w-0 shrink items-center gap-3">
+							<CommandPalette />
 							<FindPlayer />
 							<ServerStatus />
 							<ThemeToggle />

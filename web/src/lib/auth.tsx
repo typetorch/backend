@@ -1,5 +1,7 @@
 /** Who is signed in, for the header and anything that needs to know. Provided by AuthGate once the backend says yes. */
+import type { QueryClient } from "@tanstack/react-query";
 import { createContext, useContext } from "react";
+import { api } from "./api";
 import type { AuthInfo, AuthUser, LoginOptions } from "./types";
 
 const AuthContext = createContext<AuthInfo | null>(null);
@@ -79,4 +81,14 @@ export function userLabel(user: AuthUser | undefined, via?: string): string {
 /** The session can only read (the web role): the pages that change something stay out, the rest is the same. */
 export function isReadOnly(auth: Pick<AuthInfo, "role"> | null | undefined): boolean {
 	return auth?.role === "web";
+}
+
+/** Ends the cookie session, forgets every cached answer and reloads at the top (the login page). */
+export async function signOut(client: QueryClient): Promise<void> {
+	try {
+		await api.logout();
+	} finally {
+		client.clear();
+		window.location.assign("/");
+	}
 }
