@@ -71,12 +71,27 @@ export function createProductLoader(fetcher: Fetcher) {
 }
 
 const loadProduct = createProductLoader((ids) => api.robloxProducts(ids));
+/** Names Roblox gave, by `type:id`, for plain-text labels (filter checklists) once a card or cell has asked. */
+const knownNames = new Map<string, string>();
+
+/** "Name (id)" when Roblox named the product already, else the id; for text that can't wait for a lookup. */
+export function productLabel(kind: string | null | undefined, id: unknown): string {
+	if (id === null || id === undefined || id === "") return "";
+	const type = productTypeOf(kind);
+	const n = parseProductId(id);
+	const name = type && n !== undefined ? knownNames.get(`${type}:${n}`) : undefined;
+	return name ? `${name} (${String(id)})` : String(id);
+}
 
 /** One product's details; undefined while loading or without a type and id. */
 export function useProductInfo(type: ProductType | undefined, id: number | undefined): { info: RobloxProductInfo | undefined; loading: boolean } {
 	const q = useQuery({
 		queryKey: ["roblox-product", type, id],
-		queryFn: () => loadProduct(type as ProductType, id as number),
+		queryFn: async () => {
+			const info = await loadProduct(type as ProductType, id as number);
+			if (info.status === "ok" && info.name) knownNames.set(`${info.type}:${info.id}`, info.name);
+			return info;
+		},
 		enabled: type !== undefined && id !== undefined,
 		staleTime: 30 * 60_000,
 		gcTime: 60 * 60_000,

@@ -14,7 +14,7 @@
  */
 import { getCoreRowModel, getPaginationRowModel, getSortedRowModel, useReactTable, type ColumnDef, type Header } from "@tanstack/react-table";
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ChevronsUpDown, Columns3, Download, Ellipsis, ListFilter, RotateCcw, Search, X } from "lucide-react";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useInRouterContext, useSearchParams } from "react-router";
 import { cn } from "cn";
 import { Button } from "@/components/ui/button";
@@ -61,6 +61,7 @@ import {
 	type SinceKey,
 	type SortSpec,
 	type TableView,
+	setKey,
 } from "./model";
 import { useTableView, withViewParams, type UrlBridge } from "./use-table-view";
 
@@ -116,6 +117,19 @@ export interface DataTableProps<T> {
 }
 
 /** The table. Reflects its view in the URL when it is inside a router. */
+/** What a cell inside a DataTable can do to its table; null outside one. */
+export interface TableFilterApi {
+	/** Show only the rows whose `columnId` value is `value` (that column's checklist filter, replacing its old one). */
+	filterBy(columnId: string, value: unknown): void;
+}
+
+const TableFilterContext = createContext<TableFilterApi | null>(null);
+
+/** The surrounding table's filter, for cells that filter on a click (null outside a DataTable). */
+export function useTableFilter(): TableFilterApi | null {
+	return useContext(TableFilterContext);
+}
+
 export function DataTable<T>(props: DataTableProps<T>) {
 	const inRouter = useInRouterContext();
 	if (inRouter && props.urlSync !== false) return <RoutedTable {...props} />;
@@ -335,9 +349,12 @@ function TableImpl<T>({
 		return col ? [{ col, f }] : [];
 	});
 	const pinned = pinnedRows ?? [];
+	// A cell (e.g. a product id) can narrow the table to its value: the column's checklist with just that value.
+	const cellFilter = useMemo(() => ({ filterBy: (columnId: string, value: unknown) => setFilter(columnId, { kind: "set", values: [setKey(value)] }) }), [setFilter]);
 
 	return (
-		<div className={cn("min-w-0 space-y-2", className)} data-slot="data-table" data-table-id={id}>
+		<TableFilterContext.Provider value={cellFilter}>
+			<div className={cn("min-w-0 space-y-2", className)} data-slot="data-table" data-table-id={id}>
 			<div className="flex flex-wrap items-center gap-2">
 				{showSearch ? (
 					<div className="relative min-w-40 max-w-72 flex-1">
@@ -426,11 +443,11 @@ function TableImpl<T>({
 							key={col.id}
 							type="button"
 							className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-xs hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-							aria-label={`Remove filter ${col.header}: ${describeFilter(col, f)}`}
+							aria-label={`Remove filter ${col.header}: ${describeFilter(col, f, data)}`}
 							onClick={() => setFilter(col.id, undefined)}
 						>
 							<span className="truncate">
-								<span className="text-muted-foreground">{col.header}:</span> {describeFilter(col, f)}
+								<span className="text-muted-foreground">{col.header}:</span> {describeFilter(col, f, data)}
 							</span>
 							<X className="size-3 shrink-0" aria-hidden />
 						</button>
@@ -578,7 +595,8 @@ function TableImpl<T>({
 					</div>
 				</div>
 			) : null}
-		</div>
+			</div>
+		</TableFilterContext.Provider>
 	);
 }
 

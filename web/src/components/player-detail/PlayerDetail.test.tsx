@@ -165,7 +165,7 @@ describe("Players page: the player detail container", () => {
 		expect(within(purchases).getByText("1234")).toBeTruthy();
 		// The product id says what it is: its name beside it, and a card on focus.
 		expect(await within(purchases).findByText("Coins pack 1234")).toBeTruthy();
-		expect(within(purchases).getByRole("button", { name: "Developer product 1234: Coins pack 1234" })).toBeTruthy();
+		expect(within(purchases).getByRole("button", { name: /^Developer product 1234: Coins pack 1234/ })).toBeTruthy();
 		expect(within(purchases).getByText("shop")).toBeTruthy();
 		expect(queried).not.toContain("timeline");
 

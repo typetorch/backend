@@ -4,11 +4,12 @@
  */
 import type { ReactNode } from "react";
 import { EmptyState } from "@/components/common";
-import { ProductId } from "@/components/ProductId";
+import { ProductId, ProductKind, productKindLabel } from "@/components/ProductId";
 import { JobLink } from "@/pages/server/shared";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { fmtInt, fmtMinutes, fmtNum, fmtTime, shortId } from "@/lib/format";
+import { productLabel } from "@/lib/products";
 import type { PlayerPurchase, PlayerSessionRow, PlayerStatsResult } from "@/lib/types";
 import { SeriesView, ShowToggle, useBucketColumns, type Metric, type Show } from "./SeriesView";
 
@@ -56,10 +57,18 @@ const per = (stats: PlayerStatsResult) => stats.window.bucket;
 
 const PURCHASE_COLUMNS: DataColumn<PlayerPurchase>[] = [
 	{ id: "time", header: "Time (UTC)", type: "date", accessor: (p) => p.t, cell: (p) => fmtTime(p.time), format: (_v, p) => fmtTime(p.time), className: "font-mono text-xs tabular-nums" },
-	{ id: "product", header: "Product", type: "text", accessor: (p) => p.product, cell: (p) => <ProductId id={p.product} kind={p.kind} showName />, className: "max-w-[16rem] text-xs" },
+	{
+		id: "product",
+		header: "Product",
+		type: "enum",
+		accessor: (p) => p.product,
+		format: (_v, p) => productLabel(p.kind, p.product),
+		cell: (p) => <ProductId id={p.product} kind={p.kind} showName filterColumn="product" />,
+		className: "max-w-[16rem] text-xs",
+	},
 	{ id: "price", header: "Price", type: "number", accessor: (p) => p.robux, cell: (p) => (p.robux === null ? "–" : robux(p.robux)), align: "right" },
 	{ id: "where", header: "Where", type: "enum", accessor: (p) => p.where },
-	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, defaultHidden: true },
+	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, format: (v) => productKindLabel(String(v)), cell: (p) => <ProductKind kind={p.kind} filterColumn="kind" />, className: "text-xs" },
 	{ id: "sid", header: "Session", type: "text", accessor: (p) => p.sid, cell: (p) => shortId(p.sid), className: "font-mono text-xs", defaultHidden: true },
 ];
 

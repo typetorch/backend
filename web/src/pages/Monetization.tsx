@@ -12,9 +12,10 @@ import { DayBars } from "@/components/DayBars";
 import { EmptyState, Metric, PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { UserIdLink } from "@/components/Identity";
 import { PlayerPageLink } from "@/components/PlayerLink";
-import { ProductId } from "@/components/ProductId";
+import { ProductId, ProductKind, productKindLabel } from "@/components/ProductId";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { describeRange } from "@/lib/filters";
+import { productLabel } from "@/lib/products";
 import { fmtAgo, fmtInt, fmtMinutes, fmtNum, fmtPct, fmtTime, plural, shortId } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import type { MonetizationDay, MonetizationPlayer, MonetizationProduct, MonetizationPurchase, MonetizationResult } from "@/lib/types";
@@ -36,17 +37,19 @@ export function MonetizationEmpty() {
 	);
 }
 
-const kindLabel = (kind: string) => (kind === "gamepass" ? "Game pass" : kind === "product" ? "Developer product" : kind);
+const kindLabel = productKindLabel;
 
 const PRODUCT_COLUMNS: DataColumn<MonetizationProduct>[] = [
 	{
 		id: "product",
 		header: "Product",
+		type: "enum",
 		accessor: (p) => p.product,
+		format: (_v, p) => productLabel(p.kind, p.product),
 		cell: (p) => <ProductId id={p.product} kind={p.kind} showName />,
 		minWidth: 160,
 	},
-	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, format: (v) => kindLabel(String(v)), cell: (p) => kindLabel(p.kind) },
+	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, format: (v) => kindLabel(String(v)), cell: (p) => <ProductKind kind={p.kind} filterColumn="kind" /> },
 	{ id: "revenue", header: "Revenue", type: "number", align: "right", accessor: (p) => p.revenue, cell: (p) => fmtInt(p.revenue) },
 	{ id: "robux", header: "Robux paid", type: "number", align: "right", accessor: (p) => p.robux, cell: (p) => fmtInt(p.robux) },
 	{
@@ -139,12 +142,14 @@ const PURCHASE_COLUMNS: DataColumn<MonetizationPurchase>[] = [
 	{
 		id: "product",
 		header: "Product",
+		type: "enum",
 		accessor: (p) => p.product,
+		format: (_v, p) => productLabel(p.kind, p.product),
 		searchText: (p) => `${p.product ?? ""} ${p.kind}`,
-		cell: (p) => (p.product === null ? <span className="text-xs text-muted-foreground">no id</span> : <ProductId id={p.product} kind={p.kind} showName />),
+		cell: (p) => (p.product === null ? <span className="text-xs text-muted-foreground">no id</span> : <ProductId id={p.product} kind={p.kind} showName filterColumn="product" />),
 		minWidth: 120,
 	},
-	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, format: (v) => kindLabel(String(v)), cell: (p) => kindLabel(p.kind), defaultHidden: true },
+	{ id: "kind", header: "Kind", type: "enum", accessor: (p) => p.kind, format: (v) => kindLabel(String(v)), cell: (p) => <ProductKind kind={p.kind} filterColumn="kind" />, className: "text-xs" },
 	{ id: "robux", header: "Robux paid", type: "number", align: "right", accessor: (p) => p.robux, cell: (p) => fmtInt(p.robux) },
 	{ id: "revenue", header: "Revenue", type: "number", align: "right", accessor: (p) => p.revenue, cell: (p) => fmtInt(p.revenue), defaultHidden: true },
 	{ id: "where", header: "Where", type: "enum", accessor: (p) => p.where, cell: (p) => p.where ?? <span className="text-muted-foreground">-</span>, className: "text-xs" },
@@ -268,7 +273,7 @@ function Body({ data, onBuyers, onDay }: { data: MonetizationResult; onBuyers(va
 					</Section>
 				))}
 			</div>
-			<Section title="Revenue by product" description="Click a product to see who bought it. Hover or tap an id for its name, icon and price on Roblox.">
+			<Section title="Revenue by product" description="Click a product to see who bought it, or a kind to show only game passes or developer products. Hover or tap an id for its name, icon and price on Roblox.">
 				<DataTable
 					id="monetization-products"
 					label="Revenue by product"
@@ -284,7 +289,7 @@ function Body({ data, onBuyers, onDay }: { data: MonetizationResult; onBuyers(va
 				<Section title="Top buyers" description="Who spent the most in this range, on anything. A name opens the player.">
 					<Buyers label="Top buyers" />
 				</Section>
-				<Section title="Latest purchases" description="Who bought what, newest first, with the Robux paid and where in the game (the purchase's where). A name opens the player.">
+				<Section title="Latest purchases" description="Who bought what, newest first, with the Robux paid and where in the game. Click a product or kind to show only those; a name opens the player.">
 					<LatestPurchases />
 				</Section>
 			</div>

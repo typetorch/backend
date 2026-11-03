@@ -153,6 +153,21 @@ describe("Monetization page", () => {
 		expect(screen.getByText("The latest 2, of 3.")).toBeTruthy();
 	});
 
+	it("latest purchases: clicking a product or a kind shows only those", async () => {
+		mount();
+		const table = await screen.findByRole("table", { name: "Latest purchases" });
+		await waitFor(() => expect(within(table).getByText("VIP")).toBeTruthy());
+		fireEvent.click(within(table).getByRole("button", { name: /Game pass 77: VIP, click to show only this/ }));
+		await waitFor(() => expect(within(table).getAllByRole("row").length).toBe(2));
+		expect(within(table).queryByText("100 Coins")).toBeNull();
+		// The filter chip names the product, and removing it brings the rows back.
+		fireEvent.click(screen.getByRole("button", { name: /Remove filter Product: VIP \(77\)/ }));
+		await waitFor(() => expect(within(table).getAllByRole("row").length).toBe(3));
+		fireEvent.click(within(table).getByRole("button", { name: "Developer product" }));
+		await waitFor(() => expect(within(table).getAllByRole("row").length).toBe(2));
+		expect(within(table).getByText("100 Coins")).toBeTruthy();
+	});
+
 	it("the buyers sheet's close button closes it", async () => {
 		mount(result, "/monetization?buyers=gamepass:77");
 		await screen.findByRole("table", { name: "Buyers of this product" });

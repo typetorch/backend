@@ -421,10 +421,15 @@ export function numberBounds<T>(col: Column<T>, rows: readonly T[]): { min: numb
 }
 
 /** "ok, degraded", "5 to 20", "at least 5", "contains abc", "last 24 hours" for the chip of an active filter. */
-export function describeFilter<T>(col: Column<T> | undefined, filter: ColumnFilter): string {
+export function describeFilter<T>(col: Column<T> | undefined, filter: ColumnFilter, rows?: readonly T[]): string {
 	switch (filter.kind) {
 		case "set": {
-			const labels = filter.values.map((v) => (v === "" ? "(empty)" : col?.type === "boolean" ? (v === "true" ? "yes" : "no") : v));
+			// With the rows, a value reads as its checklist label (e.g. a product's name), when a row has it.
+			const text = (v: string) => {
+				const row = col && rows?.find((r) => setKey(col.raw(r)) === v);
+				return (row && col?.text(row)) || v;
+			};
+			const labels = filter.values.map((v) => (v === "" ? "(empty)" : col?.type === "boolean" ? (v === "true" ? "yes" : "no") : text(v)));
 			return labels.length > 3 ? `${labels.slice(0, 3).join(", ")} +${labels.length - 3}` : labels.join(", ");
 		}
 		case "range":
