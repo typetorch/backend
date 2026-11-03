@@ -69,7 +69,7 @@ function mount(query = "") {
 	);
 }
 
-const rowOf = (pid: string) => document.querySelector(`[title='${pid}']`)?.closest("tr") as HTMLElement;
+const rowOf = (pid: string) => document.querySelector(`[data-pid='${pid}']`)?.closest("tr") as HTMLElement;
 
 describe("Players list: funnel columns", () => {
 	it("Columns > Add funnel adds a progress column per funnel, side by side", async () => {

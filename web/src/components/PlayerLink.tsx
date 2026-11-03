@@ -1,11 +1,13 @@
 /** A player's name linking to their Players page (side sheets that list players: Errors, Experiments). */
 import { Link, useLocation } from "react-router";
+import { PlayerHover } from "@/components/PlayerHover";
 import { FILTER_KEYS } from "@/lib/filters";
 import { shortId } from "@/lib/format";
 
 /** What a players list knows about one player: the pid, and the Roblox names when the server has them. */
 export interface NamedPlayer {
 	pid: string;
+	uid?: number;
 	name?: string;
 	displayName?: string;
 }
@@ -16,7 +18,7 @@ export function playerLabel(p: NamedPlayer): string {
 	return p.displayName && p.displayName !== p.name ? `${p.displayName} (@${p.name})` : `@${p.name}`;
 }
 
-/** The Players page for one pid, keeping the explorer's shared filters that are in the URL. */
+/** The Players page for one pid, keeping the explorer's shared filters that are in the URL; hovering it shows who it is. */
 export function PlayerPageLink({ row }: { row: NamedPlayer }) {
 	const { search } = useLocation();
 	const current = new URLSearchParams(search);
@@ -24,8 +26,10 @@ export function PlayerPageLink({ row }: { row: NamedPlayer }) {
 	for (const key of FILTER_KEYS) if (current.get(key)) params.set(key, current.get(key) as string);
 	params.set("pid", row.pid);
 	return (
-		<Link to={{ pathname: "/players", search: `?${params.toString()}` }} className="font-medium underline-offset-2 hover:underline" title={`Open player ${row.pid}`}>
-			{playerLabel(row)}
-		</Link>
+		<PlayerHover pid={row.pid} uid={row.uid} name={row.name} displayName={row.displayName}>
+			<Link to={{ pathname: "/players", search: `?${params.toString()}` }} className="font-medium underline-offset-2 hover:underline">
+				{playerLabel(row)}
+			</Link>
+		</PlayerHover>
 	);
 }

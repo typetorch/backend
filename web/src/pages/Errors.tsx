@@ -324,7 +324,7 @@ const PLAYER_COLUMNS: DataColumn<PlayerRow>[] = [
 		cell: (r) => {
 			if (r.kind !== "player") return null;
 			if (r.uid === undefined) return <span className="text-xs text-muted-foreground">not linked</span>;
-			return <UserIdLink uid={r.uid} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline" />;
+			return <UserIdLink uid={r.uid} pid={r.pid} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline" />;
 		},
 		exportValue: (r) => (r.kind === "player" && r.uid !== undefined ? String(r.uid) : ""),
 	},

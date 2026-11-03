@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Link, useLocation } from "react-router";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EventTable } from "@/components/EventTable";
+import { PlayerHover } from "@/components/PlayerHover";
 import { EmptyState, PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,9 +24,11 @@ function PlayerLink({ pid }: { pid: string }) {
 	for (const key of FILTER_KEYS) if (current.get(key)) params.set(key, current.get(key) as string);
 	params.set("pid", pid);
 	return (
-		<Link to={{ pathname: "/players", search: `?${params.toString()}` }} className="font-mono text-xs underline-offset-2 hover:underline" title={pid}>
-			{shortId(pid)}
-		</Link>
+		<PlayerHover pid={pid}>
+			<Link to={{ pathname: "/players", search: `?${params.toString()}` }} className="font-mono text-xs underline-offset-2 hover:underline">
+				{shortId(pid)}
+			</Link>
+		</PlayerHover>
 	);
 }
 

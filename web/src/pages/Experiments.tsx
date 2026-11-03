@@ -302,7 +302,7 @@ const ASSIGNED_COLUMNS: DataColumn<ExperimentPlayer>[] = [
 		id: "uid",
 		header: "UserId",
 		accessor: (p) => p.uid ?? null,
-		cell: (p) => (p.uid === undefined ? <span className="text-xs text-muted-foreground">not linked</span> : <UserIdLink uid={p.uid} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline" />),
+		cell: (p) => (p.uid === undefined ? <span className="text-xs text-muted-foreground">not linked</span> : <UserIdLink uid={p.uid} pid={p.pid} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline" />),
 		exportValue: (p) => (p.uid !== undefined ? String(p.uid) : ""),
 	},
 	{

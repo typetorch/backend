@@ -49,14 +49,14 @@ function mount() {
 }
 
 const table = () => screen.findByRole("table", { name: "Players" });
-const pidsInOrder = (t: HTMLElement) => [...t.querySelectorAll("tbody tr")].map((r) => r.querySelector("[title^='pid-']")?.getAttribute("title") ?? "");
+const pidsInOrder = (t: HTMLElement) => [...t.querySelectorAll("tbody tr")].map((r) => r.querySelector("[data-pid]")?.getAttribute("data-pid") ?? "");
 
 describe("Players list: Robux spent", () => {
 	it("shows Robux spent with thousands separators, and 0 for none or a missing value", async () => {
 		mount();
 		const t = await table();
 		expect(within(t).getByRole("columnheader", { name: /Robux spent/ })).toBeTruthy();
-		const row = (pid: string) => t.querySelector(`[title='${pid}']`)?.closest("tr") as HTMLElement;
+		const row = (pid: string) => t.querySelector(`[data-pid='${pid}']`)?.closest("tr") as HTMLElement;
 		expect(within(row("pid-whale-0002")).getByText("12,345")).toBeTruthy();
 		expect(within(row("pid-small-0004")).getByText("99")).toBeTruthy();
 		expect(within(row("pid-free-00001")).getByText("0")).toBeTruthy();

@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router";
 import { DataTable, type DataColumn, type SortSpec } from "@/components/data-table";
 import { IdentityStatus } from "@/components/Identity";
 import { PlayerDetail } from "@/components/player-detail/PlayerDetail";
+import { PlayerHover } from "@/components/PlayerHover";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { FunnelProgressBar } from "@/components/FunnelProgressBar";
 import { FunnelStepList, FunnelStepsHeaderTip, HoverPopover, type FunnelStepName } from "@/components/FunnelSteps";
@@ -112,9 +113,11 @@ const PLAYER_COLUMNS: DataColumn<PlayerSummary>[] = [
 		cell: (p) => (
 			<>
 				<div className="flex items-center gap-2">
-					<span className="font-mono" title={p.pid}>
-						{shortId(p.pid, 10)}
-					</span>
+					<PlayerHover pid={p.pid} uid={p.uid}>
+						<span className="font-mono" data-pid={p.pid}>
+							{shortId(p.pid, 10)}
+						</span>
+					</PlayerHover>
 					{p.newInRange ? <Badge variant="secondary">new</Badge> : null}
 				</div>
 				{p.uid !== undefined ? <div className="text-muted-foreground tabular-nums">UserId {p.uid}</div> : null}

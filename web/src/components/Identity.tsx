@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, UserSearch } from "lucide-react";
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router";
+import { PlayerHover } from "@/components/PlayerHover";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
@@ -11,13 +12,20 @@ import { fmtInt } from "@/lib/format";
 
 export const profileUrl = (uid: number) => `https://www.roblox.com/users/${uid}/profile`;
 
-/** "UserId 123" linking to the Roblox profile (opens a new tab). */
-export function UserIdLink({ uid, className }: { uid: number; className?: string }) {
-	return (
-		<a href={profileUrl(uid)} target="_blank" rel="noreferrer noopener" className={className ?? "inline-flex items-center gap-1 underline-offset-2 hover:underline"} title="Roblox profile">
+/** "UserId 123" linking to the Roblox profile (opens a new tab); with the `pid`, hovering it shows who it is. */
+export function UserIdLink({ uid, pid, className }: { uid: number; pid?: string; className?: string }) {
+	const link = (
+		<a href={profileUrl(uid)} target="_blank" rel="noreferrer noopener" className={className ?? "inline-flex items-center gap-1 underline-offset-2 hover:underline"} title={pid ? undefined : "Roblox profile"}>
 			UserId {uid}
 			<ExternalLink className="size-3" />
 		</a>
+	);
+	return pid ? (
+		<PlayerHover pid={pid} uid={uid}>
+			{link}
+		</PlayerHover>
+	) : (
+		link
 	);
 }
 
