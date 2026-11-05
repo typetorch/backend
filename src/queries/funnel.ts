@@ -283,7 +283,7 @@ export const funnelProgress = defineQuery<FunnelProgressOptions, FunnelProgressR
 // playtime-funnel ---------------------------------------------------------------------------------------------------------
 
 /** The playtime funnel's thresholds, seconds (each step: playtime >= this, edges inclusive). */
-export const PLAYTIME_STEPS_SECONDS = [30, 60, 180, 300, 600, 1800, 3600, 7200] as const;
+export const PLAYTIME_STEPS_SECONDS = [30, 60, 180, 300, 600, 900, 1200, 1500, 1800, 2700, 3600, 7200] as const;
 
 /**
  * A session counts at most this long. A session's length is its first to its last event (the same as every other
@@ -332,7 +332,7 @@ export function playtimeLabel(seconds: number): string {
 
 export const playtimeFunnel = defineQuery<PlaytimeFunnelOptions, PlaytimeFunnelResult>({
 	name: "playtime-funnel",
-	summary: "share of players whose playtime reached 30s, 1m, 3m, 5m, 10m, 30m, 1h, 2h: total in the range, or (measure: first) new players' first session",
+	summary: "share of players whose playtime reached 30s, 1m, 3m, 5m, 10m, 15m, 20m, 25m, 30m, 45m, 1h, 2h: total in the range, or (measure: first) new players' first session",
 	defaultDays: 30,
 	options: (input = {}) => {
 		const measure = input.measure ?? "total";

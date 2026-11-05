@@ -44,9 +44,9 @@ describe("playtime-funnel", () => {
 		expect(r.measure).toBe("total");
 		expect(r.players).toBe(7);
 		expect(r.steps.map((s) => s.seconds)).toEqual([...PLAYTIME_STEPS_SECONDS]);
-		expect(r.steps.map((s) => s.label)).toEqual(["30s", "1m", "3m", "5m", "10m", "30m", "1h", "2h"]);
+		expect(r.steps.map((s) => s.label)).toEqual(["30s", "1m", "3m", "5m", "10m", "15m", "20m", "25m", "30m", "45m", "1h", "2h"]);
 		// A (30 s), C (65 s), D (60 s), E (capped 12 h), F (179.999 s), G (2 h); B has zero.
-		expect(reached(r)).toEqual([6, 5, 2, 2, 2, 2, 2, 2]);
+		expect(reached(r)).toEqual([6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
 		expect(r.steps[0].ofTotal).toBe(0.8571);
 		expect(r.steps[1].fromPrevious).toBe(0.8333);
 		expect(r.steps[2].fromPrevious).toBe(0.4);
@@ -59,20 +59,20 @@ describe("playtime-funnel", () => {
 		expect(r.measure).toBe("first");
 		// A 30 s, B 0, C 25 s (its 40 s session isn't the first), E capped.
 		expect(r.players).toBe(4);
-		expect(reached(r)).toEqual([2, 1, 1, 1, 1, 1, 1, 1]);
+		expect(reached(r)).toEqual([2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
 	});
 
 	test("an open session counts up to its latest event", async () => {
 		const r = await store.query("playtime-funnel", { from: NOW - 3 * DAY - 1, to: NOW - 3 * DAY + 4 * 60 * S }, {});
 		// Only E: its events in the window are its first one; nothing later yet.
 		expect(r.players).toBe(1);
-		expect(reached(r)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+		expect(reached(r)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 	});
 
 	test("filters apply (branch, range)", async () => {
 		const beta = await store.query("playtime-funnel", { branch: "beta" });
 		expect(beta.players).toBe(1);
-		expect(reached(beta)).toEqual([1, 1, 0, 0, 0, 0, 0, 0]);
+		expect(reached(beta)).toEqual([1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 		const wide = await store.query("playtime-funnel", { from: NOW - 60 * DAY, to: NOW });
 		expect(wide.players).toBe(8);
 	});
