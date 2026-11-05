@@ -28,8 +28,8 @@ const FUNNELS: Record<string, FunnelResult> = {
 	v3_tutorial: { funnel: "v3_tutorial", players: 80, steps: [step(1, "joined", 80, 80, 80), step(2, "moved", 72, 80, 80), step(3, "done", 60, 80, 72)], biggestDrop: { step: 3, lost: 12, share: 0.1667 } },
 };
 
-const SECONDS = [30, 60, 180, 300, 600, 1800, 3600, 7200];
-const LABELS = ["30s", "1m", "3m", "5m", "10m", "30m", "1h", "2h"];
+const SECONDS = [30, 60, 180, 300, 600, 900, 1200, 1500, 1800, 2700, 3600, 7200];
+const LABELS = ["30s", "1m", "3m", "5m", "10m", "15m", "20m", "25m", "30m", "45m", "1h", "2h"];
 function playtime(measure: "total" | "first", players: number, reached: number[]): PlaytimeFunnelResult {
 	return {
 		measure,
@@ -46,8 +46,8 @@ function playtime(measure: "total" | "first", players: number, reached: number[]
 	};
 }
 const PLAYTIME = {
-	total: playtime("total", 200, [180, 120, 90, 70, 50, 30, 20, 10]),
-	first: playtime("first", 50, [40, 25, 15, 10, 5, 3, 2, 1]),
+	total: playtime("total", 200, [180, 120, 90, 70, 50, 44, 40, 36, 33, 30, 20, 10]),
+	first: playtime("first", 50, [40, 25, 15, 10, 5, 4, 4, 3, 3, 2, 2, 1]),
 };
 let playtimeCalls: string[] = [];
 let playerCalls: object[] = [];
