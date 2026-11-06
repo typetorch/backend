@@ -122,6 +122,16 @@ describe("environment", () => {
 		expect(c.warnings).toEqual(["TT_ANALYTICS_PORT is ignored because PORT is set; remove it"]);
 	});
 
+	test("TT_ANALYTICS_INGEST_TOKENS is wholly ignored once TYPETORCH_API_KEY is set (no tail entry stays a game key)", () => {
+		const third = "t".repeat(40);
+		const both = loadConfig([], { ...base, TT_ANALYTICS_INGEST_TOKENS: `${"a".repeat(40)},${"b".repeat(40)},${third}` });
+		expect(both.apiKeys).toEqual([API]);
+		expect(both.warnings).toContain("TT_ANALYTICS_INGEST_TOKENS is ignored because TYPETORCH_API_KEY is set; remove it");
+		// Without TYPETORCH_API_KEY the old list still works in full for its last release.
+		const old = loadConfig([], { TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_EXPLORER: "off", TT_ANALYTICS_INGEST_TOKENS: `${API},${PREVIOUS},${third}` });
+		expect(old.apiKeys).toEqual([API, PREVIOUS, third]);
+	});
+
 	test("an env file sits under the real environment", () => {
 		const dir = mkdtempSync(join(tmpdir(), "tt-envfile-"));
 		try {

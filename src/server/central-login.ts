@@ -13,13 +13,16 @@
  * (`<issuer>/.well-known/typetorch-login`: its `issuer` must equal the configured one exactly; cached an hour; a failed
  * fetch backs off, and until one succeeds every login fails closed). TYPETORCH_ROBLOX_BROKER_CLIENT_ID and
  * TYPETORCH_ROBLOX_BROKER_DISCOVERY pin them: a pinned value is used, and a published value that differs refuses logins.
+ * The discovery URL is always pinned: unset, the pin is Roblox's own (ROBLOX_DISCOVERY_URL), so the broker can never
+ * choose whose keys sign the Roblox ID token. Only a local (loopback) broker, e.g. dash with its fake Roblox, may name
+ * its own discovery URL without a pin.
  *
  * Either failing is "not signed in". The broker's answers are never shown to the person; log details carry no token.
  * The role decision, the device check and the session are app.ts's (the per-game sign-in's code path).
  */
 import { createHash, createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
 import { discoveryUrlOf, ROBLOX_CLIENT_ID_PATTERN } from "./config.ts";
-import { OAuthError, PENDING_TTL_MS, MAX_PENDING_PER_ADDRESS, RobloxIdTokens, isLoopbackHost, safeEqual, type RobloxIdentity } from "./roblox-oauth.ts";
+import { OAuthError, PENDING_TTL_MS, MAX_PENDING_PER_ADDRESS, ROBLOX_DISCOVERY_URL, RobloxIdTokens, isLoopbackHost, safeEqual, type RobloxIdentity } from "./roblox-oauth.ts";
 
 const MAX_PENDING = 1000;
 const HTTP_TIMEOUT_MS = 10_000;
@@ -74,7 +77,10 @@ export interface CentralLoginOptions {
 	 * `roblox_client_id` is used. Set: it is used, and a different published value refuses every login.
 	 */
 	robloxClientId?: string;
-	/** A pin of Roblox's OIDC discovery document, same rules (a fake Roblox in tests and local runs). */
+	/**
+	 * A pin of Roblox's OIDC discovery document, same rules (a fake Roblox in tests and local runs). Unset, the pin is
+	 * Roblox's own ROBLOX_DISCOVERY_URL (none only for a loopback issuer).
+	 */
 	robloxDiscoveryUrl?: string;
 	/** Where the once-only pin mismatch line goes. */
 	log?: (line: string) => void;
@@ -99,6 +105,8 @@ export class CentralLogin {
 	private readonly clock: () => number;
 	/** Plain http for Roblox's discovery and keys only when the broker itself is a local one (dash's fake Roblox). */
 	private readonly loopbackIssuer: boolean;
+	/** The discovery URL the broker's published one must equal: the configured pin, else Roblox's own (none on loopback). */
+	private readonly discoveryPin: string | undefined;
 	/** Roblox's discovery and keys, for the discovery URL in use (made again if it changes). */
 	private roblox: { url: string; tokens: RobloxIdTokens } | undefined;
 	private metadata: { at: number; settings: RobloxSettings } | undefined;
@@ -114,6 +122,7 @@ export class CentralLogin {
 		this.doFetch = o.fetch ?? ((input, init) => fetch(input, init));
 		this.clock = o.clock ?? Date.now;
 		this.loopbackIssuer = isLoopbackHost(new URL(o.issuer).hostname);
+		this.discoveryPin = o.robloxDiscoveryUrl ?? (this.loopbackIssuer ? undefined : ROBLOX_DISCOVERY_URL);
 	}
 
 	/**
@@ -141,7 +150,7 @@ export class CentralLogin {
 			throw new OAuthError("failed", `typetorch.dev login metadata: ${what} differs from the pin`);
 		};
 		mismatch("Roblox client id (TYPETORCH_ROBLOX_BROKER_CLIENT_ID)", this.o.robloxClientId, published.clientId);
-		mismatch("Roblox discovery URL (TYPETORCH_ROBLOX_BROKER_DISCOVERY)", this.o.robloxDiscoveryUrl, published.discoveryUrl);
+		mismatch("Roblox discovery URL (TYPETORCH_ROBLOX_BROKER_DISCOVERY)", this.discoveryPin, published.discoveryUrl);
 		return published;
 	}
 

@@ -122,7 +122,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_CENTRAL_LOGIN_UNBLESSED` | no | What an owner gets on a browser that was never trusted: `admin` (full admin, the default), `web` (read-only until the browser is trusted) or `refuse` (no session). See the trade-off under [Sign in with typetorch.dev](#sign-in-with-typetorchdev). |
 | `TYPETORCH_CENTRAL_LOGIN_KIDS` | no | Comma-separated broker key ids to pin: an assertion signed by any other key is refused even if the broker publishes it. |
 | `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
-| `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) and Roblox's discovery document from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
+| `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
+| `TYPETORCH_ROBLOX_BROKER_DISCOVERY` | no | Not needed: Roblox's discovery document is always pinned, by default to Roblox's own (`https://apis.roblox.com/oauth/.well-known/openid-configuration`), so the broker can never choose whose keys sign the Roblox ID token; a broker publishing another URL refuses every typetorch.dev login (logged once). Set it only to trust another discovery URL (a fake Roblox). A local (loopback) issuer may publish its own without a pin. |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
 | `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId; with `universe.analytics:read` (and `TYPETORCH_UNIVERSE_ID`) the Roblox page shows Roblox's own [play-through rate and impressions](#roblox-acquisition-numbers) |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
@@ -166,7 +167,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 
 **Old names** (`TT_ANALYTICS_*`, `TT_FLEET_*`, `TT_SERVER_PARTS`, `TYPETORCH_FLEET_TOKEN`,
 `TYPETORCH_FLEET_INGEST_TOKEN`) still work for this release: each one read prints a one-line warning that names the new
-variable (`TT_ANALYTICS_INGEST_TOKENS` was a list: every entry stays accepted). Remove them. The full map of old to new
+variable (`TT_ANALYTICS_INGEST_TOKENS` was a list: every entry stays accepted, unless `TYPETORCH_API_KEY` is set, which ignores the whole list). Remove them. The full map of old to new
 names is `LEGACY_ENV` in `src/legacy-env.ts`.
 
 ## Runtime settings (the Settings page)
@@ -485,7 +486,7 @@ Roblox are untouched by it. While it is on, the explorer shows a **TypeTorch Das
 - **The broker's login metadata.** Before redeeming a code the backend reads `<issuer>/.well-known/typetorch-login`
   (`{ issuer, jwks_uri, roblox_client_id, roblox_discovery }`; 10-second timeout, 16 KB cap, cached an hour). Its `issuer`
   must equal the configured issuer exactly; the client id must look like one; the discovery URL must be https (plain http on
-  loopback only when the issuer is local too; Roblox's endpoints follow the same rule). The Roblox ID token is checked against those two values, so no backend sets them. A failed
+  loopback only when the issuer is local too; Roblox's endpoints follow the same rule). The Roblox ID token is checked against those two values. The discovery URL must also equal Roblox's own (`https://apis.roblox.com/oauth/.well-known/openid-configuration`) unless `TYPETORCH_ROBLOX_BROKER_DISCOVERY` pins another, so the broker never picks the keys that sign the Roblox token (a loopback issuer, a local broker with a fake Roblox, is exempt). A failed
   fetch backs off (2 seconds, doubling up to 5 minutes) and every typetorch.dev login fails closed until one succeeds;
   the admin token and the per-game sign-in are unaffected. `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` and
   `TYPETORCH_ROBLOX_BROKER_DISCOVERY` optionally pin the values: a published value that differs from a pin refuses

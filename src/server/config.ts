@@ -318,8 +318,9 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		.split(",")
 		.map((t) => t.trim())
 		.filter(Boolean);
+	const legacyIgnored = Boolean(merged.TYPETORCH_API_KEY);
 	if (legacyList.length) {
-		if (merged.TYPETORCH_API_KEY) warnings.push("TT_ANALYTICS_INGEST_TOKENS is ignored because TYPETORCH_API_KEY is set; remove it");
+		if (legacyIgnored) warnings.push("TT_ANALYTICS_INGEST_TOKENS is ignored because TYPETORCH_API_KEY is set; remove it");
 		else {
 			warnings.push("TT_ANALYTICS_INGEST_TOKENS is deprecated: use TYPETORCH_API_KEY (and TYPETORCH_API_KEY_PREVIOUS while rotating)");
 			merged.TYPETORCH_API_KEY = legacyList[0];
@@ -333,8 +334,9 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	const adminToken = secret(env, "TYPETORCH_ADMIN_TOKEN", true) as string;
 	if (apiKey === adminToken) throw new Error("TYPETORCH_API_KEY and TYPETORCH_ADMIN_TOKEN must be different values (the API key lives in game servers; the admin token must not)");
 	if (previous && previous === adminToken) throw new Error("TYPETORCH_API_KEY_PREVIOUS must differ from TYPETORCH_ADMIN_TOKEN");
-	// Further keys of an old comma list stay accepted for the release the old names are read.
-	const apiKeys = [apiKey, ...(previous ? [previous] : []), ...legacyList.slice(2)].filter((k, i, all) => all.indexOf(k) === i);
+	// Further keys of an old comma list stay accepted for the release the old names are read, unless TYPETORCH_API_KEY is
+	// set (then the whole list is ignored, as the warning says).
+	const apiKeys = [apiKey, ...(previous ? [previous] : []), ...(legacyIgnored ? [] : legacyList.slice(2))].filter((k, i, all) => all.indexOf(k) === i);
 	for (const key of apiKeys) {
 		if (key.length < MIN_SECRET_LENGTH) throw new Error(`each TT_ANALYTICS_INGEST_TOKENS entry must be at least ${MIN_SECRET_LENGTH} characters`);
 		if (key === adminToken) throw new Error("an API key equals TYPETORCH_ADMIN_TOKEN; they must be different values");
@@ -570,7 +572,7 @@ export function describeConfig(config: ServerConfig): string {
 		`token login=${config.tokenLogin ? "on" : "off"}`,
 		`web viewers=${config.webViewers.length}`,
 		`roblox sign-in=${config.robloxOAuth ? "on" : "off"}`,
-		`typetorch.dev login=${config.centralLogin ? `on (issuer ${config.centralLogin.issuer}, unblessed owners: ${config.centralLogin.unblessed}${config.centralLogin.unblessed === "admin" ? " (typetorch.dev logins grant owners admin without device trust)" : ""}${config.centralLogin.kids ? `, ${config.centralLogin.kids.length} pinned kid(s)` : ""}${config.centralLogin.robloxClientId || config.centralLogin.robloxDiscoveryUrl ? ", Roblox settings pinned" : ", Roblox settings from the broker"})` : "off"}`,
+		`typetorch.dev login=${config.centralLogin ? `on (issuer ${config.centralLogin.issuer}, unblessed owners: ${config.centralLogin.unblessed}${config.centralLogin.unblessed === "admin" ? " (typetorch.dev logins grant owners admin without device trust)" : ""}${config.centralLogin.kids ? `, ${config.centralLogin.kids.length} pinned kid(s)` : ""}${config.centralLogin.robloxClientId || config.centralLogin.robloxDiscoveryUrl ? ", Roblox settings pinned" : `, Roblox client id from the broker, discovery ${["localhost", "127.0.0.1", "[::1]"].includes(new URL(config.centralLogin.issuer).hostname) ? "from the local broker" : "Roblox's own"}`})` : "off"}`,
 		`admin allow list=${config.adminAllowIps ? `${config.adminAllowIps.length} rule(s)` : "off"}`,
 		`trust proxy=${config.trustProxy || "off"}${config.trustedProxies ? ` (from ${config.trustedProxies.length} proxy rule(s))` : ""}`,
 		`cloudflare=${config.cloudflareIps ? "on" : "off"}`,
