@@ -11,6 +11,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeConfig, loadConfig } from "../src/server/config.ts";
+import { CentralLogin } from "../src/server/central-login.ts";
+import { ROBLOX_DISCOVERY_URL } from "../src/server/roblox-oauth.ts";
 import { canonicalReport } from "../src/server/central-report.ts";
 import { blessMessage } from "../src/server/devices.ts";
 import { fingerprintOf, FINGERPRINT_PATTERN } from "../src/server/instance-key.ts";
@@ -19,7 +21,8 @@ import { ADMIN, API, T0, asJson, bearer, harness, json, type Harness } from "./h
 const BROKER = "https://broker.test";
 const PUBLIC = "https://backend.example.com";
 const ROBLOX_ISSUER = "https://roblox.test/oauth/";
-const ROBLOX_DISCOVERY = "https://roblox.test/oauth/.well-known/openid-configuration";
+// Roblox's real discovery URL (the default pin of an unpinned backend); the fake fetch below answers it, nothing leaves the process.
+const ROBLOX_DISCOVERY = ROBLOX_DISCOVERY_URL;
 const ROBLOX_JWKS = "https://roblox.test/oauth/v1/certs";
 const BROKER_CLIENT_ID = "8888000011112222";
 const OWNER = 1001;
@@ -850,6 +853,35 @@ describe("Sign in with typetorch.dev: settings and switches", () => {
 		} finally {
 			await same.h.close();
 		}
+	});
+
+	test("unpinned, the discovery URL is Roblox's own: a broker publishing another one can't choose the Roblox signing keys", async () => {
+		const evil = "https://evil.test/.well-known/openid-configuration";
+		const { h, fakes, c } = await own(ENV, (f) => (f.metadata = { ...f.metadata, roblox_discovery: evil }));
+		try {
+			const r = await c.login();
+			expect(r.location).toBe("/?login_error=failed");
+			expect(r.session).toBeUndefined();
+			expect(fakes.calls.token).toBe(0);
+			expect(h.logs.some((l) => l.includes("Roblox discovery URL (TYPETORCH_ROBLOX_BROKER_DISCOVERY) differs from the pinned one"))).toBe(true);
+		} finally {
+			await h.close();
+		}
+		// Straight on the class: a public broker is held to ROBLOX_DISCOVERY_URL; an explicit pin may name another (tests,
+		// a fake Roblox); a loopback broker (dash with its fake Roblox) may name its own without a pin.
+		const at = (issuer: string, discovery: string, pin?: string) =>
+			new CentralLogin({
+				issuer,
+				fingerprint: "f",
+				redirectUri: `${PUBLIC}/auth/typetorch/callback`,
+				...(pin ? { robloxDiscoveryUrl: pin } : {}),
+				fetch: (async () => new Response(JSON.stringify({ issuer, roblox_client_id: BROKER_CLIENT_ID, roblox_discovery: discovery }))) as unknown as typeof fetch,
+			}).robloxSettings();
+		await expect(at(BROKER, evil)).rejects.toThrow(/differs from the pin/);
+		expect((await at(BROKER, ROBLOX_DISCOVERY_URL)).discoveryUrl).toBe(ROBLOX_DISCOVERY_URL);
+		expect((await at(BROKER, evil, evil)).discoveryUrl).toBe(evil);
+		await expect(at(BROKER, ROBLOX_DISCOVERY_URL, evil)).rejects.toThrow(/differs from the pin/);
+		expect((await at("http://127.0.0.1:8788", "http://127.0.0.1:8790/oauth/.well-known/openid-configuration")).discoveryUrl).toBe("http://127.0.0.1:8790/oauth/.well-known/openid-configuration");
 	});
 
 	test("login metadata that can't be fetched fails closed, backs off, and recovers; other sign-ins are untouched", async () => {
