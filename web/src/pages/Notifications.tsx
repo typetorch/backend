@@ -62,7 +62,7 @@ const STEP_COLUMNS: DataColumn<NotifyFunnelCounts>[] = [
 	rate("playedRate", "Played rate", (r) => r.playedRate, "played at least a minute / opened"),
 	count("returnedD1", "Returned D1", "players sent to on a day who played the next day"),
 	count("assisted", "Assisted", "never opened it, came back within 24 h"),
-	{ ...count("tests", "Tests"), defaultHidden: true },
+	count("tests", "Test sends", "real sends from Send a test: they reach Roblox but stay out of Sent and the rates"),
 	{ ...count("players", "Players"), defaultHidden: true },
 ];
 
@@ -80,12 +80,12 @@ function FunnelSection({ data }: { data: NotifyFunnelResult }) {
 	return (
 		<>
 			<div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-				<Metric label="Sent" value={fmtInt(t.sent)} sub={`${fmtInt(t.planned)} planned, ${fmtInt(t.wants)} wanted`} />
+				<Metric label="Sent" value={fmtInt(t.sent)} sub={`${fmtInt(t.planned)} planned, ${fmtInt(t.wants)} wanted${t.tests ? `, +${fmtInt(t.tests)} test ${t.tests === 1 ? "send" : "sends"} apart` : ""}`} />
 				<Metric label="Open rate" value={t.sent ? fmtPct(t.openRate) : "–"} sub={`${fmtInt(t.opened)} opened`} />
 				<Metric label="Played 1 min+" value={t.opened ? fmtPct(t.playedRate) : "–"} sub={`${fmtInt(t.played)} of the opened`} />
 				<Metric label="Returned D1" value={fmtInt(t.returnedD1)} sub={t.players ? `${fmtPct(t.returnRate)} of players sent to` : "no sends"} />
 				<Metric label="Assisted returns" value={fmtInt(t.assisted)} sub="came back within 24 h without opening" />
-				<Metric label="Dry run / tests" value={`${fmtInt(t.dry)} / ${fmtInt(t.tests)}`} sub="never counted as sent" tone="muted" />
+				<Metric label="Dry run / test sends" value={`${fmtInt(t.dry)} / ${fmtInt(t.tests)}`} sub="test sends reach Roblox; neither counts in Sent or the rates" tone="muted" />
 			</div>
 			<div className="grid gap-3 lg:grid-cols-2">
 				<Section title="Funnel by kind" description="Wants, planned, sent, opened, played at least a minute, back the next day. Rates per kind.">
