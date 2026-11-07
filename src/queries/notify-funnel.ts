@@ -6,7 +6,7 @@
  *
  * Plus "assisted returns": players sent to (real) who never opened that notification but came back (a session row)
  * within 24 h of the send. Days are the send's day (opens, plays and returns of a send on the last day are read up to
- * two days past the range). There is no impressions / clicks step: Roblox's notification analytics aren't imported.
+ * two days past the range).
  *
  * `players`, `returnedD1` and `assisted` are distinct players per kind and day; the per-kind and overall totals add
  * the days up (player-days). The send-based counts (planned, sent, opened, played) are distinct nids, so they add up

@@ -606,6 +606,126 @@ export interface EconomyResult {
 	sinks: EconomyFlow[];
 }
 
+// Experience notifications (plans/29) ------------------------------------------------------------------------------------
+
+/** One step set of the notify-funnel query. Rates are 0-1: open = opened / sent, played = played / opened, return = returnedD1 / players. */
+export interface NotifyFunnelCounts {
+	wants: number;
+	planned: number;
+	/** Real sends (not dry runs, not tests). */
+	sent: number;
+	dry: number;
+	tests: number;
+	players: number;
+	opened: number;
+	/** Opened and played at least a minute. */
+	played: number;
+	returnedD1: number;
+	/** Never opened, came back within 24 h. */
+	assisted: number;
+	openRate: number;
+	playedRate: number;
+	returnRate: number;
+}
+
+export interface NotifyFunnelResult {
+	from: string;
+	to: string;
+	kind: string | null;
+	kinds: (NotifyFunnelCounts & { kind: string })[];
+	days: (NotifyFunnelCounts & { date: string; kind: string })[];
+	daily: (NotifyFunnelCounts & { date: string })[];
+	totals: NotifyFunnelCounts;
+}
+
+export interface NotifyOptinCounts {
+	checks: number;
+	canPrompt: number;
+	errors: number;
+	shown: number;
+	closed: number;
+	shownRate: number;
+	avgShownSecs: number | null;
+}
+
+export interface NotifyOptinResult {
+	from: string;
+	to: string;
+	totals: NotifyOptinCounts & { subscribed: number; notSubscribed: number };
+	byWhere: (NotifyOptinCounts & { where: string })[];
+	days: (NotifyOptinCounts & { date: string; subscribed: number; notSubscribed: number })[];
+}
+
+export interface NotifyQueueHour {
+	hour: string;
+	planned: number;
+	sent: number;
+	dry: number;
+	failed: number;
+	rateLimited: number;
+	skipped: number;
+}
+
+export interface NotifyQueueFailure {
+	kind: string;
+	http: number | null;
+	code: string;
+	failures: number;
+	final: number;
+	sends: number;
+	lastAt: string | null;
+}
+
+export interface NotifyQueueResult {
+	from: string;
+	to: string;
+	kind: string | null;
+	totals: { planned: number; sent: number; dry: number; failed: number; final: number; rateLimited: number; skipped: number; last429At: string | null };
+	hours: NotifyQueueHour[];
+	planned: { kind: string; why: string; planned: number }[];
+	skipped: { kind: string; why: string; skipped: number }[];
+	failures: NotifyQueueFailure[];
+}
+
+/** GET /v1/notify/status (owners / admin only). Times are unix ms. */
+export interface NotifyStatus {
+	enabled: boolean;
+	dryRun: boolean;
+	rate: number;
+	clock: "rolling24" | "utc_day";
+	configured: { universe: boolean; apiKey: boolean };
+	keys: { current: boolean; previous: boolean; since: number | null };
+	/** `text`: the template's text (at most 99 characters, with {placeholders}) when known. */
+	kinds: { kind: string; enabled: boolean; template: boolean; pending: number; halted?: "bad_template"; text?: string }[];
+	halted: { kind: string; why: "bad_template"; at: number }[];
+	queue: { pending: number; due1h: number; sending: number };
+	bucket: { rate: number; tokens: number; last429At: number | null };
+	sends24h: { sent: number; failed: number; dry: number };
+	mutes: number;
+	/** Whether a notifications config has been pushed. */
+	config: boolean;
+}
+
+/** GET /v1/notify/config: the pushed `notifications` object, read-only here. */
+export interface NotifyConfigView {
+	config: Record<string, unknown> | null;
+	updatedAt: number | null;
+	by: string | null;
+}
+
+/** POST /v1/notify/test. */
+export interface NotifyTestInput {
+	userId: number;
+	kind: string;
+	params?: Record<string, string>;
+	data?: string;
+}
+
+export interface NotifyTestResult {
+	nid: string;
+	status: string;
+}
+
 export interface MonetizationDay {
 	date: string;
 	/** Robux players paid. */
@@ -741,6 +861,9 @@ export interface QueryResults {
 	monetization: MonetizationResult;
 	"monetization-players": MonetizationPlayers;
 	"monetization-purchases": MonetizationPurchases;
+	"notify-funnel": NotifyFunnelResult;
+	"notify-optin": NotifyOptinResult;
+	"notify-queue": NotifyQueueResult;
 }
 
 export type QueryName = keyof QueryResults;

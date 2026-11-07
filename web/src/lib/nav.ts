@@ -12,6 +12,7 @@
  */
 import {
 	Activity,
+	Bell,
 	Bug,
 	CalendarRange,
 	Coins,
@@ -74,6 +75,7 @@ export const NAV_GROUPS: NavGroup[] = [
 			{ label: "Funnels", path: "/funnels", icon: ListFilter },
 			{ label: "Flow", path: "/flow", icon: Workflow },
 			{ label: "Retention", path: "/retention", icon: CalendarRange },
+			{ label: "Notifications", path: "/notifications", icon: Bell },
 			{ label: "First session", path: "/first-session", icon: Compass },
 			{ label: "Economy", path: "/economy", icon: Coins },
 			{ label: "Monetization", path: "/monetization", icon: Wallet },
