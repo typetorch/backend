@@ -8,10 +8,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { AuthProvider } from "@/lib/auth";
-import type { AuthInfo, NotifyFunnelCounts, NotifyFunnelResult, NotifyOptinResult, NotifyQueueResult, NotifyStatus, SettingsView } from "@/lib/types";
+import type { AuthInfo, NotifyFunnelCounts, NotifyFunnelResult, NotifyOptinResult, NotifyQueueResult, NotifyStatus, NotifyUserView, SettingsView } from "@/lib/types";
 import Notifications, { parseParams } from "./Notifications";
+import { playerLookup } from "./notifications/PlayerPanel";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -99,7 +100,36 @@ const status: NotifyStatus = {
 	config: true,
 };
 
-function mount(auth: AuthInfo | null = null) {
+const T0 = Date.UTC(2026, 9, 3, 12);
+const userView: NotifyUserView = {
+	userId: 4242,
+	known: true,
+	pids: ["pid-aaaa"],
+	name: "Tester",
+	displayName: "Test Player",
+	otherMatches: [5151],
+	state: { optin: "subscribed", optinAt: T0, muteUntil: null, muted: false, online: false, presenceAt: T0, lastSeen: T0, leftAt: T0, unopened: 1, backoffAt: null, cappedUntil: null, nextCheck: null, busy: null },
+	sends: [
+		{ nid: "nid-1", kind: "gift_new", status: "sent", test: false, plannedAt: T0, sentAt: T0 + 1000, http: 200, code: null, try: 1, openedAt: T0 + 60_000, playedSecs: 95, category: null },
+		{ nid: "nid-2", kind: "streak", status: "failed", test: true, plannedAt: T0, sentAt: null, http: 400, code: "FAILED_PRECONDITION", try: 2, openedAt: null, playedSecs: null, category: null },
+	],
+	intents: [{ kind: "streak", key: "day-3", status: "pending", at: T0 + 3_600_000, until: null, updated: T0, planned: false, params: { day: "3" } }],
+	events: {
+		from: "2025-09-01T00:00:00.000Z",
+		to: "2026-10-05T00:00:00.000Z",
+		more: false,
+		rows: [
+			{ at: "2026-10-03T11:00:00.000Z", t: T0 - 3_600_000, name: "optin_check", pid: "pid-aaaa", where: "streak_2", secs: null, err: "HTTP 500", can: "true", state: null, nid: null, kind: null, why: null, age: null },
+			{ at: "2026-10-03T11:00:05.000Z", t: T0 - 3_595_000, name: "optin_shown", pid: "pid-aaaa", where: "streak_2", secs: null, err: null, can: null, state: null, nid: null, kind: null, why: null, age: null },
+			{ at: "2026-10-03T11:00:12.000Z", t: T0 - 3_588_000, name: "optin_closed", pid: "pid-aaaa", where: "streak_2", secs: 7, err: null, can: null, state: null, nid: null, kind: null, why: null, age: null },
+			{ at: "2026-10-03T12:00:01.000Z", t: T0 + 1000, name: "optin_inferred", pid: "pid-aaaa", where: null, secs: null, err: null, can: null, state: "subscribed", nid: "nid-1", kind: "gift_new", why: null, age: null },
+			{ at: "2026-10-03T12:01:00.000Z", t: T0 + 60_000, name: "open", pid: "pid-aaaa", where: null, secs: null, err: null, can: null, state: null, nid: "nid-1", kind: "gift_new", why: null, age: 59 },
+		],
+	},
+	eventsError: "the events are busy",
+};
+
+function mount(auth: AuthInfo | null = null, opts: { status?: NotifyStatus; url?: string } = {}) {
 	const queries: [string, Record<string, unknown>][] = [];
 	vi.spyOn(api, "query").mockImplementation((async (name: string, _filters: unknown, options: Record<string, unknown> = {}) => {
 		queries.push([name, options]);
@@ -108,7 +138,11 @@ function mount(auth: AuthInfo | null = null) {
 		if (name === "notify-queue") return queue;
 		throw new Error(`unexpected query ${name}`);
 	}) as typeof api.query);
-	const statusSpy = vi.spyOn(api, "notifyStatus").mockResolvedValue(status);
+	const statusSpy = vi.spyOn(api, "notifyStatus").mockResolvedValue(opts.status ?? status);
+	const user = vi.spyOn(api, "notifyUser").mockImplementation(async (lookup) => {
+		if ("name" in lookup) throw new ApiError(404, "no player with that name in the name cache", "/v1/notify/user");
+		return userView;
+	});
 	const save = vi.spyOn(api, "saveSettings").mockResolvedValue({ settings: [], audit: [] } as unknown as SettingsView);
 	const test = vi.spyOn(api, "notifyTest").mockResolvedValue({ nid: "abc0123xyz", status: "sent" });
 	const config = vi.spyOn(api, "notifyConfig").mockResolvedValue({ config: { dailyCap: 1, kinds: { gift_new: { template: "m-1" } } }, updatedAt: Date.now() - 60_000, by: "owner" });
@@ -116,13 +150,13 @@ function mount(auth: AuthInfo | null = null) {
 	render(
 		<QueryClientProvider client={client}>
 			<AuthProvider value={auth}>
-				<MemoryRouter initialEntries={["/notifications"]}>
+				<MemoryRouter initialEntries={[opts.url ?? "/notifications"]}>
 					<Notifications />
 				</MemoryRouter>
 			</AuthProvider>
 		</QueryClientProvider>,
 	);
-	return { queries, statusSpy, save, test, config };
+	return { queries, statusSpy, save, test, config, user };
 }
 
 describe("Notifications page", () => {
@@ -154,6 +188,64 @@ describe("Notifications page", () => {
 		expect(
 			await screen.findByText("Kind streak stopped: its template (message id) does not exist on Roblox. Fix the template, push the config, then turn the kind back on."),
 		).toBeTruthy();
+	});
+
+	it("shows the auth halt as a red banner and stopped templates, and doesn't crash on a kind-less halt", async () => {
+		mount(null, {
+			status: {
+				...status,
+				halted: [{ why: "auth", at: 1_762_500_000_000 }, ...status.halted],
+				haltedAll: { why: "auth", at: 1_762_500_000_000 },
+				haltedTemplates: [{ template: "tmpl-gone", at: 1_762_500_000_000 }],
+				outbox: 12,
+				rowsDropped: 0,
+				presenceStaleHours: 6,
+			},
+		});
+		const text = await screen.findByText(
+			"Notifications stopped: Roblox refused the Open Cloud key (401 / 403). Check OPENCLOUD_NOTIFY_KEY's scope (user-notifications) and universe, then turn notifications back on.",
+		);
+		expect(text.closest("[role=alert]")?.className).toMatch(/destructive/);
+		expect(screen.getByText("Templates stopped")).toBeTruthy();
+		expect(screen.getByText("tmpl-gone")).toBeTruthy();
+		expect(screen.getByText(/Kind streak stopped: its template/)).toBeTruthy();
+		expect(screen.queryByText(/Kind undefined/)).toBeNull();
+		expect(screen.getByText("12 rows waiting")).toBeTruthy();
+	});
+
+	it("finds a player by UserId and shows consent, sends and intents", async () => {
+		const { user } = mount();
+		const form = await screen.findByRole("search", { name: "Find a player" });
+		fireEvent.change(within(form).getByLabelText("Player"), { target: { value: "4242" } });
+		fireEvent.click(within(form).getByRole("button", { name: "Find" }));
+		await waitFor(() => expect(user).toHaveBeenCalledWith({ uid: "4242" }, expect.anything()));
+		const region = await screen.findByRole("region", { name: "Player notifications" });
+		expect(within(region).getByText("Test Player")).toBeTruthy();
+		expect(within(region).getByText("pid-aaaa")).toBeTruthy();
+		const consent = within(region).getByRole("table", { name: "Prompt and consent rows" });
+		expect(within(consent).getByText("prompt check")).toBeTruthy();
+		expect(within(consent).getByText("prompt closed")).toBeTruthy();
+		expect(within(consent).getByText("HTTP 500")).toBeTruthy();
+		expect(within(consent).queryByText("opened")).toBeNull();
+		const sends = within(region).getByRole("table", { name: "Past notifications" });
+		expect(within(sends).getByText("gift_new")).toBeTruthy();
+		expect(within(sends).getByText("test")).toBeTruthy();
+		expect(within(sends).getByText("400 FAILED_PRECONDITION")).toBeTruthy();
+		expect(within(sends).getByText("95")).toBeTruthy();
+		const intents = within(region).getByRole("table", { name: "Intents" });
+		expect(within(intents).getByText("day-3")).toBeTruthy();
+		expect(within(region).getByText("Event rows unavailable: the events are busy")).toBeTruthy();
+		fireEvent.click(within(region).getByRole("button", { name: "5151" }));
+		await waitFor(() => expect(user).toHaveBeenCalledWith({ uid: "5151" }, expect.anything()));
+	});
+
+	it("opens the player from the URL and shows a not-found error", async () => {
+		const { user } = mount(null, { url: "/notifications?player=pid-aaaa&by=pid" });
+		expect(await screen.findByRole("region", { name: "Player notifications" })).toBeTruthy();
+		expect(user).toHaveBeenCalledWith({ pid: "pid-aaaa" }, expect.anything());
+		cleanup();
+		mount(null, { url: "/notifications?player=Nobody" });
+		expect(await screen.findByText("no player with that name in the name cache")).toBeTruthy();
 	});
 
 	it("switches go through the runtime settings", async () => {
@@ -200,6 +292,20 @@ describe("Notifications page", () => {
 		expect(screen.getByText("The live queue and the controls are for owners.")).toBeTruthy();
 		expect(statusSpy).not.toHaveBeenCalled();
 		expect(screen.queryByRole("form", { name: "Send a test" })).toBeNull();
+		expect(screen.queryByRole("search", { name: "Find a player" })).toBeNull();
+	});
+});
+
+describe("playerLookup", () => {
+	it("guesses UserId, pid or name, or takes the pick", () => {
+		expect(playerLookup(" 4242 ")).toEqual({ uid: "4242" });
+		expect(playerLookup("pid-aaaa")).toEqual({ pid: "pid-aaaa" });
+		expect(playerLookup("abcdefghijklmnopqrstuvwxyz")).toEqual({ pid: "abcdefghijklmnopqrstuvwxyz" });
+		expect(playerLookup("Tester")).toEqual({ name: "Tester" });
+		expect(playerLookup("Tester", "pid")).toEqual({ pid: "Tester" });
+		expect(playerLookup("abc", "uid")).toBeNull();
+		expect(playerLookup("a/b")).toBeNull();
+		expect(playerLookup("")).toBeNull();
 	});
 });
 

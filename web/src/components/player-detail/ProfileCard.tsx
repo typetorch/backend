@@ -4,11 +4,13 @@
  * says "not linked"; when Roblox doesn't answer it still shows the UserId.
  */
 import type { UseQueryResult } from "@tanstack/react-query";
-import { UserRound } from "lucide-react";
+import { Bell, UserRound } from "lucide-react";
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 import { UserIdLink } from "@/components/Identity";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { isReadOnly, useAuth } from "@/lib/auth";
 import { fmtInt, fmtMinutes, fmtTime } from "@/lib/format";
 import type { PlayerProfile, PlayerStatsResult } from "@/lib/types";
 
@@ -59,6 +61,8 @@ export function ProfileCard({
 	const uid = p?.linked ? p.uid : undefined;
 	const title = p?.displayName ?? p?.name ?? (uid !== undefined ? `UserId ${uid}` : "Player");
 	const t = stats?.totals;
+	// The player's notifications (consent, sends, intents) are an owner route: the read-only role doesn't get the link.
+	const owner = !isReadOnly(useAuth());
 	const value = (v: ReactNode) => (statsLoading ? <Skeleton className="mt-1 h-4 w-16" /> : v);
 	return (
 		<div className="space-y-4">
@@ -70,6 +74,12 @@ export function ProfileCard({
 						{lookupNote(profile)}
 					</div>
 					{p?.name ? <p className="text-sm text-muted-foreground">@{p.name}</p> : null}
+					{owner ? (
+						<Link to={`/notifications?player=${encodeURIComponent(pid)}&by=pid`} className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline">
+							<Bell className="size-3" />
+							Notifications
+						</Link>
+					) : null}
 					<p className="text-xs text-muted-foreground">Date range: {range}</p>
 				</div>
 			</div>

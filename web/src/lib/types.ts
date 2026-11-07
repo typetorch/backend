@@ -697,7 +697,18 @@ export interface NotifyStatus {
 	keys: { current: boolean; previous: boolean; since: number | null };
 	/** `text`: the template's text (at most 99 characters, with {placeholders}) when known. */
 	kinds: { kind: string; enabled: boolean; template: boolean; pending: number; halted?: "bad_template"; text?: string }[];
-	halted: { kind: string; why: "bad_template"; at: number }[];
+	/** Per-kind stops (a bad template), plus a kind-less `{ why: "auth" }` when Roblox refused the Open Cloud key (every send stopped). */
+	halted: NotifyHalt[];
+	/** Every send stopped: Roblox refused the Open Cloud key (401 / 403). Null while sending is allowed. */
+	haltedAll?: { why: "auth"; at: number } | null;
+	/** Game-supplied templates Roblox said don't exist. */
+	haltedTemplates?: { template: string; at: number }[];
+	/** Hours after which a player's presence counts as stale. */
+	presenceStaleHours?: number;
+	/** Rows waiting in the durable outbox (to the events). */
+	outbox?: number;
+	/** Rows the outbox dropped (full). */
+	rowsDropped?: number;
 	queue: { pending: number; due1h: number; sending: number };
 	bucket: { rate: number; tokens: number; last429At: number | null };
 	sends24h: { sent: number; failed: number; dry: number };
@@ -705,6 +716,84 @@ export interface NotifyStatus {
 	/** Whether a notifications config has been pushed. */
 	config: boolean;
 }
+
+export type NotifyHalt = { kind: string; why: "bad_template"; at: number } | { kind?: undefined; why: "auth"; at: number };
+
+/** GET /v1/notify/user?uid=|pid=|name= (owners): one player's notifications. Times are unix ms except `events.rows[].at` (ISO). */
+export interface NotifyUserState {
+	optin: "subscribed" | "not_subscribed" | null;
+	optinAt: number | null;
+	muteUntil: number | null;
+	muted: boolean;
+	online: boolean;
+	presenceAt: number | null;
+	lastSeen: number | null;
+	leftAt: number | null;
+	unopened: number;
+	backoffAt: number | null;
+	cappedUntil: number | null;
+	nextCheck: number | null;
+	busy: string | null;
+}
+
+export interface NotifyUserSend {
+	nid: string;
+	kind: string;
+	status: "planned" | "sending" | "sent" | "dry" | "failed" | "cancelled";
+	test: boolean;
+	plannedAt: number | null;
+	sentAt: number | null;
+	http: number | null;
+	code: string | null;
+	try: number;
+	openedAt: number | null;
+	playedSecs: number | null;
+	category: string | null;
+}
+
+export interface NotifyUserIntent {
+	kind: string;
+	key: string;
+	status: "pending" | "sent" | "dropped" | "expired" | "superseded" | "failed";
+	at: number | null;
+	until: number | null;
+	updated: number | null;
+	planned: boolean;
+	params: Record<string, string> | null;
+}
+
+export interface NotifyUserEvent {
+	at: string;
+	t: number;
+	name: "optin_check" | "optin_shown" | "optin_closed" | "optin_inferred" | "open" | "open_bad" | "played";
+	pid: string;
+	where: string | null;
+	secs: number | null;
+	err: string | null;
+	can: "true" | "false" | null;
+	state: string | null;
+	nid: string | null;
+	kind: string | null;
+	why: string | null;
+	age: number | null;
+}
+
+export interface NotifyUserView {
+	userId: number;
+	known: boolean;
+	pids: string[];
+	name: string | null;
+	displayName: string | null;
+	otherMatches?: number[];
+	state: NotifyUserState | null;
+	/** Newest first, at most 200. */
+	sends: NotifyUserSend[];
+	intents: NotifyUserIntent[];
+	events: null | { from: string; to: string; more: boolean; rows: NotifyUserEvent[] };
+	eventsError?: string;
+}
+
+export type NotifyUserLookup = { uid: string } | { pid: string } | { name: string };
 
 /** GET /v1/notify/config: the pushed `notifications` object, read-only here. */
 export interface NotifyConfigView {
