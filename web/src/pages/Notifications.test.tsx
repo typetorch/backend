@@ -219,6 +219,18 @@ describe("Notifications page", () => {
 		expect(screen.getByText("12 rows waiting")).toBeTruthy();
 	});
 
+	it("Find on the same player asks the server again (a refresh)", async () => {
+		const { user } = mount();
+		const form = await screen.findByRole("search", { name: "Find a player" });
+		fireEvent.change(within(form).getByLabelText("Player"), { target: { value: "4242" } });
+		fireEvent.click(within(form).getByRole("button", { name: "Find" }));
+		await screen.findByRole("region", { name: "Player notifications" });
+		const before = user.mock.calls.length;
+		fireEvent.click(within(form).getByRole("button", { name: "Find" }));
+		await waitFor(() => expect(user.mock.calls.length).toBeGreaterThan(before));
+		expect(user).toHaveBeenLastCalledWith({ uid: "4242" }, expect.anything());
+	});
+
 	it("finds a player by UserId and shows consent, sends and intents", async () => {
 		const { user } = mount();
 		const form = await screen.findByRole("search", { name: "Find a player" });
