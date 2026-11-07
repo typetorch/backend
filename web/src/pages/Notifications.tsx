@@ -87,12 +87,9 @@ function FunnelSection({ data }: { data: NotifyFunnelResult }) {
 				<Metric label="Assisted returns" value={fmtInt(t.assisted)} sub="came back within 24 h without opening" />
 				<Metric label="Dry run / test sends" value={`${fmtInt(t.dry)} / ${fmtInt(t.tests)}`} sub="test sends reach Roblox; neither counts in Sent or the rates" tone="muted" />
 			</div>
-			<div className="grid gap-4 xl:grid-cols-5">
-				<Section className="min-w-0 xl:col-span-3" title="Funnel by kind" description="Wants, planned, sent, opened, played at least a minute, back the next day. Rates per kind.">
-					<DataTable id="notify-kinds" label="Funnel by kind" columns={KIND_COLUMNS} data={data.kinds} rowId={(r) => r.kind} density="compact" maxHeight="22rem" />
-				</Section>
-				<Section className="min-w-0 xl:col-span-2" title="Sent, opened, played" description="Per day (UTC), by the day of the send.">
-					<ChartContainer config={funnelChart} className="aspect-auto h-56 w-full">
+			<Section title="Funnel" description="Wants, planned, sent, opened, played at least a minute, back the next day. Sends per day (UTC) by the day of the send; rates per kind.">
+				<div className="space-y-5">
+					<ChartContainer config={funnelChart} className="aspect-auto h-48 w-full">
 						<BarChart data={data.daily} margin={{ top: 4, right: 4, bottom: 0, left: -4 }} barCategoryGap={2}>
 							<CartesianGrid vertical={false} />
 							<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={tick} />
@@ -104,16 +101,36 @@ function FunnelSection({ data }: { data: NotifyFunnelResult }) {
 							<Bar dataKey="played" fill="var(--color-played)" radius={[3, 3, 0, 0]} maxBarSize={18} isAnimationActive={false} />
 						</BarChart>
 					</ChartContainer>
-				</Section>
-			</div>
-			<Section title="Funnel by kind and day" description="Each row is one kind on one day (UTC); opens, plays and returns belong to the day of the send.">
-				<DataTable id="notify-days" label="Funnel by kind and day" columns={DAY_COLUMNS} data={data.days} rowId={(r) => `${r.date}|${r.kind}`} density="compact" maxHeight="24rem" />
+					<div className="min-w-0 space-y-1.5">
+						<h3 className="text-sm font-medium">By kind</h3>
+						<DataTable id="notify-kinds" label="Funnel by kind" columns={KIND_COLUMNS} data={data.kinds} rowId={(r) => r.kind} density="compact" maxHeight="22rem" />
+					</div>
+					<div className="min-w-0 space-y-1.5">
+						<h3 className="text-sm font-medium">By kind and day</h3>
+						<DataTable id="notify-days" label="Funnel by kind and day" columns={DAY_COLUMNS} data={data.days} rowId={(r) => `${r.date}|${r.kind}`} density="compact" maxHeight="24rem" />
+					</div>
+				</div>
 			</Section>
 		</>
 	);
 }
 
 // Opt-in ------------------------------------------------------------------------------------------------------------------
+
+/** A row of small numbers in one bordered strip (instead of a card per number): wraps to 3 / 2 columns on narrow cards. */
+function StatStrip({ items }: { items: { label: string; value: string; sub?: string }[] }) {
+	return (
+		<dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-3 2xl:grid-cols-5">
+			{items.map((item) => (
+				<div key={item.label} className="space-y-0.5 bg-card px-3 py-2.5">
+					<dt className="text-xs font-medium text-muted-foreground">{item.label}</dt>
+					<dd className="text-xl font-semibold tracking-tight tabular-nums">{item.value}</dd>
+					{item.sub ? <dd className="text-xs text-muted-foreground">{item.sub}</dd> : null}
+				</div>
+			))}
+		</dl>
+	);
+}
 
 type WhereRow = NotifyOptinResult["byWhere"][number];
 const WHERE_COLUMNS: DataColumn<WhereRow>[] = [
@@ -132,13 +149,15 @@ function OptinSection({ data }: { data: NotifyOptinResult }) {
 	return (
 		<Section className="min-w-0" title="Opt-in prompt" description="The game's prompt: checked (can it show?), shown, closed. Roblox doesn't say what the player picked; the backend infers it from its sends.">
 			<div className="space-y-3">
-				<div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-					<Metric label="Checks" value={fmtInt(t.checks)} sub={`${fmtInt(t.canPrompt)} could prompt, ${fmtInt(t.errors)} errors`} />
-					<Metric label="Shown" value={fmtInt(t.shown)} sub={t.checks ? `${fmtPct(t.shownRate)} of checks` : undefined} />
-					<Metric label="Closed" value={fmtInt(t.closed)} sub={t.avgShownSecs === null ? undefined : `up ${t.avgShownSecs} s on average`} />
-					<Metric label="Subscribed" value={fmtInt(t.subscribed)} sub="inferred from accepted sends" />
-					<Metric label="Not subscribed" value={fmtInt(t.notSubscribed)} sub="inferred from refused sends" />
-				</div>
+				<StatStrip
+					items={[
+						{ label: "Checks", value: fmtInt(t.checks), sub: `${fmtInt(t.canPrompt)} could prompt, ${fmtInt(t.errors)} errors` },
+						{ label: "Shown", value: fmtInt(t.shown), sub: t.checks ? `${fmtPct(t.shownRate)} of checks` : undefined },
+						{ label: "Closed", value: fmtInt(t.closed), sub: t.avgShownSecs === null ? undefined : `up ${t.avgShownSecs} s on average` },
+						{ label: "Subscribed", value: fmtInt(t.subscribed), sub: "from accepted sends" },
+						{ label: "Not subscribed", value: fmtInt(t.notSubscribed), sub: "from refused sends" },
+					]}
+				/>
 				{data.byWhere.length ? (
 					<DataTable id="notify-optin-where" label="Opt-in by where" columns={WHERE_COLUMNS} data={data.byWhere} rowId={(r) => r.where} density="compact" maxHeight="18rem" />
 				) : (
@@ -418,7 +437,7 @@ function TestSend({ kinds }: { kinds: { kind: string; text?: string }[] }) {
 					<Send />
 					Send a test
 				</Button>
-				<span className="text-xs text-muted-foreground">Goes out now, outside the caps, marked test. In dry run it is only logged.</span>
+				
 			</div>
 			{problem ? <p className="text-sm text-destructive">{problem}</p> : null}
 			{send.isError ? <p className="text-sm text-destructive">{send.error.message}</p> : null}
@@ -567,10 +586,6 @@ function Controls({ status }: { status: NotifyStatus }) {
 						<EmptyState>No kinds yet: push the game's notifications config with typetorch notify push.</EmptyState>
 					)}
 				</div>
-				<div className="space-y-2 rounded-lg border p-3">
-					<h3 className="text-sm font-medium">Send a test</h3>
-					<TestSend kinds={status.kinds.map((k) => ({ kind: k.kind, text: k.text }))} />
-				</div>
 				<ConfigView />
 			</div>
 		</Section>
@@ -702,7 +717,14 @@ export default function Notifications() {
 					) : live ? (
 						<Controls status={live} />
 					) : null}
-					<PlayerPanel />
+					<div className="min-w-0 space-y-4">
+						<PlayerPanel />
+						{live ? (
+							<Section title="Send a test" description="Goes out now, outside the caps, marked test (counted under Test sends, not Sent). In dry run it is only logged.">
+								<TestSend kinds={live.kinds.map((k) => ({ kind: k.kind, text: k.text }))} />
+							</Section>
+						) : null}
+					</div>
 				</div>
 			)}
 		</div>
