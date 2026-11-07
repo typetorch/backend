@@ -79,7 +79,7 @@ function FunnelSection({ data }: { data: NotifyFunnelResult }) {
 	const t = data.totals;
 	return (
 		<>
-			<div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+			<div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
 				<Metric label="Sent" value={fmtInt(t.sent)} sub={`${fmtInt(t.planned)} planned, ${fmtInt(t.wants)} wanted${t.tests ? `, +${fmtInt(t.tests)} test ${t.tests === 1 ? "send" : "sends"} apart` : ""}`} />
 				<Metric label="Open rate" value={t.sent ? fmtPct(t.openRate) : "–"} sub={`${fmtInt(t.opened)} opened`} />
 				<Metric label="Played 1 min+" value={t.opened ? fmtPct(t.playedRate) : "–"} sub={`${fmtInt(t.played)} of the opened`} />
@@ -87,11 +87,11 @@ function FunnelSection({ data }: { data: NotifyFunnelResult }) {
 				<Metric label="Assisted returns" value={fmtInt(t.assisted)} sub="came back within 24 h without opening" />
 				<Metric label="Dry run / test sends" value={`${fmtInt(t.dry)} / ${fmtInt(t.tests)}`} sub="test sends reach Roblox; neither counts in Sent or the rates" tone="muted" />
 			</div>
-			<div className="grid gap-3 lg:grid-cols-2">
-				<Section title="Funnel by kind" description="Wants, planned, sent, opened, played at least a minute, back the next day. Rates per kind.">
+			<div className="grid gap-4 xl:grid-cols-5">
+				<Section className="min-w-0 xl:col-span-3" title="Funnel by kind" description="Wants, planned, sent, opened, played at least a minute, back the next day. Rates per kind.">
 					<DataTable id="notify-kinds" label="Funnel by kind" columns={KIND_COLUMNS} data={data.kinds} rowId={(r) => r.kind} density="compact" maxHeight="22rem" />
 				</Section>
-				<Section title="Sent, opened, played" description="Per day (UTC), by the day of the send.">
+				<Section className="min-w-0 xl:col-span-2" title="Sent, opened, played" description="Per day (UTC), by the day of the send.">
 					<ChartContainer config={funnelChart} className="aspect-auto h-56 w-full">
 						<BarChart data={data.daily} margin={{ top: 4, right: 4, bottom: 0, left: -4 }} barCategoryGap={2}>
 							<CartesianGrid vertical={false} />
@@ -130,9 +130,9 @@ const WHERE_COLUMNS: DataColumn<WhereRow>[] = [
 function OptinSection({ data }: { data: NotifyOptinResult }) {
 	const t = data.totals;
 	return (
-		<Section title="Opt-in prompt" description="The game's prompt: checked (can it show?), shown, closed. Roblox doesn't say what the player picked; the backend infers it from its sends.">
+		<Section className="min-w-0" title="Opt-in prompt" description="The game's prompt: checked (can it show?), shown, closed. Roblox doesn't say what the player picked; the backend infers it from its sends.">
 			<div className="space-y-3">
-				<div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+				<div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
 					<Metric label="Checks" value={fmtInt(t.checks)} sub={`${fmtInt(t.canPrompt)} could prompt, ${fmtInt(t.errors)} errors`} />
 					<Metric label="Shown" value={fmtInt(t.shown)} sub={t.checks ? `${fmtPct(t.shownRate)} of checks` : undefined} />
 					<Metric label="Closed" value={fmtInt(t.closed)} sub={t.avgShownSecs === null ? undefined : `up ${t.avgShownSecs} s on average`} />
@@ -261,6 +261,7 @@ function QueueSection({ data, status }: { data: NotifyQueueResult; status: Notif
 function FailuresSection({ data, status }: { data: NotifyQueueResult; status: NotifyStatus | undefined }) {
 	return (
 		<Section
+			className="min-w-0"
 			title="Failures"
 			description="Sends Roblox refused, by HTTP status and code. A player who isn't opted in is muted for 7 days."
 			actions={status ? <Badge variant="outline">{plural(status.mutes, "muted player")}</Badge> : undefined}
@@ -476,9 +477,9 @@ function Controls({ status }: { status: NotifyStatus }) {
 	const rateOk = Number.isFinite(rateNumber) && rateNumber >= 1 && rateNumber <= 4000;
 	const busy = save.isPending;
 	return (
-		<Section title="Controls" description="Runtime settings (audited, no redeploy). Dry run plans and logs every send without posting it to Roblox.">
+		<Section className="min-w-0" title="Controls" description="Runtime settings (audited, no redeploy). Dry run plans and logs every send without posting it to Roblox.">
 			<div className="space-y-4">
-				<div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+				<div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
 					<div className="space-y-1">
 						<Label>Sending</Label>
 						<OnOff label="Sending" value={status.enabled} disabled={busy} onChange={(v) => set("notify.enabled", v)} on="On" off="Paused" />
@@ -566,7 +567,7 @@ function Controls({ status }: { status: NotifyStatus }) {
 						<EmptyState>No kinds yet: push the game's notifications config with typetorch notify push.</EmptyState>
 					)}
 				</div>
-				<div className="space-y-1">
+				<div className="space-y-2 rounded-lg border p-3">
 					<h3 className="text-sm font-medium">Send a test</h3>
 					<TestSend kinds={status.kinds.map((k) => ({ kind: k.kind, text: k.text }))} />
 				</div>
@@ -662,7 +663,7 @@ export default function Notifications() {
 	const forbidden = status.error instanceof ApiError && (status.error.status === 403 || status.error.status === 401);
 	const kinds = [...new Set([...(live?.kinds.map((k) => k.kind) ?? []), ...(funnel.data?.kinds.map((k) => k.kind).filter(Boolean) ?? [])])].sort();
 	return (
-		<div className="space-y-4">
+		<div className="mx-auto w-full max-w-[1480px] space-y-6">
 			<PageHeader
 				title="Notifications"
 				description={`Experience notifications, ${describeRange(state)}: what was sent, opened and played, the opt-in prompt and the sender.`}
@@ -679,27 +680,31 @@ export default function Notifications() {
 			<QueryState query={funnel} loadingRows={6} isEmpty={(d) => d.kinds.length === 0} empty="No notification rows in this range. The game asks for notifications with TypeTorch.notifications().want(...).">
 				{(data) => <FunnelSection data={data} />}
 			</QueryState>
-			<QueryState query={optin} loadingRows={3}>
-				{(data) => <OptinSection data={data} />}
-			</QueryState>
+			<div className="grid items-start gap-4 xl:grid-cols-2">
+				<QueryState query={optin} loadingRows={3}>
+					{(data) => <OptinSection data={data} />}
+				</QueryState>
+				<QueryState query={queue} loadingRows={3}>
+					{(data) => <FailuresSection data={data} status={live} />}
+				</QueryState>
+			</div>
 			<QueryState query={queue} loadingRows={4}>
-				{(data) => (
-					<>
-						<QueueSection data={data} status={live} />
-						<FailuresSection data={data} status={live} />
-					</>
-				)}
+				{(data) => <QueueSection data={data} status={live} />}
 			</QueryState>
 			{readOnly || forbidden ? (
 				<p className="text-sm text-muted-foreground">The live queue and the controls are for owners.</p>
-			) : status.isError ? (
-				<Section title="Controls">
-					<QueryState query={status}>{() => null}</QueryState>
-				</Section>
-			) : live ? (
-				<Controls status={live} />
-			) : null}
-			{readOnly || forbidden ? null : <PlayerPanel />}
+			) : (
+				<div className="grid items-start gap-4 xl:grid-cols-2">
+					{status.isError ? (
+						<Section title="Controls">
+							<QueryState query={status}>{() => null}</QueryState>
+						</Section>
+					) : live ? (
+						<Controls status={live} />
+					) : null}
+					<PlayerPanel />
+				</div>
+			)}
 		</div>
 	);
 }
