@@ -224,6 +224,31 @@ describe("Players page: the player detail container", () => {
 		expect(viewButton(region, "Timeline").getAttribute("aria-pressed")).toBe("true");
 	});
 
+	it("the Timeline shows each join's raw join data (jd), a truncated badge, and nothing without one", async () => {
+		const at = (iso: string) => ({ time: iso, t: Date.parse(iso) });
+		const withJd: TimelineResult = {
+			...timeline,
+			sessions: ["sid-one", "sid-two", "sid-three"].map((sid, i) => ({ ...timeline.sessions[0], sid, start: `2026-10-0${3 + i}T10:00:00.000Z`, end: `2026-10-0${3 + i}T10:10:00.000Z`, firstSession: i === 0 })),
+			events: [
+				{ ...timeline.events[0], ...at("2026-10-03T10:00:00.000Z"), sid: "sid-one", props: { from: "notification", jd: { keys: ["LaunchData"], LaunchData: "tt1n.abc", LaunchDataLen: 8 } } },
+				{ ...timeline.events[0], ...at("2026-10-04T10:00:00.000Z"), sid: "sid-two", props: { from: "direct", jd: { keys: ["TeleportData"], TeleportData: { bytes: 9000, type: "table" }, trunc: true } } },
+				{ ...timeline.events[0], ...at("2026-10-05T10:00:00.000Z"), sid: "sid-three", props: { from: "direct" } },
+			],
+		};
+		const real = vi.mocked(api.query).getMockImplementation();
+		vi.mocked(api.query).mockImplementation((async (name: string, filters: unknown, options: unknown) => (name === "timeline" ? withJd : real?.(name as never, filters as never, options as never))) as typeof api.query);
+		mount(`?pid=${ALPHA}&view=timeline`);
+		const region = await detail();
+		const one = await within(region).findByRole("region", { name: "Session 2026-10-03 10:00:00" });
+		const block = within(one).getByText(/^Join data/).closest("details") as HTMLDetailsElement;
+		expect(block.querySelector("pre")?.textContent).toContain('"LaunchData": "tt1n.abc"');
+		expect(within(one).queryByText("truncated")).toBeNull();
+		const two = within(region).getByRole("region", { name: "Session 2026-10-04 10:00:00" });
+		expect(within(two).getByText("truncated")).toBeTruthy();
+		const three = within(region).getByRole("region", { name: "Session 2026-10-05 10:00:00" });
+		expect(within(three).queryByText(/^Join data/)).toBeNull();
+	});
+
 	it("a session row opens the Timeline view on that session", async () => {
 		mount(`?pid=${ALPHA}&view=sessions`);
 		const region = await detail();

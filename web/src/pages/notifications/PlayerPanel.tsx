@@ -13,6 +13,7 @@ import { useSearchParams } from "react-router";
 import { EmptyState, KeyValue, LoadingBlock, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { UserIdLink } from "@/components/Identity";
+import { JoinData } from "@/components/player-detail/JoinData";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -182,6 +183,34 @@ function Consent({ view }: { view: NotifyUserView }) {
 	);
 }
 
+/** Plans/30: next to each opened send, the opening session's raw join data (the join row carrying the send's nid). */
+function Opens({ view }: { view: NotifyUserView }) {
+	const byNid = new Map((view.events?.opens ?? []).map((o) => [o.nid, o]));
+	const opened = view.sends.filter((s) => s.openedAt !== null && byNid.has(s.nid));
+	if (!opened.length) return null;
+	return (
+		<div className="space-y-1" role="region" aria-label="Opening sessions">
+			<h3 className="text-sm font-medium">Opening sessions ({fmtInt(opened.length)})</h3>
+			<p className="text-xs text-muted-foreground">What Roblox handed the session each opened notification started (its join row's raw join data).</p>
+			<ul className="space-y-2">
+				{opened.map((s) => {
+					const o = byNid.get(s.nid);
+					return (
+						<li key={s.nid} className="space-y-1">
+							<div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
+								<span className="font-medium">{s.kind}</span>
+								<span className="font-mono text-muted-foreground">{s.nid}</span>
+								<span className="text-muted-foreground">opened {when(s.openedAt)}</span>
+							</div>
+							{o?.jd ? <JoinData jd={o.jd} label="Join data" /> : <p className="text-xs text-muted-foreground">No join data stored for that session.</p>}
+						</li>
+					);
+				})}
+			</ul>
+		</div>
+	);
+}
+
 export function PlayerView({ view, onPick }: { view: NotifyUserView; onPick(uid: number): void }) {
 	const pending = view.intents.filter((i) => i.status === "pending").length;
 	return (
@@ -217,6 +246,7 @@ export function PlayerView({ view, onPick }: { view: NotifyUserView; onPick(uid:
 					<EmptyState>Nothing planned or sent to this player.</EmptyState>
 				)}
 			</div>
+			<Opens view={view} />
 			<div className="space-y-1">
 				<h3 className="text-sm font-medium">Intents ({fmtInt(pending)} pending)</h3>
 				{view.intents.length ? (

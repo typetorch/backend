@@ -5,6 +5,7 @@
 import { Workflow } from "lucide-react";
 import { useRef } from "react";
 import { EventTable } from "@/components/EventTable";
+import { JoinData, joinDataOf } from "@/components/player-detail/JoinData";
 import { FacetToggle, isFacet, LazyGraph, MomentsToggle, PathStrip, SparseNote } from "@/components/LazyGraph";
 import { MermaidButton } from "@/components/MermaidButton";
 import { EmptyState, QueryState } from "@/components/common";
@@ -40,6 +41,11 @@ function Sessions({ data, onGraph }: { data: TimelineResult; onGraph(sid: string
 							View graph
 						</Button>
 					</div>
+					{(bySession.get(s.sid) ?? [])
+						.filter((e) => e.kind === "session" && e.name === "join" && joinDataOf(e.props))
+						.map((e) => (
+							<JoinData key={`${e.t}|${e.name}`} jd={joinDataOf(e.props)} label={`Join data (${fmtTime(e.time)})`} />
+						))}
 					{bySession.get(s.sid)?.length ? (
 						// One saved view for every session's table, kept off the URL (they would overwrite each other there).
 						<EventTable id="player-events" label={`Events of session ${shortId(s.sid)}`} events={bySession.get(s.sid) ?? []} urlSync={false} maxHeight="24rem" />

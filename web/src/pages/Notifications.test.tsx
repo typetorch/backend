@@ -257,6 +257,23 @@ describe("Notifications page", () => {
 		await waitFor(() => expect(user).toHaveBeenCalledWith({ uid: "5151" }, expect.anything()));
 	});
 
+	it("shows the opening session's join data next to an opened send", async () => {
+		const { user } = mount();
+		user.mockResolvedValue({
+			...userView,
+			events: { ...(userView.events as NonNullable<NotifyUserView["events"]>), opens: [{ nid: "nid-1", at: "2026-10-03T12:01:00.000Z", t: T0 + 60_000, sid: "sid-x", jd: { keys: ["LaunchData"], LaunchData: "tt1n.nid-1", trunc: true } }] },
+		});
+		const form = await screen.findByRole("search", { name: "Find a player" });
+		fireEvent.change(within(form).getByLabelText("Player"), { target: { value: "4242" } });
+		fireEvent.click(within(form).getByRole("button", { name: "Find" }));
+		const opens = await screen.findByRole("region", { name: "Opening sessions" });
+		expect(within(opens).getByText("nid-1")).toBeTruthy();
+		expect(within(opens).getByText("truncated")).toBeTruthy();
+		expect((within(opens).getByText("Join data").closest("details") as HTMLElement).querySelector("pre")?.textContent).toContain("tt1n.nid-1");
+		// The unopened send has no block.
+		expect(within(opens).queryByText("nid-2")).toBeNull();
+	});
+
 	it("opens the player from the URL and shows a not-found error", async () => {
 		const { user } = mount(null, { url: "/notifications?player=pid-aaaa&by=pid" });
 		expect(await screen.findByRole("region", { name: "Player notifications" })).toBeTruthy();
