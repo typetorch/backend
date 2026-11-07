@@ -15,8 +15,15 @@ export const profileUrl = (uid: number) => `https://www.roblox.com/users/${uid}/
 /** "UserId 123" linking to the Roblox profile (opens a new tab); with the `pid`, hovering it shows who it is. */
 export function UserIdLink({ uid, pid, className }: { uid: number; pid?: string; className?: string }) {
 	const link = (
-		<a href={profileUrl(uid)} target="_blank" rel="noreferrer noopener" className={className ?? "inline-flex items-center gap-1 underline-offset-2 hover:underline"} title={pid ? undefined : "Roblox profile"}>
-			UserId {uid}
+		<a
+			href={profileUrl(uid)}
+			target="_blank"
+			rel="noreferrer noopener"
+			aria-label={`UserId ${uid} (Roblox profile)`}
+			className={className ?? "inline-flex items-center gap-1 underline-offset-2 hover:underline"}
+			title={pid ? undefined : "Roblox profile"}
+		>
+			<span className="tabular-nums">{uid}</span>
 			<ExternalLink className="size-3" />
 		</a>
 	);
