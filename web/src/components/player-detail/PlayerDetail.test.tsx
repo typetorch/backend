@@ -4,7 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
-import type { GraphData, PlayerErrors, PlayerProfile, PlayerStatsResult, PlayersResult, TimelineResult } from "@/lib/types";
+import { AuthProvider } from "@/lib/auth";
+import type { AuthInfo, GraphData, PlayerErrors, PlayerProfile, PlayerStatsResult, PlayersResult, TimelineResult } from "@/lib/types";
 import Players from "@/pages/Players";
 import { bucketLabel } from "./SeriesView";
 
@@ -120,14 +121,16 @@ function Where() {
 	return null;
 }
 
-function mount(search = "") {
+function mount(search = "", auth: AuthInfo | null = null) {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	return render(
 		<QueryClientProvider client={client}>
-			<MemoryRouter initialEntries={[`/players${search}`]}>
-				<Players />
-				<Where />
-			</MemoryRouter>
+			<AuthProvider value={auth}>
+				<MemoryRouter initialEntries={[`/players${search}`]}>
+					<Players />
+					<Where />
+				</MemoryRouter>
+			</AuthProvider>
 		</QueryClientProvider>,
 	);
 }
@@ -153,6 +156,15 @@ describe("Players page: the player detail container", () => {
 		expect(within(region).getByText("2.1 min")).toBeTruthy();
 		expect(within(region).getByText("2026-10-03 10:00:00")).toBeTruthy();
 		expect(api.playerProfile).toHaveBeenCalledWith(ALPHA, expect.anything());
+	});
+
+	it("links owners to the player's notifications; the read-only role gets no link", async () => {
+		mount(`?pid=${ALPHA}`);
+		const region = await detail();
+		expect(within(region).getByRole("link", { name: "Notifications" }).getAttribute("href")).toBe(`/notifications?player=${ALPHA}&by=pid`);
+		cleanup();
+		mount(`?pid=${ALPHA}`, { ok: true, role: "web", via: "cookie" });
+		expect(within(await detail()).queryByRole("link", { name: "Notifications" })).toBeNull();
 	});
 
 	it("switches views with the buttons: Spending, Playtime, Sessions, Timeline (the timeline loads only there)", async () => {

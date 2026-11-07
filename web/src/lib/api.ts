@@ -31,6 +31,8 @@ import type {
 	NotifyStatus,
 	NotifyTestInput,
 	NotifyTestResult,
+	NotifyUserLookup,
+	NotifyUserView,
 	Health,
 	Identity,
 	PlaceCardInfo,
@@ -260,6 +262,8 @@ export function createApi(options: ApiOptions = {}) {
 		notifyConfig: (signal?: AbortSignal) => get<NotifyConfigView>("/v1/notify/config", signal),
 		/** One test send now to a UserId, outside the caps and marked `test`. */
 		notifyTest: (input: NotifyTestInput, signal?: AbortSignal) => post<NotifyTestResult>("/v1/notify/test", input, signal),
+		/** One player's notifications (owners): consent, sends, intents and their notify rows, by UserId, pid or a cached name. */
+		notifyUser: (lookup: NotifyUserLookup, signal?: AbortSignal) => get<NotifyUserView>(`/v1/notify/user${qs(lookup)}`, signal),
 		/** The backend alert rules' state on the last run (the rules themselves are the backendAlerts setting). */
 		alertRules: (signal?: AbortSignal) => get<AlertRulesStatus>("/v1/admin/alert-rules", signal),
 		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */

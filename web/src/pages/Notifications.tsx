@@ -8,6 +8,7 @@
  *   - Queue: live from GET /v1/notify/status (owners) and the sender's history (`notify-queue`): per hour, plans, skips.
  *   - Failures by HTTP status and code, and mutes.
  *   - Controls (owners): the runtime settings `notify.*` through PATCH /v1/admin/settings, a test send, the pushed config.
+ *   - Player (owners): one player's consent, sends and intents from GET /v1/notify/user (`?player=`, `?by=`).
  *
  * The read-only `web` role sees the analytics only: the status, config and controls are owner routes (403 for viewers).
  * Only the time range of the filter bar applies (backend rows have no device, artifact or place).
@@ -32,7 +33,8 @@ import { isReadOnly, useAuth } from "@/lib/auth";
 import { describeRange } from "@/lib/filters";
 import { fmtAgo, fmtInt, fmtPct, fmtTime, plural } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
-import type { NotifyFunnelCounts, NotifyFunnelResult, NotifyOptinResult, NotifyQueueFailure, NotifyQueueResult, NotifyStatus } from "@/lib/types";
+import type { NotifyFunnelCounts, NotifyFunnelResult, NotifyHalt, NotifyOptinResult, NotifyQueueFailure, NotifyQueueResult, NotifyStatus } from "@/lib/types";
+import { PlayerPanel } from "./notifications/PlayerPanel";
 
 export const NOTIFY_STATUS_KEY = ["notify-status"] as const;
 const PICKED = "data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
@@ -179,16 +181,25 @@ const FAILURE_COLUMNS: DataColumn<NotifyQueueFailure>[] = [
 
 function LiveQueue({ status }: { status: NotifyStatus }) {
 	return (
-		<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-			<Metric label="Pending" value={fmtInt(status.queue.pending)} sub={`${fmtInt(status.queue.due1h)} due in the next hour`} />
-			<Metric label="Sending" value={fmtInt(status.queue.sending)} />
-			<Metric
-				label="Rate"
-				value={`${status.bucket.rate}/s`}
-				sub={`${Math.floor(status.bucket.tokens)} tokens, ceiling ${status.rate}/s`}
-				hint={status.bucket.last429At ? `last 429 ${fmtAgo(status.bucket.last429At)}` : "no 429 yet"}
-			/>
-			<Metric label="Last 24 h" value={fmtInt(status.sends24h.sent)} sub={`sent; ${fmtInt(status.sends24h.failed)} failed, ${fmtInt(status.sends24h.dry)} dry`} />
+		<div className="space-y-2">
+			<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+				<Metric label="Pending" value={fmtInt(status.queue.pending)} sub={`${fmtInt(status.queue.due1h)} due in the next hour`} />
+				<Metric label="Sending" value={fmtInt(status.queue.sending)} />
+				<Metric
+					label="Rate"
+					value={`${status.bucket.rate}/s`}
+					sub={`${Math.floor(status.bucket.tokens)} tokens, ceiling ${status.rate}/s`}
+					hint={status.bucket.last429At ? `last 429 ${fmtAgo(status.bucket.last429At)}` : "no 429 yet"}
+				/>
+				<Metric label="Last 24 h" value={fmtInt(status.sends24h.sent)} sub={`sent; ${fmtInt(status.sends24h.failed)} failed, ${fmtInt(status.sends24h.dry)} dry`} />
+			</div>
+			{status.outbox !== undefined || status.rowsDropped || status.presenceStaleHours !== undefined ? (
+				<div className="flex flex-wrap gap-x-4 gap-y-1">
+					{status.outbox !== undefined ? <KeyValue label="Outbox">{fmtInt(status.outbox)} rows waiting</KeyValue> : null}
+					{status.rowsDropped ? <KeyValue label="Rows dropped">{fmtInt(status.rowsDropped)}</KeyValue> : null}
+					{status.presenceStaleHours !== undefined ? <KeyValue label="Presence stale after">{fmtInt(status.presenceStaleHours)} h</KeyValue> : null}
+				</div>
+			) : null}
 		</div>
 	);
 }
@@ -510,10 +521,42 @@ function Controls({ status }: { status: NotifyStatus }) {
 }
 
 function HaltedBanner({ status }: { status: NotifyStatus }) {
-	if (!status.halted.length) return null;
+	const all = status.haltedAll ?? status.halted.find((h) => !h.kind) ?? null;
+	const kinds = status.halted.filter((h): h is Extract<NotifyHalt, { why: "bad_template" }> => typeof h.kind === "string" && h.kind !== "");
+	const templates = status.haltedTemplates ?? [];
+	if (!all && !kinds.length && !templates.length) return null;
 	return (
 		<div className="space-y-2">
-			{status.halted.map((h) => (
+			{all ? (
+				<Alert variant="destructive">
+					<CircleAlert />
+					<AlertTitle>Every send stopped</AlertTitle>
+					<AlertDescription>
+						<p>
+							Notifications stopped: Roblox refused the Open Cloud key (401 / 403). Check OPENCLOUD_NOTIFY_KEY's scope (user-notifications) and universe, then turn notifications back
+							on.
+						</p>
+						<p className="text-xs">Since {fmtTime(all.at)}.</p>
+					</AlertDescription>
+				</Alert>
+			) : null}
+			{templates.length ? (
+				<Alert>
+					<CircleAlert />
+					<AlertTitle>Templates stopped</AlertTitle>
+					<AlertDescription>
+						<p>Roblox says these game-supplied templates (message ids) don't exist; sends that use them are dropped.</p>
+						<ul className="list-disc pl-4">
+							{templates.map((t) => (
+								<li key={t.template}>
+									<span className="font-mono break-all">{t.template}</span> <span className="text-xs">since {fmtTime(t.at)}</span>
+								</li>
+							))}
+						</ul>
+					</AlertDescription>
+				</Alert>
+			) : null}
+			{kinds.map((h) => (
 				<Alert key={h.kind} variant="destructive">
 					<CircleAlert />
 					<AlertTitle>Kind {h.kind} stopped</AlertTitle>
@@ -600,6 +643,7 @@ export default function Notifications() {
 			) : live ? (
 				<Controls status={live} />
 			) : null}
+			{readOnly || forbidden ? null : <PlayerPanel />}
 		</div>
 	);
 }
