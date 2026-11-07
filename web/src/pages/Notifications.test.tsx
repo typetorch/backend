@@ -167,7 +167,7 @@ describe("Notifications page", () => {
 		fireEvent.click(within(screen.getByRole("radiogroup", { name: "Day clock" })).getByRole("radio", { name: "UTC day" }));
 		await waitFor(() => expect(save).toHaveBeenCalledWith({ "notify.clock": "utc_day" }));
 		const rate = screen.getByLabelText("Rate ceiling (sends / s)");
-		fireEvent.change(rate, { target: { value: "2000" } });
+		fireEvent.change(rate, { target: { value: "5000" } });
 		expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
 		fireEvent.change(rate, { target: { value: "25" } });
 		fireEvent.click(screen.getByRole("button", { name: "Save" }));
