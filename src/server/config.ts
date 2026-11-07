@@ -167,6 +167,17 @@ export interface ServerConfig {
 	messagingKey?: string;
 	// SQLite (fleet, identities, error logs, owners)
 	fleetDb: string;
+	// Experience notifications (plans/29): the runtime settings' defaults, and the env-only secrets.
+	notifyEnabled: boolean;
+	notifyDryRun: boolean;
+	notifyRate: number;
+	notifyClock: "rolling24" | "utc_day";
+	/** TYPETORCH_NOTIFY_KINDS_OFF: kinds switched off by default (comma separated). */
+	notifyKindsOff: string[];
+	/** TYPETORCH_NOTIFY_KEY: the launch-data signing key (current only), over <data>/notify-keys.json. Never logged. */
+	notifyKey?: string;
+	/** OPENCLOUD_NOTIFY_KEY ?? OPENCLOUD_API_KEY: the Open Cloud key the sends use (user-notifications scope). Never logged. */
+	notifyApiKey?: string;
 	alertWebhookUrl?: string;
 	alertWebhookFormat?: "discord" | "slack" | "json";
 	alertWebhookLevels: Set<"critical" | "warning" | "info">;
@@ -521,6 +532,11 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		handoverSeconds: num(env, "TYPETORCH_HANDOVER_SECONDS", 600, 1, 86_400),
 		erasureDeleteLink: flag(env, "TYPETORCH_ERASURE_DELETE_LINK"),
 		fleetDb: resolve(env.TYPETORCH_SQLITE ?? resolve(dataDir, "fleet.sqlite")),
+		notifyEnabled: flag(env, "TYPETORCH_NOTIFY_ENABLED", true),
+		notifyDryRun: flag(env, "TYPETORCH_NOTIFY_DRY_RUN", true),
+		notifyRate: num(env, "TYPETORCH_NOTIFY_RATE", 10, 1, 1000),
+		notifyClock: env.TYPETORCH_NOTIFY_CLOCK === "utc_day" ? "utc_day" : "rolling24",
+		notifyKindsOff: (env.TYPETORCH_NOTIFY_KINDS_OFF ?? "").split(",").map((k) => k.trim()).filter((k) => /^[a-z0-9_]{1,24}$/.test(k)).slice(0, 64),
 		alertWebhookLevels: levels,
 		fleetNewJobsPerMinute: num(env, "TYPETORCH_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),
 		runtimeSettings: flag(env, "TYPETORCH_RUNTIME_SETTINGS", true),
@@ -539,6 +555,16 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (webDir) config.webDir = webDir;
 	if (env.ROBLOX_WEBHOOK_SECRET) config.webhookSecret = env.ROBLOX_WEBHOOK_SECRET;
 	if (env.OPENCLOUD_API_KEY) config.openCloudKey = env.OPENCLOUD_API_KEY;
+	const notifyApiKey = env.OPENCLOUD_NOTIFY_KEY || env.OPENCLOUD_API_KEY;
+	if (notifyApiKey) {
+		if (apiKeys.includes(notifyApiKey) || notifyApiKey === adminToken) throw new Error("OPENCLOUD_NOTIFY_KEY must be an Open Cloud API key, not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
+		if (/^[\x21-\x7e]{16,4096}$/.test(notifyApiKey)) config.notifyApiKey = notifyApiKey;
+		else warnings.push("OPENCLOUD_NOTIFY_KEY / OPENCLOUD_API_KEY doesn't look like an Open Cloud API key: notifications only dry-run");
+	}
+	if (env.TYPETORCH_NOTIFY_KEY) {
+		if (!/^[A-Za-z0-9_-]{43}$/.test(env.TYPETORCH_NOTIFY_KEY)) throw new Error("TYPETORCH_NOTIFY_KEY must be 43 characters of base64url (typetorch notify key rotate makes one)");
+		config.notifyKey = env.TYPETORCH_NOTIFY_KEY;
+	}
 	// The instant wake (plans/25) publishes with OPENCLOUD_API_KEY (it needs universe-messaging-service:publish).
 	const messagingKey = env.OPENCLOUD_API_KEY;
 	if (messagingKey) {

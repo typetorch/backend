@@ -193,6 +193,23 @@ const ROUTES: Route[] = [
 		body: obj({ j: str("JobId"), errors: arr(obj({ fp: str(), template: str(), stack: str(), count: int(), firstAt: int(), lastAt: int(), branch: str(), build: str(), realm: str(), pids: arr(str()) })) }),
 	},
 	{ method: "post", path: "/v1/identity", tag: "game", roles: ["game"], summary: "pid <-> UserId rows (Basin games)", body: obj({ identities: arr(obj({ pid: str(), uid: int(), t: int() })) }) },
+	{
+		method: "post",
+		path: "/v1/notify/intents",
+		tag: "notify",
+		roles: ["game"],
+		summary: "Notification intents (want / drop / presence)",
+		description: "`{ v: 1, items }`, at most 200 items and 256 KB. Answers `{ ok, accepted, rejected: [{ i, why }], stale }`; an item with an older `rev` is accepted and counted as stale.",
+		body: obj({ v: int("1"), items: arr(obj({ op: str("want | drop | presence"), u: int("UserId"), k: str("kind"), key: str(), at: int("unix seconds"), until: int("unix seconds"), params: obj(), data: str(), template: str(), rev: int(), online: { type: "boolean" } })) }, ["v", "items"]),
+	},
+	{ method: "post", path: "/v1/notify/opened", tag: "notify", roles: ["game"], summary: "A verified notification open: first | repeat | unknown", body: obj({ nid: str(), u: int("UserId") }, ["nid", "u"]) },
+	{ method: "post", path: "/v1/notify/played", tag: "notify", roles: ["game"], summary: "The session length after a notification open", body: obj({ nid: str(), u: int("UserId"), secs: int() }, ["nid", "u", "secs"]) },
+	{ method: "get", path: "/v1/notify/config", tag: "notify", roles: ["admin"], summary: "The pushed notifications config: `{ config, updatedAt, by }`" },
+	{ method: "put", path: "/v1/notify/config", tag: "notify", roles: ["admin"], summary: "Push the notifications config (typetorch.json `notifications`; validated, audited)", body: obj() },
+	{ method: "get", path: "/v1/notify/status", tag: "notify", roles: ["admin"], summary: "Switches, kinds (with `halted`), the queue, the send rate, the last day's sends; never a key" },
+	{ method: "put", path: "/v1/notify/keys", tag: "notify", roles: ["admin"], summary: "The launch-data signing keys `{ current, previous?, since }` (never returned or logged)", body: obj({ current: str(), previous: str(), since: int("unix seconds") }, ["current", "since"]) },
+	{ method: "post", path: "/v1/notify/test", tag: "notify", roles: ["admin"], summary: "One send of a kind now, bypassing the caps (marked test): `{ nid, status }`", body: obj({ userId: int(), kind: str(), params: obj(), data: str() }, ["userId", "kind"]) },
+	{ method: "post", path: "/v1/notify/send", tag: "notify", roles: ["admin"], summary: "A one-off send (kind custom; respects the mute and the day cap): `{ nid, status }` or `{ skipped }`", body: obj({ userId: int(), template: str(), params: obj(), data: str() }, ["userId", "template"]) },
 	...Object.keys(FLEET_LIMITS).map(
 		(kind): Route => ({
 			method: "post",
@@ -472,6 +489,7 @@ const TAGS = [
 	["errors", "Error logs"],
 	["fleet", "Live game servers, deploy reports, alerts, remote debug"],
 	["roblox", "Lookups at Roblox, done by the server"],
+	["notify", "Experience notifications (plans/29): intents from game servers, the queue and sends for owners"],
 	["live", "The event bus"],
 	["admin", "Managing this server (owners)"],
 ] as const;

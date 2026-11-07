@@ -41,8 +41,15 @@ const int = (v: unknown, name: string, min: number, max: number): number => {
 	if (typeof v !== "number" || !Number.isSafeInteger(v) || v < min || v > max) throw new ConfigError(`${name} must be a whole number from ${min} to ${max}`);
 	return v;
 };
-const TEMPLATE = /^[\x21-\x7e]{1,128}$/;
-const CATEGORY = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** A message id: 1-128 characters, no control characters (Roblox's ids are printable). */
+export const TEMPLATE = /^[^\0-\x1f\x7f]{1,128}$/;
+/** Roblox's analytics category: any non-empty text (bounded). */
+const CATEGORY = /^[^\0-\x1f\x7f]{1,1024}$/;
+/** A positive number of hours (fractions allowed), at most ~100 years. */
+const hours = (v: unknown, name: string): number => {
+	if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 876_000) throw new ConfigError(`${name} must be a number of hours above 0`);
+	return v;
+};
 
 export const DEFAULTS = {
 	dailyCap: 1,
@@ -72,13 +79,13 @@ function kind(name: string, raw: unknown): KindConfig {
 		})(),
 	};
 	if (raw.template !== undefined && raw.template !== null && raw.template !== "") {
-		if (typeof raw.template !== "string" || !TEMPLATE.test(raw.template)) throw new ConfigError(`kinds.${name}.template is a message id of at most 128 printable characters`);
+		if (typeof raw.template !== "string" || !TEMPLATE.test(raw.template)) throw new ConfigError(`kinds.${name}.template is a message id of at most 128 characters`);
 		out.template = raw.template;
 	}
 	if (raw.perWeek !== undefined) out.perWeek = int(raw.perWeek, `kinds.${name}.perWeek`, 1, 7);
-	if (raw.maxWaitHours !== undefined) out.maxWaitHours = int(raw.maxWaitHours, `kinds.${name}.maxWaitHours`, 1, 24 * 90);
+	if (raw.maxWaitHours !== undefined) out.maxWaitHours = hours(raw.maxWaitHours, `kinds.${name}.maxWaitHours`);
 	if (raw.category !== undefined) {
-		if (typeof raw.category !== "string" || !CATEGORY.test(raw.category)) throw new ConfigError(`kinds.${name}.category is 1-64 of A-Z a-z 0-9 _ . : -`);
+		if (typeof raw.category !== "string" || !CATEGORY.test(raw.category)) throw new ConfigError(`kinds.${name}.category is a non-empty string`);
 		out.category = raw.category;
 	}
 	if (raw.allowTemplate !== undefined) {
@@ -89,7 +96,7 @@ function kind(name: string, raw: unknown): KindConfig {
 		const b = raw.beats;
 		if (!isRecord(b) || !Array.isArray(b.kinds) || b.kinds.length === 0 || b.kinds.length > KINDS_MAX) throw new ConfigError(`kinds.${name}.beats is { kinds: [names], withinHours }`);
 		for (const k of b.kinds) if (typeof k !== "string" || !KIND_PATTERN.test(k)) throw new ConfigError(`kinds.${name}.beats.kinds holds kind names`);
-		out.beats = { kinds: [...new Set(b.kinds as string[])], withinHours: int(b.withinHours, `kinds.${name}.beats.withinHours`, 1, 24 * 30) };
+		out.beats = { kinds: [...new Set(b.kinds as string[])], withinHours: hours(b.withinHours, `kinds.${name}.beats.withinHours`) };
 	}
 	return out;
 }
@@ -98,13 +105,13 @@ function kind(name: string, raw: unknown): KindConfig {
 export function validateConfig(raw: unknown): NotifyConfig {
 	if (!isRecord(raw)) throw new ConfigError("send the notifications object: { dailyCap, quietAfterLeaveMinutes, lapse, unopenedBackoff, kinds }");
 	const dailyCap = int(raw.dailyCap ?? DEFAULTS.dailyCap, "dailyCap", 1, 3);
-	const quietAfterLeaveMinutes = int(raw.quietAfterLeaveMinutes ?? DEFAULTS.quietAfterLeaveMinutes, "quietAfterLeaveMinutes", 0, 7 * 24 * 60);
+	const quietAfterLeaveMinutes = int(raw.quietAfterLeaveMinutes ?? DEFAULTS.quietAfterLeaveMinutes, "quietAfterLeaveMinutes", 0, 1_000_000);
 	let lapse = DEFAULTS.lapse;
 	if (raw.lapse !== undefined) {
-		if (!Array.isArray(raw.lapse) || raw.lapse.length === 0 || raw.lapse.length > 16) throw new ConfigError("lapse is a list of [days, perWeek] pairs");
+		if (!Array.isArray(raw.lapse) || raw.lapse.length === 0 || raw.lapse.length > 64) throw new ConfigError("lapse is a list of [days, perWeek] pairs");
 		lapse = raw.lapse.map((pair, i) => {
 			if (!Array.isArray(pair) || pair.length !== 2) throw new ConfigError(`lapse[${i}] is [days, perWeek]`);
-			return [int(pair[0], `lapse[${i}][0]`, 1, 3650), int(pair[1], `lapse[${i}][1]`, 0, 7)] as [number, number];
+			return [int(pair[0], `lapse[${i}][0]`, 0, 1_000_000), int(pair[1], `lapse[${i}][1]`, 0, 7)] as [number, number];
 		});
 		for (let i = 1; i < lapse.length; i++) if ((lapse[i] as [number, number])[0] <= (lapse[i - 1] as [number, number])[0]) throw new ConfigError("lapse days must be ascending");
 	}
@@ -114,7 +121,7 @@ export function validateConfig(raw: unknown): NotifyConfig {
 		if (!isRecord(u)) throw new ConfigError("unopenedBackoff is { after, factor, days }");
 		const factor = u.factor ?? DEFAULTS.unopenedBackoff.factor;
 		if (typeof factor !== "number" || !(factor > 0) || factor > 1) throw new ConfigError("unopenedBackoff.factor is a number above 0, at most 1");
-		unopenedBackoff = { after: int(u.after ?? DEFAULTS.unopenedBackoff.after, "unopenedBackoff.after", 1, 1000), factor, days: int(u.days ?? DEFAULTS.unopenedBackoff.days, "unopenedBackoff.days", 1, 365) };
+		unopenedBackoff = { after: int(u.after ?? DEFAULTS.unopenedBackoff.after, "unopenedBackoff.after", 1, 1_000_000), factor, days: int(u.days ?? DEFAULTS.unopenedBackoff.days, "unopenedBackoff.days", 1, 365) };
 	}
 	if (!isRecord(raw.kinds)) throw new ConfigError("kinds is an object of kind name -> { template, priority, repeat, ... }");
 	const names = Object.keys(raw.kinds);
