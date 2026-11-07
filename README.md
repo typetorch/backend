@@ -42,6 +42,7 @@ is the same command.
 - [The analytics part (DuckDB)](#the-analytics-part-duckdb)
 - [The fleet API (SQLite)](#the-fleet-api-sqlite) ([game server addresses and locations](#game-server-addresses-and-locations))
 - [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
+- [Experience notifications](#experience-notifications) (intents from the game, the planner, the sender, signed launch data)
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -541,6 +542,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
 | `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `bundle`, `deploy`, `mark` | game | the kernel's fleet posts (`bundle`: a [debug bundle](#debug-bundles-and-offline-history)) and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
+| `POST /v1/notify/intents`, `opened`, `played` | game | [experience notifications](#experience-notifications): intents (want / drop / presence), a verified open (`first` / `repeat` / `unknown`), the session length after it |
 | `GET /v1/fleet/commands`, `POST /v1/fleet/results` | game | [remote debug](#remote-debug): a watched server's long-poll for read-only commands, and its answers |
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin, web | the logical queries |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin, web | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
@@ -579,6 +581,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `GET /v1/admin/backups`, `POST /v1/admin/backups` | admin | [backups](#backups-and-restore): the schedule, the local backups and the [disk](#disk-space); `POST` makes one now (2 a minute with the download) |
 | `POST /v1/admin/backups/download` | admin | a tar of a fresh backup, streamed (without the webhook URL and `instance.key`) |
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
+| `GET` / `PUT /v1/notify/config`, `GET /v1/notify/status`, `PUT /v1/notify/keys`, `POST /v1/notify/test`, `POST /v1/notify/send` | admin | [experience notifications](#experience-notifications): the pushed config, the queue and switches (never a key), the signing keys, a test send (bypasses the caps), a one-off send |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
@@ -1121,6 +1124,9 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `economy` | one currency's economy from `currency` rows (`currency`; default the busiest; `currencies` lists them all): earned, spent, net and the running balance per UTC day (dense up to 400 days), top `top` (10, at most 50) sources and sinks by `reason` with their share, totals per active player and per player with the currency (earners, spenders, average / median net, `sinkRatio` = spent / earned). Rows without a player count in the flows, not per player. `deltaKey` / `reasonKey` name the props (default `delta`, `reason`). Server-sent distinct rows only | 30 days |
 | `monetization` | Robux from `purchase` rows: robux, purchases, payers and ARPDAU per UTC day, revenue by product (`products`, at most `top` (25, at most 100), with kind, share and payers), totals (payer conversion, ARPPU, ARPU, ARPDAU over player-days, repeat purchase rate) and the first purchase of new players (median / average minutes from their first row, conversion, by session number: 1, 2, 3, 4-5, 6-10, 11+). `robuxKey` / `productKey` name the props. Server-sent distinct player rows only, like `players` | 30 days |
 | `monetization-players` | who bought one product (`kind` + `product`) or anything: purchases, Robux paid, revenue, distinct products, first and last purchase per player, biggest spenders first (`limit`, at most 200) | 30 days |
+| `notify-funnel` | [notification](#experience-notifications) funnel per kind and UTC day of the send: wants, planned, sent (real), dry, tests, opened (distinct nids with an `open` row), played >= 1 min, returned D1 (a session the day after the send), assisted (back within 24 h without opening); open / played / return rates. `kind` for one. Only the time range filters (backend rows have no device or build) | 14 days |
+| `notify-optin` | the opt-in prompt: checks (and could prompt), shown, closed (average seconds up), errors, inferred subscribed / not subscribed (from the send results); by `where` and per day | 30 days |
+| `notify-queue` | notification sends per hour (planned, sent, dry, failed, 429s, skipped), planned by why, skipped by kind and why, failures by kind, HTTP status and code (final or retried). The live queue is `GET /v1/notify/status` | 1 day |
 | `monetization-purchases` | the latest purchases, newest first: player, session, product, kind, Robux paid, revenue and `where` (`limit`, 50, at most 200) | 30 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
@@ -1702,6 +1708,55 @@ the backend reads them for the Roblox page's **Acquisition, from Roblox** sectio
   is a 502 naming the scope; a query Roblox refuses is a 400; a query that doesn't finish is a 504. The route answers
   409 while the key or the universe isn't set. OAuth 2.0 apps can't ask for this scope yet (Roblox, August 2026), so
   the signed-in owner's token isn't used; only the API key.
+
+## Experience notifications
+
+Plans/29 (`plans/29-experience-notifications.md`, the wire in `plans/29-contract.md`). The game says **why** a player should
+hear from it (an intent, `TypeTorch.notifications().want(...)` in the framework); the backend decides **when** and sends
+through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/notifications`); the framework verifies the tap
+(signed launch data) and writes the rows. Code: `src/notify/` (`store.ts`, `planner.ts`, `sender.ts`, `token.ts`,
+`config.ts`, `routes.ts`) and `src/store/durable.ts`.
+
+- **Storage**: `notify.db` next to the fleet SQLite file (`/data/notify.db`; WAL, the fleet wrapper): `notify_intents`,
+  `notify_users`, `notify_sends`, `notify_config`, plus the durable layer's `kv` and `zset` (`src/store/durable.ts`: a small
+  Redis-like layer on SQLite with get / set (ttl) / del / incr, sorted sets and leases; one `UPDATE ... RETURNING` hands a due
+  send to exactly one worker, and a crashed worker's sends come back after the lease). Survives deploys (the data volume);
+  the nightly backup copies it as `notify.sqlite` (`VACUUM INTO`). Sends are kept 120 days, finished intents 30 days.
+- **Config**: `typetorch notify push` (`PUT /v1/notify/config`, audited `notify.config`) uploads `typetorch.json` ->
+  `notifications`: `dailyCap`, `quietAfterLeaveMinutes`, `lapse`, `unopenedBackoff`, `kinds` (`text`, `template`, `priority`,
+  `repeat`, `send`, `perWeek`, `maxWaitHours`, `category`, `allowTemplate`, `beats`). Intents for kinds not in the pushed
+  config are rejected (`unknown_kind`). A kind with `text` checks a want's params against its `{placeholders}`
+  (`missing_param`, `unknown_param`).
+- **Planner** (every 30 s, at most 500 users a tick): one send per user at a time; priority (lower first; `beats` lets a kind
+  outrank listed kinds in its last hours), repeat (`once_ever`, `per_key`, `daily` + `perWeek`), muted / online / quiet after
+  leaving / the day cap (`notify.clock`: `rolling24` or `utc_day`) / lapse decay / the unopened backoff, then the user's usual
+  hour (mode of the last 20 session starts, default 17:00 UTC) +-20 min, no later than `until - 1 h`.
+- **Sender** (every second, 4 workers): a token bucket under our ceiling `notify.rate` (default 50 / s) and Roblox's own
+  `x-ratelimit-*` headers (4000 / s per key: never more in a window than `remaining`); 429 halves the rate and honours
+  `Retry-After`, +10 % a minute back. Retries (network, 5xx, 429) at 30 s, 2 min, 8 min. Not opted in (400
+  `FAILED_PRECONDITION`) mutes the user 7 days and writes `optin_inferred`; a template that doesn't exist (404 `NOT_FOUND`
+  "Message id") stops the kind (`notify.kinds.<kind>.enabled = false` by the system, audited, a banner on the Notifications
+  page; turn it back on after fixing it); Roblox's per-recipient limit (429 `RESOURCE_EXHAUSTED`, per-recipient message) ends
+  the send and re-plans for the user's next day.
+- **Dry run** (`notify.dryRun`, **on by default**): everything but the POST; the send ends `dry` and its `sent` row has
+  `dry: true`. It counts toward the day / week caps (a rehearsal), not toward once_ever / per_key. A kind without a
+  `template` is always dry.
+- **Signed launch data**: `tt1n.<nid>.<kind>.<uid36>.<t36>.<data>.<sig>` (HMAC-SHA256 truncated to 16 bytes, base64url), at
+  most 200 bytes. Keys: `typetorch notify key rotate` -> `PUT /v1/notify/keys { current, previous?, since }` ->
+  `<data>/notify-keys.json` (mode 0600; never returned, logged or put in a download backup); `TYPETORCH_NOTIFY_KEY` (current
+  only) wins over the file. Without a key, sends go out without launch data (no open tracking).
+- **Rows** (`kind = notify`, `src = backend`, pid from `identities`, never a UserId): `planned`, `skipped`, `sent`, `failed`,
+  `optin_inferred`; the framework writes `want`, `drop`, `optin_*`, `open`, `open_bad`, `played` through ingest. Rows go to
+  the warehouse only with the analytics part on (DuckDB).
+- **Switches** (runtime settings, Settings page and Notifications page, audited): `notify.enabled`, `notify.dryRun`,
+  `notify.rate`, `notify.clock`, `notify.kinds` (PATCH one kind with `"notify.kinds.<kind>.enabled": false`). Env defaults:
+  `TYPETORCH_NOTIFY_ENABLED`, `TYPETORCH_NOTIFY_DRY_RUN`, `TYPETORCH_NOTIFY_RATE`, `TYPETORCH_NOTIFY_CLOCK`,
+  `TYPETORCH_NOTIFY_KINDS_OFF` (comma separated).
+- **Coolify**: real sends need `OPENCLOUD_NOTIFY_KEY` (or `OPENCLOUD_API_KEY`) with the user-notifications scope on the
+  universe, and `TYPETORCH_UNIVERSE_ID`; then turn dry run off.
+- **Erasure**: the Right to Erasure path deletes the user's rows in all three tables and their queued sends.
+- **Limits**: 200 items and 256 KB per intents request, 6000 notify requests a minute per address (plus the ingest limit),
+  2,000,000 pending intents at most (`full`), 30 admin sends / config / key changes a minute.
 
 ## Privacy
 
