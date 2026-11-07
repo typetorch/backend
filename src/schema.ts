@@ -22,13 +22,20 @@ export const EVENT_KINDS = [
 	"recording_meta",
 	/** Game-server rows (no player): `heartbeat` every ~60 s and `deploy_report` after each deploy (FLEET_PROPS). */
 	"fleet",
+	/**
+	 * Experience notifications (plans/29): the framework writes want / drop / optin_* / open / open_bad / played from the
+	 * game server, the backend writes optin_inferred / planned / skipped / sent / failed (`src = backend`, pid from
+	 * `identities`, never a UserId). NOTIFY_PROPS lists the prop names.
+	 */
+	"notify",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 export const DEVICES = ["desktop", "phone", "tablet", "console", "vr", "unknown"] as const;
 export type Device = (typeof DEVICES)[number];
 
-export const SOURCES = ["server", "client"] as const;
+/** `backend`: rows the backend writes itself (the notify rows: no game server, no client). */
+export const SOURCES = ["server", "client", "backend"] as const;
 export type Source = (typeof SOURCES)[number];
 
 /**
@@ -145,7 +152,7 @@ export const EVENT_FIELDS: readonly FieldSpec[] = [
 	{ name: "state", type: "string", required: false, maxLength: 512, description: "zone:X|screen:Y|activity:Z" },
 	{ name: "exp", type: "string", required: false, json: true, maxBytes: 1024, description: "JSON of the player's experiment variants" },
 	{ name: "sexp", type: "string", required: false, maxLength: 128, description: "the server's experiment" },
-	{ name: "src", type: "string", required: false, enum: SOURCES, description: "server or client" },
+	{ name: "src", type: "string", required: false, enum: SOURCES, description: "server, client or backend" },
 	{ name: "props", type: "string", required: false, json: true, maxBytes: MAX_PROPS_BYTES, description: "JSON string, at most 4 KB" },
 ];
 
@@ -213,3 +220,14 @@ export const FLEET_HEARTBEAT = "heartbeat";
 export const FLEET_DEPLOY_REPORT = "deploy_report";
 export const DEPLOY_RESULTS = ["swapped", "failed", "rolled_back", "skipped", "booted"] as const;
 export const SERVER_HEALTH = ["ok", "failed", "unverified", "degraded"] as const;
+
+/**
+ * `kind = "notify"` rows (plans/29 "Rows"; the contract plans/29-contract.md). Names and their props:
+ *   framework: want {k, key, at, until, offline}, drop {k, key, why}, optin_check {can, where, err}, optin_shown {where},
+ *              optin_closed {where, secs}, open {nid, k, age, first}, open_bad {why}, played {nid, k, secs}
+ *   backend:   optin_inferred {state}, planned {nid, k, for, why}, skipped {k, why}, sent {nid, k, try, roblox_id, category},
+ *              failed {nid, k, http, code, final}
+ * `key` is the intent key's hash (first 12 hex of SHA-256), never the key itself.
+ */
+export const NOTIFY_ROW_NAMES = ["want", "drop", "optin_check", "optin_shown", "optin_closed", "optin_inferred", "planned", "skipped", "sent", "failed", "open", "open_bad", "played"] as const;
+export const NOTIFY_PROPS = ["k", "key", "at", "until", "offline", "why", "can", "where", "err", "secs", "state", "nid", "for", "try", "roblox_id", "category", "http", "code", "final", "age", "first", "dry", "test"] as const;
