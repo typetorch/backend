@@ -1,6 +1,7 @@
 /**
  * Backups that are safe while the server runs (README "Backups and restore"). A backup is a folder:
  *
+ *   notify.sqlite       notify.db (plans/29: intents, sends, the durable queue), the same way
  *   fleet.sqlite        the SQLite file (fleet, identities, error logs, the audit log), by `VACUUM INTO` on its own
  *                       connection in a worker thread: one consistent snapshot, the server keeps writing meanwhile
  *   live.duckdb         today's rows, by DuckDB's `COPY FROM DATABASE` in one transaction
@@ -31,7 +32,7 @@ const NAME = /^typetorch-backup-\d{8}T\d{6}Z(?:-\d{1,3})?$/;
 const PARTIAL = ".partial-";
 /** A download's folder in <data>/backup-tmp older than this is a leftover (the client went away mid-stream). */
 const STAGING_MAX_AGE_MS = 6 * 3_600_000;
-const STATE_FILES = ["access.json", "runtime-settings.json", "devices.json", "bless-keys.json", "settings.json", "instance.key"] as const;
+const STATE_FILES = ["access.json", "runtime-settings.json", "devices.json", "bless-keys.json", "settings.json", "instance.key", "notify-keys.json"] as const;
 const STATE_DIRS = ["erasure", "audit"] as const;
 const DAY_DIRS = ["events", "recordings", "rollups"] as const;
 
@@ -72,6 +73,10 @@ export interface BackupsOptions {
 	/** Hours between scheduled backups; 0 = none. */
 	everyHours: number;
 	fleetDb: string;
+	/** notify.db (plans/29), copied like the fleet file; absent or ":memory:" = left out. */
+	notifyDb?: string;
+	/** Runs a statement on notify.db's own connection (the fallback when no worker thread starts). */
+	notifyExec?(sql: string): Promise<void>;
 	/** The open warehouse, or undefined (the analytics part is off, or a deploy handover). */
 	warehouse(): Warehouse | undefined;
 	analyticsOn: boolean;
@@ -240,10 +245,15 @@ export class Backups {
 			await this.vacuumInto(this.o.fleetDb, join(target, "fleet.sqlite"));
 			sqlite = true;
 		} else leftOut.push("fleet.sqlite (an in-memory database)");
+		if (this.o.notifyDb && this.o.notifyDb !== ":memory:" && existsSync(this.o.notifyDb)) await this.vacuumInto(this.o.notifyDb, join(target, "notify.sqlite"), this.o.notifyExec);
 		const state: string[] = [];
 		for (const file of STATE_FILES) {
 			const source = join(this.o.dataDir, file);
 			if (!existsSync(source)) continue;
+			if (reason === "download" && file === "notify-keys.json") {
+				leftOut.push("notify-keys.json (the notification signing keys: rotate them again after a restore, typetorch notify key rotate)");
+				continue;
+			}
 			if (reason === "download" && file === "instance.key") {
 				leftOut.push("instance.key (a private key: copy it from the data volume, or add the project on typetorch.dev again)");
 				continue;
@@ -280,7 +290,7 @@ export class Backups {
 	}
 
 	/** `VACUUM INTO` on a worker thread's own connection; on the server's connection when no worker can start. */
-	private async vacuumInto(source: string, target: string): Promise<void> {
+	private async vacuumInto(source: string, target: string, exec: ((sql: string) => Promise<void>) | undefined = (sql) => this.o.sqliteExec(sql)): Promise<void> {
 		rmSync(target, { force: true });
 		const url = new URL(`./sqlite-backup-worker.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`, import.meta.url);
 		try {
@@ -295,7 +305,8 @@ export class Backups {
 			if ((error as { fromWorker?: boolean }).fromWorker) throw error;
 			this.log(`backup: no worker thread for SQLite (${shortError(error)}); copying on the main connection`);
 			rmSync(target, { force: true });
-			await this.o.sqliteExec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+			if (!exec) throw error;
+			await exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
 		}
 	}
 

@@ -8,6 +8,7 @@
  *   POST /v1/errors                 { j, errors: [{ fp, template, stack?, count, firstAt, lastAt, branch, build, realm, pids }] }
  *   POST /v1/identity               { identities: [{ pid, uid, t }] } (Basin games, via the fleet API's url)
  *   POST /v1/fleet/heartbeat | report | alert | closing | deploy | bundle   (fleet/http.ts; bundle: kernel 0.5.3 debug bundles)
+ *   POST /v1/notify/intents | opened | played   experience notifications (plans/29, src/notify/routes.ts)
  *
  *   admin routes (admin token as Bearer, or the explorer's session cookie); the `web` role gets the game-data reads (GET,
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
@@ -47,6 +48,8 @@
  *        with the API key)
  *   GET  /v1/access, PUT /v1/access { seq, owners } (admin token only): the owners who may sign in with Roblox
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
+ *   GET|PUT /v1/notify/config, GET /v1/notify/status, PUT /v1/notify/keys, POST /v1/notify/test | send   (owners;
+ *                                   experience notifications, plans/29: the pushed config, the queue, the signing keys, sends)
  *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
  *   PATCH /v1/admin/settings        { key: value | null } (null = back to the environment), applied at once; lockout guards
  *   POST /v1/admin/settings/test-alert   one test alert through the current webhook (3 a minute)
@@ -114,6 +117,9 @@ import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
 import { meterSqlite, parseStatsWindow, ServerMetrics, STATS_WINDOWS } from "./metrics.ts";
+import { INTENTS_BODY_MAX, NotifyService, SMALL_BODY_MAX, type Reply } from "../notify/routes.ts";
+import { CONFIG_BODY_MAX } from "../notify/config.ts";
+import type { EventRow } from "../schema.ts";
 import { DOCS_CSP, SWAGGER_INIT, llmsTxt, openApiSpec, swaggerPage } from "./openapi.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
 import { CentralLogin } from "./central-login.ts";
@@ -192,6 +198,8 @@ export interface App {
 	readonly remoteDebug?: RemoteDebugHub;
 	/** Plans/25 "Instant wake": the wake publisher (off without OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID). */
 	readonly waker?: RemoteDebugWaker;
+	/** Plans/29: experience notifications (notify.db, the planner, the sender, the signing keys). */
+	readonly notify: NotifyService;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
 	/** The explorer's session store (tests make sessions directly, e.g. a viewer's without Roblox in the loop). */
@@ -246,6 +254,10 @@ const TEST_ALERTS_PER_MINUTE = 3;
 const PROFILE_PER_MINUTE = 120;
 /** Uncached Roblox names one error/experiment/funnel -> players read looks up in the background (the profile cache's caps still apply). */
 const PLAYER_NAME_WARM = 8;
+/** POST /v1/notify/intents | opened | played per address per minute (on top of the ingest limit per address). */
+const NOTIFY_IP_PER_MINUTE = 1200;
+/** POST /v1/notify/test | send, PUT config / keys per minute (owners). */
+const NOTIFY_ADMIN_PER_MINUTE = 30;
 /** Backups: downloads and "back up now" per minute (each one copies the data folder). */
 const BACKUPS_PER_MINUTE = 2;
 /** How often the backup schedule is checked. */
@@ -330,9 +342,46 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		clock,
 		log,
 		keepDays: () => runtime.get("auditKeepDays"),
-		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl")],
+		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl")],
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
+	// Plans/29: experience notifications, in notify.db next to the fleet file. Backend rows go to the events like a game's.
+	const notify = await NotifyService.open({
+		fleetDb: config.fleetDb,
+		dataDir: config.dataDir,
+		...(config.notifyKey ? { envKey: config.notifyKey } : {}),
+		...(config.notifyApiKey ? { apiKey: config.notifyApiKey } : {}),
+		...(config.universeId ? { universeId: config.universeId } : {}),
+		switches: {
+			enabled: () => runtime.get("notify.enabled"),
+			dryRun: () => runtime.get("notify.dryRun"),
+			rate: () => runtime.get("notify.rate"),
+			clock: () => runtime.get("notify.clock"),
+			kindEnabled: (kind) => runtime.get("notify.kinds")[kind] !== false,
+		},
+		stopKind: (kind, why) => {
+			// S1b: the switch goes off as the system (audited); with runtime settings off, the halt flag alone holds it.
+			const who = "system (notify: template not found)";
+			try {
+				runtime.patchBySystem({ [`notify.kinds.${kind}.enabled`]: false }, who);
+			} catch (error) {
+				if (!(error instanceof SettingsError)) throw error;
+			}
+			void audit.record({ actor: { kind: "system", label: "notify sender" }, role: "none", via: "none", ip: "", action: "notify.kind.stop", outcome: "ok", details: { kind, why } });
+		},
+		pidOf: async (userId) => (await identities.byUid(userId)).map((i) => i.pid).find((pid) => !warehouse?.isErased(pid)) ?? "",
+		publish: async (rows) => {
+			if (!warehouse || analytics !== "ready") return;
+			try {
+				await bus.publish("events", { events: rows as unknown as EventRow[], recordings: [], rejected: 0, rt: clock() });
+			} catch (error) {
+				if (!(error instanceof RawLogClosed)) throw error;
+			}
+		},
+		clock,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+		log,
+	});
 	const savedQueryLimiter = new RateLimiter(SAVED_QUERY_WRITES_PER_MINUTE, clock);
 	// Game server locations (fleet/geo.ts, server/geoip.ts): an offline IP database, looked up after each new address.
 	const geo = new GeoLocator({ db: sqlite, enabled: config.geoip.mode !== "off", clock, log });
@@ -506,6 +555,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		jobCommands: new RateLimiter(60, clock),
 		watches: new RateLimiter(30, clock),
 	};
+	// Plans/29: notification calls per address per minute (game servers share egress addresses), admin sends per minute.
+	const notifyLimiter = new RateLimiter(NOTIFY_IP_PER_MINUTE, clock);
+	const notifyAdminLimiter = new RateLimiter(NOTIFY_ADMIN_PER_MINUTE, clock);
 	const keepOpen = new WeakMap<Request, () => void>();
 	const backupLimiter = new RateLimiter(BACKUPS_PER_MINUTE, clock);
 	// Backups (server/backup.ts): SQLite by VACUUM INTO on a worker, DuckDB between the warehouse's jobs.
@@ -515,6 +567,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		keep: config.backupKeep,
 		everyHours: config.backupHours,
 		fleetDb: config.fleetDb,
+		notifyDb: notify.dbPath,
+		notifyExec: (sql) => notify.db.exec(sql),
 		warehouse: () => warehouse,
 		analyticsOn: config.parts.has("analytics"),
 		sqliteExec: (sql) => sqlite.exec(sql),
@@ -725,6 +779,68 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const known = who.rows.filter((r) => !warehouse?.isErased(r.pid));
 		if (known.length) await identities.upsert(known);
 		return json(202, { accepted: known.length, rejected: who.rejected });
+	}
+
+	/** POST /v1/notify/intents | opened | played (API key): plans/29 intents, opens and plays. */
+	async function notifyGame(req: Request, path: string, ip: string): Promise<Response> {
+		if (req.method !== "POST") return json(405, { error: "POST only" });
+		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "notify");
+		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
+		if (!notifyLimiter.take(ip)) return tooMany(notifyLimiter.retryAfter(ip));
+		const intents = path === "/v1/notify/intents";
+		const read = await readJsonBody(req, intents ? INTENTS_BODY_MAX : SMALL_BODY_MAX, intents ? INTENTS_BODY_MAX * 4 : SMALL_BODY_MAX);
+		if (read instanceof Response) return read;
+		const r = intents ? await notify.intents(read.value) : path === "/v1/notify/opened" ? await notify.opened(read.value) : await notify.played(read.value);
+		return json(r.status, r.body);
+	}
+
+	/** The plans/29 admin routes (owners; the gate ran): config, status, keys, test, send. */
+	async function notifyAdmin(req: Request, path: string, admin: Principal & { role: "admin" }): Promise<Response> {
+		const method = req.method;
+		const body = async (max: number): Promise<unknown | Response> => {
+			if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON" });
+			const raw = await readCapped(req, max);
+			if (!raw) return json(413, { error: `body over ${max} bytes` });
+			try {
+				return JSON.parse(Buffer.from(raw).toString("utf8")) as unknown;
+			} catch {
+				return json(400, { error: "body is not JSON" });
+			}
+		};
+		const answer = (r: Reply) => json(r.status, r.body);
+		if (path === "/v1/notify/status") return method === "GET" ? answer(await notify.status()) : json(405, { error: "GET only" });
+		if (path === "/v1/notify/config") {
+			if (method === "GET") return answer(await notify.getConfig());
+			if (method !== "PUT") return json(405, { error: "GET or PUT only" });
+			if (!notifyAdminLimiter.take("admin")) return tooMany(notifyAdminLimiter.retryAfter("admin"));
+			const b = await body(CONFIG_BODY_MAX);
+			if (b instanceof Response) return b;
+			const r = await notify.putConfig(b, actorOf(admin).who);
+			noteAudit(req, { action: "notify.config", ...(r.status === 200 ? { details: { kinds: r.kinds ?? [] } } : { outcome: "failed", details: { error: String(r.body.error).slice(0, 200) } }) });
+			return answer(r);
+		}
+		if (path === "/v1/notify/keys") {
+			if (method !== "PUT") return json(405, { error: "PUT only" });
+			if (!notifyAdminLimiter.take("admin")) return tooMany(notifyAdminLimiter.retryAfter("admin"));
+			const b = await body(SMALL_BODY_MAX);
+			if (b instanceof Response) return b;
+			const r = await notify.putKeys(b);
+			// Never the keys: whether a previous one came along, and since when.
+			noteAudit(req, { action: "notify.keys", ...(r.status === 200 ? { details: { previous: Boolean((b as { previous?: unknown }).previous), since: (b as { since?: unknown }).since } } : { outcome: "failed" }) });
+			return answer(r);
+		}
+		if (path === "/v1/notify/test" || path === "/v1/notify/send") {
+			if (method !== "POST") return json(405, { error: "POST only" });
+			if (!notifyAdminLimiter.take("admin")) return tooMany(notifyAdminLimiter.retryAfter("admin"));
+			const b = await body(SMALL_BODY_MAX);
+			if (b instanceof Response) return b;
+			const test = path === "/v1/notify/test";
+			const r = test ? await notify.test(b) : await notify.send(b);
+			// Counts and names only: never the UserId (player data).
+			noteAudit(req, { action: test ? "notify.test" : "notify.send", details: { status: r.status, ...(typeof r.body.nid === "string" ? { nid: r.body.nid } : {}), ...(typeof r.body.skipped === "string" ? { skipped: r.body.skipped } : {}), ...(test ? { kind: String((b as { kind?: unknown }).kind ?? "").slice(0, 24) } : {}) } });
+			return answer(r);
+		}
+		return notFound();
 	}
 
 	// Admin routes ------------------------------------------------------------------------------------------------------
@@ -1211,6 +1327,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const pids = (Array.isArray(b.pids) ? b.pids : [b.pid]).filter((p): p is string => typeof p === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(p));
 			if (!pids.length) return json(400, { error: "give pid or pids" });
 			const { liveRows } = await w.erase(pids);
+			// Their notification rows (by UserId) before the link between the pids and the UserId goes.
+			for (const uid of new Set((await identities.uids(pids)).values())) await notify.eraseUser(uid);
 			await identities.deletePids(pids);
 			await errors.erasePids(pids);
 			void w.rewriteErased().catch((e) => log(`erasure rewrite failed: ${(e as Error).message}`));
@@ -1262,6 +1380,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			return json(200, { ok: true, erased: 0 });
 		}
 		const { liveRows } = await w.erase(pids);
+		await notify.eraseUser(request.userId);
 		// The rows first, then the link between the UserId and its pids.
 		await identities.deleteUid(request.userId);
 		await identities.deletePids(pids);
@@ -1759,6 +1878,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const result = runtime.patch(body, { ...actorOf(principal), ip, robloxSession: isRobloxSession(principal), robloxSignIn: Boolean(oauth) });
 			// The token login turned off: browser sessions made with the token end too (the caller's is a Roblox session).
 			// Viewers taken off the list lose their sessions at once.
+			// A notification kind switched back on loses its S1b halt (the owner fixed the template).
+			if (result.changed.includes("notify.kinds")) {
+				const kinds = runtime.get("notify.kinds");
+				await notify.clearHalts(notify.haltedKinds().filter((k) => kinds[k] !== false));
+			}
 			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
 			noteAudit(req, {
 				action: "settings.change",
@@ -2022,6 +2146,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path === "/v1/ingest") return method === "POST" ? ingest(req, ip) : json(405, { error: "POST only" });
 		if (path === "/v1/errors" && method === "POST") return postErrors(req, ip);
 		if (path === "/v1/identity" && method === "POST") return postIdentity(req, ip);
+		if (path === "/v1/notify/intents" || path === "/v1/notify/opened" || path === "/v1/notify/played") return notifyGame(req, path, ip);
 		if (path.startsWith("/v1/fleet/") && isRemoteDebugPath(path)) {
 			if (!fleet || !remoteDebug) return json(404, { error: "the fleet part is off on this server" });
 			return handleRemoteDebug(req, url, path, {
@@ -2170,6 +2295,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const admin = manage();
 				if (admin instanceof Response) return admin;
 				return download ? backupDownload(req) : backupsRoute(req);
+			}
+			if (path.startsWith("/v1/notify/")) {
+				const admin = manage();
+				return admin instanceof Response ? admin : notifyAdmin(req, path, admin);
 			}
 			if (path === "/v1/admin/settings/test-alert") {
 				if (method !== "POST") return json(405, { error: "POST only" });
@@ -2331,6 +2460,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		jobs.push(setInterval(() => void diskTick(), BACKUP_CHECK_MS));
 		void diskTick();
 		if (fleet) jobs.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
+		// Plans/29: the planner every 30 s, the sender every second, the kv sweep every minute, the prune every 10 minutes.
+		jobs.push(
+			setInterval(() => void notify.planTick().catch((e) => log(`notify planner failed: ${(e as Error).message}`)), 30_000),
+			setInterval(() => void notify.sendTick().catch((e) => log(`notify sender failed: ${(e as Error).message}`)), 1000),
+			setInterval(() => void notify.sweep().catch((e) => log(`notify sweep failed: ${(e as Error).message}`)), 60_000),
+			setInterval(() => void notify.prune().catch((e) => log(`notify prune failed: ${(e as Error).message}`)), 10 * 60_000),
+		);
 		if (backendAlerts) jobs.push(setInterval(() => void backendAlerts.tick().catch((e) => log(`backend alerts failed: ${(e as Error).message}`)), ALERT_TICK_MS));
 		for (const t of jobs) t.unref?.();
 		timers.push(...jobs);
@@ -2441,6 +2577,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (warehouse) await warehouse.close(STOP_JOB_GRACE_MS);
 		// Alerts already handed to the webhook (each send has its own 5 s timeout), and wake publishes on their way.
 		await Promise.race([Promise.all([notifier.flush(), waker?.idle()]), new Promise((done) => setTimeout(done, 2000))]);
+		// Sends in flight get a moment; one still out keeps its lease, so the next server neither loses nor repeats it.
+		await notify.close();
 		if (fleet) await fleet.close();
 		else await sqlite.close();
 	}
@@ -2460,6 +2598,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		settings: runtime,
 		...(remoteDebug ? { remoteDebug } : {}),
 		...(waker ? { waker } : {}),
+		notify,
 		bus,
 		errors,
 		access,

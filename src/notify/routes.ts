@@ -10,7 +10,7 @@
 import { dirname, join } from "node:path";
 import { openSqlite, type FleetDb } from "../fleet/db.ts";
 import { Durable } from "../store/durable.ts";
-import { CUSTOM_KIND, ConfigError, validateConfig, type NotifyConfig } from "./config.ts";
+import { CUSTOM_KIND, ConfigError, TEMPLATE, validateConfig, type NotifyConfig } from "./config.ts";
 import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock, type RowSink } from "./planner.ts";
 import { MUTE_MS, Sender } from "./sender.ts";
 import { DUE_SET, NotifyStore, PENDING_MAX, type IntentOp } from "./store.ts";
@@ -114,6 +114,8 @@ export class NotifyService {
 	private halted = new Map<string, Halt>();
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
+	/** notify.db's path (":memory:" in tests): the nightly backup copies it. */
+	readonly dbPath: string;
 
 	private constructor(
 		private readonly o: NotifyOptions,
@@ -124,6 +126,7 @@ export class NotifyService {
 	) {
 		this.clock = o.clock ?? Date.now;
 		this.log = o.log ?? (() => {});
+		this.dbPath = notifyDbPath(o.fleetDb);
 		this.rows = new RowBuffer(o, this.clock);
 		const kindOn = (kind: string) => this.kindOn(kind);
 		this.planner = new Planner({ store, clock: this.clock, ...(o.random ? { random: o.random } : {}), enabled: () => o.switches.enabled(), kindOn, dayClock: () => o.switches.clock(), rows: this.rows.push });
@@ -351,7 +354,7 @@ export class NotifyService {
 
 	/** POST /v1/notify/send: a one-off (kind custom, category = template) that respects the mute and the day cap. */
 	async send(body: unknown): Promise<Reply> {
-		if (!isRecord(body) || !uidOk(body.userId) || typeof body.template !== "string" || !/^[\x21-\x7e]{1,128}$/.test(body.template)) return reply(400, { error: "send { userId, template, params?, data? }" });
+		if (!isRecord(body) || !uidOk(body.userId) || typeof body.template !== "string" || !TEMPLATE.test(body.template)) return reply(400, { error: "send { userId, template, params?, data? }" });
 		const extra = parseExtras(body, CUSTOM_KIND, body.userId, this.clock());
 		if (typeof extra === "string") return reply(400, { error: extra });
 		const now = this.clock();
@@ -432,7 +435,7 @@ function parseItem(raw: unknown, config: NotifyConfig | undefined, now: number, 
 	let template: string | null = null;
 	if (raw.template !== undefined) {
 		if (!kind.allowTemplate) return "template_not_allowed";
-		if (typeof raw.template !== "string" || !/^[\x21-\x7e]{1,128}$/.test(raw.template)) return "bad_template";
+		if (typeof raw.template !== "string" || !TEMPLATE.test(raw.template)) return "bad_template";
 		template = raw.template;
 	}
 	const data = typeof raw.data === "string" && raw.data ? raw.data : null;

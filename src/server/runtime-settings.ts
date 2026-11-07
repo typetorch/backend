@@ -63,10 +63,25 @@ export interface RuntimeValues {
 	/** Days of audit log entries kept (server/audit.ts). */
 	auditKeepDays: number;
 	deployKeepDays: number;
+	/** Experience notifications (plans/29, src/notify): planner and sender on / off. */
+	"notify.enabled": boolean;
+	/** Plan and write the rows, never POST to Roblox (on by default). */
+	"notify.dryRun": boolean;
+	/** Sends per second at most (the token bucket's ceiling). */
+	"notify.rate": number;
+	/** The per-user day for the daily cap: a rolling 24 h after a send, or the UTC date. */
+	"notify.clock": NotifyClock;
+	/** Per kind on / off (a kind missing here is on). Set one with `notify.kinds.<kind>.enabled`. */
+	"notify.kinds": Record<string, boolean>;
 }
+export const NOTIFY_CLOCKS = ["rolling24", "utc_day"] as const;
+export type NotifyClock = (typeof NOTIFY_CLOCKS)[number];
+/** `notify.kinds.<kind>.enabled` in a PATCH body: one kind's switch inside `notify.kinds`. */
+export const NOTIFY_KIND_KEY = /^notify\.kinds\.([a-z0-9_]{1,24})\.enabled$/;
+export const NOTIFY_KINDS_MAX = 64;
 export type RuntimeKey = keyof RuntimeValues;
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingGroup = "alerts" | "backendAlerts" | "access" | "limits" | "retention";
+export type SettingGroup = "alerts" | "backendAlerts" | "access" | "limits" | "retention" | "notify";
 
 interface BaseDef {
 	key: RuntimeKey;
@@ -85,7 +100,8 @@ export type SettingDef =
 	| (BaseDef & { kind: "users"; maxEntries: number })
 	| (BaseDef & { kind: "switch" })
 	| (BaseDef & { kind: "number"; min: number; max: number; unit: string; zero?: string })
-	| (BaseDef & { kind: "alertRules" });
+	| (BaseDef & { kind: "alertRules" })
+	| (BaseDef & { kind: "kindSwitches"; maxEntries: number });
 
 /** The editable settings, in the order the Settings page shows them. Bounds apply to values saved from the dashboard. */
 export const SETTINGS: readonly SettingDef[] = [
@@ -107,6 +123,11 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "errorRowsPerDay", env: "TYPETORCH_ERROR_ROWS_PER_DAY", group: "retention", kind: "number", min: 10_000, max: 1_000_000_000, unit: "rows / day", label: "Error rows per day", help: "New error count and player rows per UTC day; past it they are dropped and counted." },
 	{ key: "auditKeepDays", env: "TYPETORCH_AUDIT_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 3650, unit: "days", label: "Audit log history", help: "Days of audit log entries kept (who did what on the admin side; pruned hourly)." },
 	{ key: "deployKeepDays", env: "TYPETORCH_DEPLOY_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 3650, unit: "days", label: "Deploy history", help: "Days of releases kept in the deploy history (at most 10,000 rows; pruned hourly)." },
+	{ key: "notify.enabled", env: "TYPETORCH_NOTIFY_ENABLED", group: "notify", kind: "switch", label: "Notifications", help: "Experience notifications: plan and send (off = paused; intents still queue)." },
+	{ key: "notify.dryRun", env: "TYPETORCH_NOTIFY_DRY_RUN", group: "notify", kind: "switch", label: "Dry run", help: "Plan and write the rows, never send to Roblox. On by default: turn it off once the Notifications page looks right." },
+	{ key: "notify.rate", env: "TYPETORCH_NOTIFY_RATE", group: "notify", kind: "number", min: 1, max: 1000, unit: "sends / s", label: "Send rate", help: "Sends per second at most; a 429 from Roblox halves it for a while." },
+	{ key: "notify.clock", env: "TYPETORCH_NOTIFY_CLOCK", group: "notify", kind: "choice", options: NOTIFY_CLOCKS, label: "Daily cap clock", help: "rolling24: the next send at least 24 h after the last; utc_day: one per UTC date." },
+	{ key: "notify.kinds", env: "TYPETORCH_NOTIFY_KINDS_OFF", group: "notify", kind: "kindSwitches", maxEntries: NOTIFY_KINDS_MAX, label: "Kinds", help: "Per kind on / off (the Notifications page has the switches). A kind not listed is on." },
 ];
 
 /** Settings that stay environment-only (secrets and wiring): change them on Coolify and redeploy. */
@@ -131,6 +152,8 @@ export const ENV_ONLY = [
 	"TYPETORCH_CENTRAL_LOGIN_LABEL",
 	"TYPETORCH_ROBLOX_BROKER_CLIENT_ID",
 	"TYPETORCH_ROBLOX_BROKER_DISCOVERY",
+	"OPENCLOUD_NOTIFY_KEY",
+	"TYPETORCH_NOTIFY_KEY",
 ] as const;
 
 const BY_KEY = new Map<string, SettingDef>(SETTINGS.map((d) => [d.key, d]));
@@ -272,6 +295,18 @@ export function checkSetting(def: SettingDef, raw: unknown, base?: unknown): Run
 			} catch (error) {
 				throw new SettingsError((error as Error).message, 400, def.key);
 			}
+		case "kindSwitches": {
+			if (!isRecord(raw)) throw new SettingsError(`${def.key} is an object of kind name -> true / false`, 400, def.key);
+			const entries = Object.entries(raw);
+			if (entries.length > def.maxEntries) throw new SettingsError(`${def.key} holds at most ${def.maxEntries} kinds`, 400, def.key);
+			const out: Record<string, boolean> = {};
+			for (const [name, on] of entries) {
+				if (!/^[a-z0-9_]{1,24}$/.test(name)) throw new SettingsError(`${def.key}: kind names are 1-24 of a-z 0-9 _`, 400, def.key);
+				if (typeof on !== "boolean") throw new SettingsError(`${def.key}: each kind is true or false`, 400, def.key);
+				out[name] = on;
+			}
+			return out;
+		}
 		case "number": {
 			const range = `${def.min} to ${def.max}${def.zero ? ` (or 0 = ${def.zero})` : ""}`;
 			if (typeof raw !== "number" || !Number.isSafeInteger(raw)) throw new SettingsError(`${def.key} must be a whole number from ${range}`, 400, def.key);
@@ -303,6 +338,11 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		backendAlerts: config.backendAlerts ?? defaultAlertSettings(),
 		auditKeepDays: config.auditKeepDays,
 		deployKeepDays: config.deployKeepDays,
+		"notify.enabled": config.notifyEnabled,
+		"notify.dryRun": config.notifyDryRun,
+		"notify.rate": config.notifyRate,
+		"notify.clock": config.notifyClock,
+		"notify.kinds": Object.fromEntries(config.notifyKindsOff.map((k) => [k, false])),
 	};
 }
 
@@ -404,11 +444,11 @@ export class RuntimeSettings {
 				source: this.source(def.key),
 				...(def.kind === "choice" || def.kind === "levels" ? { options: [...def.options] } : {}),
 				...(def.kind === "number" ? { min: def.min, max: def.max, unit: def.unit, ...(def.zero ? { zero: def.zero } : {}) } : {}),
-				...(def.kind === "ips" || def.kind === "users" ? { maxEntries: def.maxEntries } : {}),
+				...(def.kind === "ips" || def.kind === "users" || def.kind === "kindSwitches" ? { maxEntries: def.maxEntries } : {}),
 				...(def.kind === "alertRules" ? { rules: rulesMeta() } : {}),
 			};
 			if (def.kind === "secret") return { ...meta, set: this.get(def.key) !== "", fallbackSet: this.fallback[def.key] !== "" };
-			const copy = (v: unknown) => (Array.isArray(v) ? [...v] : v);
+			const copy = (v: unknown) => (Array.isArray(v) ? [...v] : isRecord(v) && def.kind === "kindSwitches" ? { ...v } : v);
 			return { ...meta, value: copy(this.get(def.key)), fallback: copy(this.fallback[def.key]), fallbackSource: this.fallbackSource[def.key] };
 		});
 	}
@@ -420,13 +460,13 @@ export class RuntimeSettings {
 	patch(body: unknown, ctx: PatchContext): PatchResult {
 		if (!this.enabled) throw new SettingsError("runtime settings are off on this server (TYPETORCH_RUNTIME_SETTINGS=off): change the environment on Coolify and redeploy", 409);
 		if (!isRecord(body)) throw new SettingsError('send a JSON object of settings, e.g. { "ipPerMinute": 8000 } (null resets one to the environment)', 400);
-		const entries = Object.entries(body);
+		const entries = foldKindSwitches(body, this.get("notify.kinds"));
 		if (!entries.length) throw new SettingsError("nothing to change", 400);
 		const next: Partial<RuntimeValues> = { ...this.stored };
 		const touched = new Map<RuntimeKey, "set" | "reset">();
 		for (const [name, raw] of entries) {
 			const def = BY_KEY.get(name);
-			if (!def || !Object.hasOwn(body, name)) throw new SettingsError(`unknown setting ${safeName(name)}; the editable ones are ${SETTINGS.map((s) => s.key).join(", ")}`, 400);
+			if (!def || !(Object.hasOwn(body, name) || name === "notify.kinds")) throw new SettingsError(`unknown setting ${safeName(name)}; the editable ones are ${SETTINGS.map((s) => s.key).join(", ")}`, 400);
 			if (raw === null) {
 				delete next[def.key];
 				touched.set(def.key, "reset");
@@ -476,6 +516,14 @@ export class RuntimeSettings {
 			this.log(`runtime settings changed by ${ctx.who} (${ctx.via}): ${[set.length ? `set ${set.join(", ")}` : "", reset.length ? `reset ${reset.join(", ")}` : ""].filter(Boolean).join("; ")}`);
 		}
 		return { changed, tokenLoginTurnedOff: wasOn && !this.get("tokenLogin") };
+	}
+
+	/**
+	 * A change the server makes itself (no request): e.g. S1b stopping a notification kind whose template doesn't exist.
+	 * Same checks and audit list as a PATCH, as the given actor; throws SettingsError (e.g. runtime settings off).
+	 */
+	patchBySystem(body: Record<string, unknown>, who: string): PatchResult {
+		return this.patch(body, { who, via: "bearer", ip: "", robloxSession: false, robloxSignIn: false });
 	}
 
 	/** Adds a test alert to the audit list (and the log). `result` never holds the URL. */
@@ -562,4 +610,30 @@ export class RuntimeSettings {
 			// Not every file system has modes (Windows).
 		}
 	}
+}
+
+/**
+ * `notify.kinds.<kind>.enabled: true | false | null` entries in a PATCH body become one `notify.kinds` entry (merged into
+ * the current map; null drops that kind's entry, i.e. back to on). Other entries pass through unchanged.
+ */
+function foldKindSwitches(body: Record<string, unknown>, current: Record<string, boolean>): [string, unknown][] {
+	const out: [string, unknown][] = [];
+	let kinds: Record<string, boolean> | undefined;
+	for (const [name, raw] of Object.entries(body)) {
+		const m = NOTIFY_KIND_KEY.exec(name);
+		if (!m) {
+			out.push([name, raw]);
+			continue;
+		}
+		kinds ??= { ...(isRecord(body["notify.kinds"]) ? (body["notify.kinds"] as Record<string, boolean>) : current) };
+		if (raw === null) delete kinds[m[1] as string];
+		else if (typeof raw === "boolean") kinds[m[1] as string] = raw;
+		else throw new SettingsError(`${name} is true or false (or null to reset it)`, 400, "notify.kinds");
+	}
+	if (kinds) {
+		const i = out.findIndex(([n]) => n === "notify.kinds");
+		if (i >= 0) out.splice(i, 1);
+		out.push(["notify.kinds", kinds]);
+	}
+	return out;
 }
