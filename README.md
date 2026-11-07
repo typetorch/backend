@@ -899,7 +899,7 @@ reached it (drop-offs: their last step and when; playtime funnels: their playtim
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
 Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
-Sessions, Timeline and Errors views), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
+Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
 Events, Funnels, Flow, Retention, First session, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
@@ -1127,7 +1127,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `monetization-players` | who bought one product (`kind` + `product`) or anything: purchases, Robux paid, revenue, distinct products, first and last purchase per player, biggest spenders first (`limit`, at most 200) | 30 days |
 | `notify-funnel` | [notification](#experience-notifications) funnel per kind and UTC day of the send: wants, planned, sent (real), dry, tests, opened (distinct nids with an `open` row), played >= 1 min, returned D1 (a session the day after the send), assisted (back within 24 h without opening); open / played / return rates. `kind` for one. Only the time range filters (backend rows have no device or build) | 14 days |
 | `notify-optin` | the opt-in prompt: checks (and could prompt), shown, closed (average seconds up), errors, inferred subscribed / not subscribed (from the send results); by `where` and per day | 30 days |
-| `notify-player` | one player's notify rows (`pids`, at most 20): prompt checks / shown / closed (where, secs, err), inferred consent, opens, plays; newest first (`limit` 500). Behind `GET /v1/notify/user` | 400 days |
+| `notify-player` | one player's notify rows (`pids`, at most 20): prompt checks / shown / closed (where, secs, err), inferred consent, opens, plays; newest first (`limit` 500); `opens`: the join rows that came from a send (props carry its `nid`) with their raw join data `jd` (plans/30). Behind `GET /v1/notify/user` | 400 days |
 | `notify-queue` | notification sends per hour (planned, sent, dry, failed, 429s, skipped), planned by why, skipped by kind and why, failures by kind, HTTP status and code (final or retried). The live queue is `GET /v1/notify/status` | 1 day |
 | `monetization-purchases` | the latest purchases, newest first: player, session, product, kind, Robux paid, revenue and `where` (`limit`, 50, at most 200) | 30 days |
 
