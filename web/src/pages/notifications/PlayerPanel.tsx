@@ -262,7 +262,7 @@ export function PlayerPanel() {
 		open(String(uid), "uid");
 	};
 	return (
-		<Section title="Player" description="One player's notifications: consent, every send with its opens and plays, the intents. Find them by UserId, pid or a name the server has seen.">
+		<Section className="min-w-0" title="Player" description="One player's notifications: consent, every send with its opens and plays, the intents. Find them by UserId, pid or a name the server has seen.">
 			<div className="space-y-3">
 				<form className="flex flex-wrap items-center gap-2" onSubmit={submit} aria-label="Find a player" role="search">
 					<Input aria-label="Player" className="h-8 w-full min-w-0 sm:w-72" value={text} onChange={(e) => setText(e.target.value)} placeholder="UserId, pid or username" spellCheck={false} />
