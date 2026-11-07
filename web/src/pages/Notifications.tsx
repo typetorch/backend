@@ -16,6 +16,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, Plus, Send, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { useSearchParams } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
@@ -32,8 +33,8 @@ import { isReadOnly, useAuth } from "@/lib/auth";
 import { describeRange } from "@/lib/filters";
 import { fmtAgo, fmtInt, fmtPct, fmtTime, plural } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
-import type { NotifyFunnelCounts, NotifyFunnelResult, NotifyHalt, NotifyOptinResult, NotifyQueueFailure, NotifyQueueResult, NotifyStatus } from "@/lib/types";
-import { PlayerPanel } from "./notifications/PlayerPanel";
+import type { NotifyRecentSend, NotifyFunnelCounts, NotifyFunnelResult, NotifyHalt, NotifyOptinResult, NotifyQueueFailure, NotifyQueueResult, NotifyStatus } from "@/lib/types";
+import { PlayerPanel, SEND_COLUMNS } from "./notifications/PlayerPanel";
 
 export const NOTIFY_STATUS_KEY = ["notify-status"] as const;
 const PICKED = "data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
@@ -290,6 +291,49 @@ function FailuresSection({ data, status }: { data: NotifyQueueResult; status: No
 			) : (
 				<EmptyState>No failed sends in this range.</EmptyState>
 			)}
+		</Section>
+	);
+}
+
+// Recent sends (owners) ----------------------------------------------------------------------------------------------------
+
+const RECENT_LIMIT = 100;
+
+function RecentSection({ kind }: { kind: string }) {
+	const [, setParams] = useSearchParams();
+	const q = useQuery({ queryKey: ["notify-recent", kind], queryFn: ({ signal }) => api.notifyRecent({ limit: RECENT_LIMIT, ...(kind ? { kind } : {}) }, signal), refetchInterval: 15_000, retry: false });
+	// A player's name opens the Player panel below (same page, by UserId) and scrolls to it.
+	const openPlayer = (uid: number) => {
+		setParams((current) => {
+			const copy = new URLSearchParams(current);
+			copy.set("player", String(uid));
+			copy.set("by", "uid");
+			return copy;
+		});
+		requestAnimationFrame(() => document.getElementById("notify-player-panel")?.scrollIntoView?.({ behavior: "smooth", block: "start" }));
+	};
+	const columns: DataColumn<NotifyRecentSend>[] = [
+		{
+			id: "player",
+			header: "Player",
+			accessor: (r) => r.name ?? String(r.userId),
+			cell: (r) => (
+				<button type="button" className="text-left underline-offset-2 hover:underline" onClick={() => openPlayer(r.userId)} title={`UserId ${r.userId}`}>
+					{r.name ? <span>@{r.name}</span> : <span className="font-mono text-xs">{r.userId}</span>}
+				</button>
+			),
+		},
+		...(SEND_COLUMNS as unknown as DataColumn<NotifyRecentSend>[]),
+	];
+	return (
+		<Section
+			title="Recent notifications"
+			description={`The newest ${RECENT_LIMIT} sends of everyone${kind ? ` (kind ${kind})` : ""}, live (every 15 s): planned, sent, failed, opened and played. Pick a player to open them below.`}
+			actions={q.data ? <Badge variant="outline">{plural(q.data.sends.length, "send")}</Badge> : undefined}
+		>
+			<QueryState query={q} loadingRows={4} isEmpty={(d) => d.sends.length === 0} empty="Nothing planned or sent yet.">
+				{(d) => <DataTable id="notify-recent" label="Recent notifications" columns={columns} data={d.sends} rowId={(r) => r.nid} density="compact" maxHeight="28rem" />}
+			</QueryState>
 		</Section>
 	);
 }
@@ -706,6 +750,7 @@ export default function Notifications() {
 			<QueryState query={queue} loadingRows={4}>
 				{(data) => <QueueSection data={data} status={live} />}
 			</QueryState>
+			{readOnly || forbidden ? null : <RecentSection kind={kind} />}
 			{readOnly || forbidden ? (
 				<p className="text-sm text-muted-foreground">The live queue and the controls are for owners.</p>
 			) : (

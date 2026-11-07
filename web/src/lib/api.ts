@@ -31,6 +31,7 @@ import type {
 	NotifyStatus,
 	NotifyTestInput,
 	NotifyTestResult,
+	NotifyRecentView,
 	NotifyUserLookup,
 	NotifyUserView,
 	Health,
@@ -264,6 +265,8 @@ export function createApi(options: ApiOptions = {}) {
 		notifyTest: (input: NotifyTestInput, signal?: AbortSignal) => post<NotifyTestResult>("/v1/notify/test", input, signal),
 		/** One player's notifications (owners): consent, sends, intents and their notify rows, by UserId, pid or a cached name. */
 		notifyUser: (lookup: NotifyUserLookup, signal?: AbortSignal) => get<NotifyUserView>(`/v1/notify/user${qs(lookup)}`, signal),
+		notifyRecent: (options: { limit?: number; kind?: string } = {}, signal?: AbortSignal) =>
+			get<NotifyRecentView>(`/v1/notify/recent${qs({ ...(options.limit ? { limit: String(options.limit) } : {}), ...(options.kind ? { kind: options.kind } : {}) })}`, signal),
 		/** The backend alert rules' state on the last run (the rules themselves are the backendAlerts setting). */
 		alertRules: (signal?: AbortSignal) => get<AlertRulesStatus>("/v1/admin/alert-rules", signal),
 		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */

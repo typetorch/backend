@@ -51,7 +51,7 @@ const SEND_TONE: Record<NotifyUserSend["status"], "default" | "secondary" | "des
 	cancelled: "secondary",
 };
 
-const SEND_COLUMNS: DataColumn<NotifyUserSend>[] = [
+export const SEND_COLUMNS: DataColumn<NotifyUserSend>[] = [
 	{
 		id: "kind",
 		header: "Kind",
@@ -182,7 +182,7 @@ function Consent({ view }: { view: NotifyUserView }) {
 	);
 }
 
-function PlayerView({ view, onPick }: { view: NotifyUserView; onPick(uid: number): void }) {
+export function PlayerView({ view, onPick }: { view: NotifyUserView; onPick(uid: number): void }) {
 	const pending = view.intents.filter((i) => i.status === "pending").length;
 	return (
 		<div className="space-y-4" aria-label="Player notifications" role="region">
@@ -262,6 +262,7 @@ export function PlayerPanel() {
 		open(String(uid), "uid");
 	};
 	return (
+		<div id="notify-player-panel" className="scroll-mt-4">
 		<Section className="min-w-0" title="Player" description="One player's notifications: consent, every send with its opens and plays, the intents. Find them by UserId, pid or a name the server has seen.">
 			<div className="space-y-3">
 				<form className="flex flex-wrap items-center gap-2" onSubmit={submit} aria-label="Find a player" role="search">
@@ -300,5 +301,6 @@ export function PlayerPanel() {
 				)}
 			</div>
 		</Section>
+		</div>
 	);
 }

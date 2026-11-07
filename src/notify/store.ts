@@ -32,6 +32,7 @@ CREATE INDEX IF NOT EXISTS notify_users_seen ON notify_users (last_seen);
 CREATE TABLE IF NOT EXISTS notify_sends (nid TEXT PRIMARY KEY, user_id INTEGER NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0, template TEXT, category TEXT, params TEXT, data TEXT, planned_at INTEGER NOT NULL, sent_at INTEGER, status TEXT NOT NULL, http INTEGER, code TEXT, roblox_id TEXT, try INTEGER NOT NULL DEFAULT 0, opened_at INTEGER, played_secs INTEGER, test INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS notify_sends_user ON notify_sends (user_id, created);
 CREATE INDEX IF NOT EXISTS notify_sends_status ON notify_sends (status, updated);
+CREATE INDEX IF NOT EXISTS notify_sends_created ON notify_sends (created);
 CREATE TABLE IF NOT EXISTS notify_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, t INTEGER NOT NULL, name TEXT NOT NULL, props TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS notify_outbox_uid ON notify_outbox (uid);
 CREATE TABLE IF NOT EXISTS notify_config (id INTEGER PRIMARY KEY CHECK (id = 1), config TEXT NOT NULL, updated_at INTEGER NOT NULL, by TEXT NOT NULL);
@@ -516,6 +517,12 @@ export class NotifyStore {
 
 	async userSends(userId: number, limit: number): Promise<SendRow[]> {
 		return this.db.all<SendRow>("SELECT * FROM notify_sends WHERE user_id = ? ORDER BY created DESC LIMIT ?", [userId, limit]);
+	}
+
+	/** The newest sends of everyone (the Notifications page's live table), optionally one kind. */
+	async latestSends(limit: number, kind?: string): Promise<SendRow[]> {
+		if (kind) return this.db.all<SendRow>("SELECT * FROM notify_sends WHERE kind = ? ORDER BY created DESC LIMIT ?", [kind, limit]);
+		return this.db.all<SendRow>("SELECT * FROM notify_sends ORDER BY created DESC LIMIT ?", [limit]);
 	}
 
 	async userIntents(userId: number, limit: number): Promise<IntentRow[]> {

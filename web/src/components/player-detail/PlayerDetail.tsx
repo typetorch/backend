@@ -4,13 +4,15 @@
  * Sessions, Timeline, Errors), the chosen view below. The view and Chart / Table live in the URL (`view`, `show`), next to the page's pid and filters.
  */
 import { useQuery } from "@tanstack/react-query";
-import { Bug, CalendarDays, Clock, Coins, History, type LucideIcon } from "lucide-react";
+import { Bell, Bug, CalendarDays, Clock, Coins, History, type LucideIcon } from "lucide-react";
 import { useCallback } from "react";
 import { useSearchParams } from "react-router";
 import { QueryState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import { isReadOnly, useAuth } from "@/lib/auth";
+import { PlayerView as NotifyPlayerView } from "@/pages/notifications/PlayerPanel";
 import { describeRange } from "@/lib/filters";
 import { useAnalytics, useFilters } from "@/lib/hooks";
 import { ErrorsView } from "./ErrorsView";
@@ -20,7 +22,7 @@ import type { Show } from "./SeriesView";
 import { PlaytimeView, SessionsView, SpendingView } from "./StatViews";
 import { TimelineView } from "./TimelineView";
 
-export const PLAYER_VIEWS = ["spending", "playtime", "sessions", "timeline", "errors"] as const;
+export const PLAYER_VIEWS = ["spending", "playtime", "sessions", "timeline", "errors", "notifications"] as const;
 export type PlayerView = (typeof PLAYER_VIEWS)[number];
 
 const VIEW_BUTTONS: { id: PlayerView; label: string; icon: LucideIcon }[] = [
@@ -29,7 +31,14 @@ const VIEW_BUTTONS: { id: PlayerView; label: string; icon: LucideIcon }[] = [
 	{ id: "sessions", label: "Sessions", icon: CalendarDays },
 	{ id: "timeline", label: "Timeline", icon: History },
 	{ id: "errors", label: "Errors", icon: Bug },
+	{ id: "notifications", label: "Notifications", icon: Bell },
 ];
+
+/** The player's notifications (owners: GET /v1/notify/user by pid): consent with dates, every send with its opens and plays, the intents. */
+function NotificationsView({ pid }: { pid: string }) {
+	const q = useQuery({ queryKey: ["notify-user", { pid }], queryFn: ({ signal }) => api.notifyUser({ pid }, signal), retry: false, refetchInterval: 30_000 });
+	return <QueryState query={q} loadingRows={3}>{(view) => <NotifyPlayerView view={view} onPick={() => undefined} />}</QueryState>;
+}
 
 const isView = (value: string | null): value is PlayerView => (PLAYER_VIEWS as readonly (string | null)[]).includes(value);
 
@@ -53,6 +62,9 @@ export function PlayerDetail({ pid }: { pid: string }) {
 	const { state } = useFilters();
 	const stats = useAnalytics("player-stats", { pid });
 	const profile = useQuery({ queryKey: ["player-profile", pid], queryFn: ({ signal }) => api.playerProfile(pid, signal), retry: false, staleTime: 5 * 60_000 });
+	// Notifications are an owner route: the read-only role doesn't get the button.
+	const owner = !isReadOnly(useAuth());
+	const buttons = VIEW_BUTTONS.filter((b) => b.id !== "notifications" || owner);
 	const onShow = (next: Show) => patch({ show: next === "table" ? "table" : null });
 	return (
 		<Card className="gap-0 py-0">
@@ -65,8 +77,8 @@ export function PlayerDetail({ pid }: { pid: string }) {
 					<PlayerFunnels pid={pid} />
 				</section>
 				<nav aria-label="Player views" className="border-b p-2 sm:p-3">
-					<div className="grid grid-cols-5 gap-1 rounded-lg bg-muted p-1">
-						{VIEW_BUTTONS.map(({ id, label, icon: Icon }) => (
+					<div className="grid gap-1 rounded-lg bg-muted p-1" style={{ gridTemplateColumns: `repeat(${buttons.length}, minmax(0, 1fr))` }}>
+						{buttons.map(({ id, label, icon: Icon }) => (
 							<Button
 								key={id}
 								variant={view === id ? "outline" : "ghost"}
@@ -81,8 +93,10 @@ export function PlayerDetail({ pid }: { pid: string }) {
 					</div>
 				</nav>
 				<div className="space-y-3 p-4 sm:p-6">
-					{stats.data?.window.clamped && view !== "timeline" && view !== "errors" ? <p className="text-xs text-muted-foreground">The range is longer than 400 days: these numbers cover its last 400.</p> : null}
-					{view === "errors" ? (
+					{stats.data?.window.clamped && view !== "timeline" && view !== "errors" && view !== "notifications" ? <p className="text-xs text-muted-foreground">The range is longer than 400 days: these numbers cover its last 400.</p> : null}
+					{view === "notifications" && owner ? (
+						<NotificationsView pid={pid} />
+					) : view === "errors" ? (
 						<ErrorsView pid={pid} />
 					) : view === "timeline" ? (
 						<TimelineView pid={pid} />

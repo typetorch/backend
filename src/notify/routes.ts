@@ -13,7 +13,7 @@ import { Durable } from "../store/durable.ts";
 import { CUSTOM_KIND, ConfigError, PARAM_NAME, TEMPLATE, placeholders, validateConfig, type KindConfig, type NotifyConfig } from "./config.ts";
 import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock } from "./planner.ts";
 import { MUTE_MS, Sender } from "./sender.ts";
-import { DUE_SET, NotifyStore, PENDING_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow } from "./store.ts";
+import { DUE_SET, NotifyStore, PENDING_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow, type SendRow } from "./store.ts";
 import { DATA_MAX_BYTES, KIND_PATTERN, NID_PATTERN, NotifyKeyStore, newNid, parseKeys, tokenLength, type NotifyKeys } from "./token.ts";
 
 export const INTENTS_BODY_MAX = 256 * 1024;
@@ -487,26 +487,38 @@ export class NotifyService {
 						busy: u.busy,
 					}
 				: null,
-			sends: sends.map((x) => ({
-				nid: x.nid,
-				kind: x.kind,
-				status: x.status,
-				test: Boolean(Number(x.test)),
-				plannedAt: n(x.planned_at),
-				sentAt: n(x.sent_at),
-				http: n(x.http),
-				code: x.code,
-				try: Number(x.try),
-				openedAt: n(x.opened_at),
-				playedSecs: n(x.played_secs),
-				category: x.category,
-			})),
+			sends: sends.map(sendView),
 			intents: intents.map((x) => ({ kind: x.kind, key: x.key, status: x.status, at: n(x.at), until: n(x.until), updated: n(x.updated), planned: x.nid !== null, params: x.params ? (JSON.parse(x.params) as unknown) : null })),
 		};
 	}
 
+	/** GET /v1/notify/recent (owners): the newest sends of everyone, newest first; app.ts adds the names. */
+	async recentView(limit: number, kind?: string): Promise<{ sends: (ReturnType<typeof sendView> & { userId: number })[] }> {
+		const rows = await this.store.latestSends(limit, kind);
+		return { sends: rows.map((x) => ({ ...sendView(x), userId: Number(x.user_id) })) };
+	}
+
 	/** For tests and the status line: the mute that S1 sets. */
 	static readonly MUTE_MS = MUTE_MS;
+}
+
+/** One notify_sends row as the explorer reads it (the per-player view and the recent table). */
+function sendView(x: SendRow) {
+	const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+	return {
+		nid: x.nid,
+		kind: x.kind,
+		status: x.status,
+		test: Boolean(Number(x.test)),
+		plannedAt: n(x.planned_at),
+		sentAt: n(x.sent_at),
+		http: n(x.http),
+		code: x.code,
+		try: Number(x.try),
+		openedAt: n(x.opened_at),
+		playedSecs: n(x.played_secs),
+		category: x.category,
+	};
 }
 
 /** params / data of the admin sends, checked like an intent's. */

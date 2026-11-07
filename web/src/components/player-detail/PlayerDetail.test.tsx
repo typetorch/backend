@@ -167,6 +167,29 @@ describe("Players page: the player detail container", () => {
 		expect(within(await detail()).queryByRole("link", { name: "Notifications" })).toBeNull();
 	});
 
+	it("owners get a Notifications view with the player's sends; the read-only role gets no button", async () => {
+		const spy = vi.spyOn(api, "notifyUser").mockResolvedValue({
+			userId: 7,
+			known: true,
+			pids: [ALPHA],
+			name: "alpha",
+			displayName: "Alpha",
+			state: null,
+			sends: [{ nid: "nid0000001", kind: "streak", status: "sent", test: false, plannedAt: Date.now() - 60_000, sentAt: Date.now() - 50_000, http: 200, code: null, try: 1, openedAt: null, playedSecs: null, category: "streak" }],
+			intents: [],
+			events: null,
+		});
+		mount(`?pid=${ALPHA}`);
+		const region = await detail();
+		fireEvent.click(viewButton(region, "Notifications"));
+		await waitFor(() => expect(location).toContain("view=notifications"));
+		expect(await within(region).findByRole("table", { name: "Past notifications" })).toBeTruthy();
+		expect(spy).toHaveBeenCalledWith({ pid: ALPHA }, expect.anything());
+		cleanup();
+		mount(`?pid=${ALPHA}`, { ok: true, role: "web", via: "cookie" });
+		expect(within(within(await detail()).getByRole("navigation", { name: "Player views" })).queryByRole("button", { name: "Notifications" })).toBeNull();
+	});
+
 	it("switches views with the buttons: Spending, Playtime, Sessions, Timeline (the timeline loads only there)", async () => {
 		mount(`?pid=${ALPHA}`);
 		const region = await detail();
