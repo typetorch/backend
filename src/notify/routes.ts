@@ -10,7 +10,7 @@
 import { dirname, join } from "node:path";
 import { openSqlite, type FleetDb } from "../fleet/db.ts";
 import { Durable } from "../store/durable.ts";
-import { CUSTOM_KIND, ConfigError, TEMPLATE, validateConfig, type NotifyConfig } from "./config.ts";
+import { CUSTOM_KIND, ConfigError, PARAM_NAME, TEMPLATE, placeholders, validateConfig, type KindConfig, type NotifyConfig } from "./config.ts";
 import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock, type RowSink } from "./planner.ts";
 import { MUTE_MS, Sender } from "./sender.ts";
 import { DUE_SET, NotifyStore, PENDING_MAX, type IntentOp } from "./store.ts";
@@ -21,7 +21,6 @@ export const ITEMS_MAX = 200;
 export const SMALL_BODY_MAX = 4 * 1024;
 export const KEY_MAX = 64;
 export const PARAMS_MAX = 8;
-export const PARAM_NAME = /^[a-zA-Z0-9_]{1,32}$/;
 export const PARAM_VALUE_MAX = 64;
 /** An intent's window: `until` defaults to `at` + 7 days, and may reach a year out at most. */
 export const DEFAULT_WINDOW_MS = 7 * DAY_MS;
@@ -314,6 +313,7 @@ export class NotifyService {
 			kind,
 			enabled: this.kindOn(kind),
 			template: Boolean(k.template),
+			...(k.text ? { text: k.text } : {}),
 			pending: pending.get(kind) ?? 0,
 			...(this.halted.has(kind) ? { halted: "bad_template" } : {}),
 		}));
@@ -344,6 +344,8 @@ export class NotifyService {
 		if (!kind) return reply(400, { error: "unknown kind: push the config first (typetorch notify push)" });
 		const extra = parseExtras(body, body.kind, body.userId, this.clock());
 		if (typeof extra === "string") return reply(400, { error: extra });
+		const mismatch = paramsMismatch(kind, extra.params ? (JSON.parse(extra.params) as Record<string, string>) : null);
+		if (mismatch) return reply(400, { error: `${mismatch}: params must be exactly the placeholders of the kind's text` });
 		const nid = newNid();
 		await this.store.plan({ nid, userId: body.userId, kind: body.kind, key: `test:${nid}`, rev: 0, template: kind.template ?? null, category: kind.category ?? body.kind, params: extra.params, data: extra.data, plannedAt: this.clock(), test: true });
 		this.rows.push(body.userId, "planned", { nid, k: body.kind, for: Math.floor(this.clock() / 1000), why: "asap", test: true });
@@ -385,6 +387,16 @@ function parseExtras(body: Record<string, unknown>, kind: string, userId: number
 	const data = typeof body.data === "string" && body.data ? body.data : null;
 	if (tokenLength({ nid: "0000000000", kind, userId, t: Math.floor(now / 1000) + 30 * 86_400, data: data ?? "" }) > 200) return "the launch data would be over 200 bytes";
 	return { params: params ? JSON.stringify(params) : null, data };
+}
+
+/** A kind with `text`: the params must name exactly its placeholders. */
+function paramsMismatch(kind: KindConfig, params: Record<string, string> | null): "missing_param" | "unknown_param" | undefined {
+	if (!kind.text) return undefined;
+	const wanted = placeholders(kind.text);
+	const given = Object.keys(params ?? {});
+	if (wanted.some((p) => !given.includes(p))) return "missing_param";
+	if (given.some((p) => !wanted.includes(p))) return "unknown_param";
+	return undefined;
 }
 
 /** false = bad; null = none. */
@@ -431,6 +443,8 @@ function parseItem(raw: unknown, config: NotifyConfig | undefined, now: number, 
 	if (until <= at || at > now + MAX_AHEAD_MS || until > now + MAX_AHEAD_MS) return "bad_time";
 	const params = checkParams(raw.params);
 	if (params === false) return "bad_params";
+	const mismatch = paramsMismatch(kind, params);
+	if (mismatch) return mismatch;
 	if (raw.data !== undefined && (typeof raw.data !== "string" || Buffer.byteLength(raw.data, "utf8") > DATA_MAX_BYTES)) return "bad_data";
 	let template: string | null = null;
 	if (raw.template !== undefined) {

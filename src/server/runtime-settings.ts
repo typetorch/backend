@@ -125,7 +125,7 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "deployKeepDays", env: "TYPETORCH_DEPLOY_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 3650, unit: "days", label: "Deploy history", help: "Days of releases kept in the deploy history (at most 10,000 rows; pruned hourly)." },
 	{ key: "notify.enabled", env: "TYPETORCH_NOTIFY_ENABLED", group: "notify", kind: "switch", label: "Notifications", help: "Experience notifications: plan and send (off = paused; intents still queue)." },
 	{ key: "notify.dryRun", env: "TYPETORCH_NOTIFY_DRY_RUN", group: "notify", kind: "switch", label: "Dry run", help: "Plan and write the rows, never send to Roblox. On by default: turn it off once the Notifications page looks right." },
-	{ key: "notify.rate", env: "TYPETORCH_NOTIFY_RATE", group: "notify", kind: "number", min: 1, max: 1000, unit: "sends / s", label: "Send rate", help: "Sends per second at most; a 429 from Roblox halves it for a while." },
+	{ key: "notify.rate", env: "TYPETORCH_NOTIFY_RATE", group: "notify", kind: "number", min: 1, max: 4000, unit: "sends / s", label: "Send rate ceiling", help: "Our own ceiling on sends per second (Roblox allows 4000 a second per key and says so on every answer; the sender follows that too). A 429 halves the rate for a while." },
 	{ key: "notify.clock", env: "TYPETORCH_NOTIFY_CLOCK", group: "notify", kind: "choice", options: NOTIFY_CLOCKS, label: "Daily cap clock", help: "rolling24: the next send at least 24 h after the last; utc_day: one per UTC date." },
 	{ key: "notify.kinds", env: "TYPETORCH_NOTIFY_KINDS_OFF", group: "notify", kind: "kindSwitches", maxEntries: NOTIFY_KINDS_MAX, label: "Kinds", help: "Per kind on / off (the Notifications page has the switches). A kind not listed is on." },
 ];

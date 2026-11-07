@@ -125,7 +125,7 @@ export function weeklyCap(config: NotifyConfig, user: PlannerUser, now: number):
 
 export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision<I> {
 	const { user, config, now, clock } = input;
-	const out: Decision<I> = { skips: [], superseded: [], nextCheck: now + IDLE_RECHECK_MS };
+	const out: Decision<I> = { skips: [], superseded: [], nextCheck: Number.POSITIVE_INFINITY };
 	const later = (t: number) => (out.nextCheck = Math.min(out.nextCheck, Math.max(t, now + 1000)));
 	const sentKey = new Set(input.sentKeys.map((s) => `${s.kind}\u0000${s.key}`));
 	const sentKind = new Set(input.sentKeys.map((s) => s.kind));
@@ -142,7 +142,10 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 		}
 		if (intent.until <= now) continue;
 		const kind = config.kinds[intent.kind];
-		if (!kind || !input.kindOn(intent.kind)) continue;
+		if (!kind || !input.kindOn(intent.kind)) {
+			later(now + IDLE_RECHECK_MS);
+			continue;
+		}
 		if ((kind.repeat === "once_ever" && sentKind.has(intent.kind)) || (kind.repeat === "per_key" && sentKey.has(`${intent.kind}\u0000${intent.key}`))) {
 			out.superseded.push(intent);
 			kindSkips.set(intent.kind, "repeat");
@@ -165,6 +168,7 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 		eligible.push({ intent, kind });
 	}
 	if (!eligible.length) {
+		if (!Number.isFinite(out.nextCheck)) out.nextCheck = now + IDLE_RECHECK_MS;
 		for (const [kind, why] of kindSkips) if (why !== "repeat") out.skips.push({ kind, why });
 		for (const [kind, why] of kindSkips) if (why === "repeat") out.skips.push({ kind, why });
 		return out;

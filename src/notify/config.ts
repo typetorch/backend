@@ -14,6 +14,8 @@ export const KINDS_MAX = 64;
 export const CONFIG_BODY_MAX = 64 * 1024;
 
 export interface KindConfig {
+	/** The template's text (<= 99 chars, `{placeholder}`s), pushed so the backend can check a want's params against it. */
+	text?: string;
 	template?: string;
 	priority: number;
 	repeat: Repeat;
@@ -45,6 +47,28 @@ const int = (v: unknown, name: string, min: number, max: number): number => {
 export const TEMPLATE = /^[^\0-\x1f\x7f]{1,128}$/;
 /** Roblox's analytics category: any non-empty text (bounded). */
 const CATEGORY = /^[^\0-\x1f\x7f]{1,1024}$/;
+/** A param / placeholder name (contract: dashes too, Roblox templates use `{user-streak-remaining}`). */
+export const PARAM_NAME = /^[a-zA-Z0-9_-]{1,32}$/;
+export const TEXT_MAX = 99;
+
+/** Why a template text is wrong (too long, an odd brace, a bad placeholder name), or undefined. */
+export function textProblem(text: string): string | undefined {
+	if ([...text].length > TEXT_MAX) return `at most ${TEXT_MAX} characters`;
+	if (/[\0-\x1f\x7f]/.test(text)) return "no control characters";
+	let rest = text;
+	for (const m of text.matchAll(/\{([^{}]*)\}/g)) {
+		if (!PARAM_NAME.test(m[1] as string)) return `placeholder names are ${PARAM_NAME.source}`;
+		rest = rest.replace(m[0], "");
+	}
+	if (/[{}]/.test(rest)) return "an unbalanced { or }";
+	return undefined;
+}
+
+/** The placeholders of a template text, in order, without repeats. */
+export function placeholders(text: string): string[] {
+	return [...new Set([...text.matchAll(/\{([a-zA-Z0-9_-]{1,32})\}/g)].map((m) => m[1] as string))];
+}
+
 /** A positive number of hours (fractions allowed), at most ~100 years. */
 const hours = (v: unknown, name: string): number => {
 	if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 876_000) throw new ConfigError(`${name} must be a number of hours above 0`);
@@ -64,7 +88,7 @@ export const DEFAULTS = {
 
 function kind(name: string, raw: unknown): KindConfig {
 	if (!isRecord(raw)) throw new ConfigError(`kinds.${name} must be an object`);
-	const known = new Set(["template", "priority", "repeat", "send", "perWeek", "maxWaitHours", "category", "allowTemplate", "beats"]);
+	const known = new Set(["text", "template", "priority", "repeat", "send", "perWeek", "maxWaitHours", "category", "allowTemplate", "beats"]);
 	for (const key of Object.keys(raw)) if (!known.has(key)) throw new ConfigError(`kinds.${name}: unknown field ${/^[A-Za-z]{1,32}$/.test(key) ? key : "(a field name)"}`);
 	const out: KindConfig = {
 		priority: int(raw.priority ?? 100, `kinds.${name}.priority`, 0, 1000),
@@ -78,6 +102,12 @@ function kind(name: string, raw: unknown): KindConfig {
 			return s as SendMode;
 		})(),
 	};
+	if (raw.text !== undefined && raw.text !== null && raw.text !== "") {
+		if (typeof raw.text !== "string") throw new ConfigError(`kinds.${name}.text is the template's text`);
+		const problem = textProblem(raw.text);
+		if (problem) throw new ConfigError(`kinds.${name}.text: ${problem}`);
+		out.text = raw.text;
+	}
 	if (raw.template !== undefined && raw.template !== null && raw.template !== "") {
 		if (typeof raw.template !== "string" || !TEMPLATE.test(raw.template)) throw new ConfigError(`kinds.${name}.template is a message id of at most 128 characters`);
 		out.template = raw.template;
