@@ -207,6 +207,22 @@ describe("notify routes", () => {
 		expect((await h.call("/v1/notify/user?uid=1", { headers: bearer(API) })).status).toBe(401);
 	});
 
+	test("the recent table: newest sends of everyone, a kind filter, limits, owners only", async () => {
+		const a = await asJson(await h.call("/v1/notify/test", post(ADMIN, { userId: 7, kind: "streak" })));
+		const b = await asJson(await h.call("/v1/notify/test", post(ADMIN, { userId: 8, kind: "streak" })));
+		const r = await h.call("/v1/notify/recent?limit=2", { headers: bearer(ADMIN) });
+		expect(r.status).toBe(200);
+		const v = await asJson(r);
+		expect(v.sends).toHaveLength(2);
+		expect(v.sends.map((x: { nid: string }) => x.nid).sort()).toEqual([a.nid, b.nid].sort());
+		expect(v.sends[0]).toMatchObject({ kind: "streak", test: true, userId: expect.any(Number), name: null });
+		expect((await asJson(await h.call("/v1/notify/recent?kind=nope", { headers: bearer(ADMIN) }))).sends).toEqual([]);
+		expect((await h.call("/v1/notify/recent?limit=0", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/notify/recent?limit=501", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/notify/recent?kind=Bad-Kind", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/notify/recent", { headers: bearer(API) })).status).toBe(401);
+	});
+
 	test("until must be after at; presence `at` in ms", async () => {
 		const now = Math.floor(h.now() / 1000);
 		const r = await asJson(await intents([{ op: "want", u: 1, k: "streak", key: "eq", at: now, until: now, rev: rev++ }, { op: "presence", u: 9, online: true, at: h.now() }]));

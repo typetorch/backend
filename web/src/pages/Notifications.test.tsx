@@ -143,6 +143,12 @@ function mount(auth: AuthInfo | null = null, opts: { status?: NotifyStatus; url?
 		if ("name" in lookup) throw new ApiError(404, "no player with that name in the name cache", "/v1/notify/user");
 		return userView;
 	});
+	const recent = vi.spyOn(api, "notifyRecent").mockResolvedValue({
+		sends: [
+			{ ...userView.sends[0], nid: "rcnt000001", userId: 42, name: "ava_plays", displayName: "Ava" },
+			{ ...userView.sends[0], nid: "rcnt000002", userId: 43, name: null, displayName: null },
+		],
+	});
 	const save = vi.spyOn(api, "saveSettings").mockResolvedValue({ settings: [], audit: [] } as unknown as SettingsView);
 	const test = vi.spyOn(api, "notifyTest").mockResolvedValue({ nid: "abc0123xyz", status: "sent" });
 	const config = vi.spyOn(api, "notifyConfig").mockResolvedValue({ config: { dailyCap: 1, kinds: { gift_new: { template: "m-1" } } }, updatedAt: Date.now() - 60_000, by: "owner" });
@@ -156,7 +162,7 @@ function mount(auth: AuthInfo | null = null, opts: { status?: NotifyStatus; url?
 			</AuthProvider>
 		</QueryClientProvider>,
 	);
-	return { queries, statusSpy, save, test, config, user };
+	return { queries, statusSpy, save, test, config, user, recent };
 }
 
 describe("Notifications page", () => {
@@ -282,6 +288,16 @@ describe("Notifications page", () => {
 		expect(await within(form).findByText("abc0123xyz")).toBeTruthy();
 	});
 
+	it("lists the recent sends of everyone; a player opens the Player panel", async () => {
+		const { recent, user } = mount();
+		const table = await screen.findByRole("table", { name: "Recent notifications" });
+		expect(recent).toHaveBeenCalledWith({ limit: 100 }, expect.anything());
+		expect(within(table).getByText("@ava_plays")).toBeTruthy();
+		expect(within(table).getByText("43")).toBeTruthy();
+		fireEvent.click(within(table).getByRole("button", { name: "@ava_plays" }));
+		await waitFor(() => expect(user).toHaveBeenCalledWith({ uid: "42" }, expect.anything()));
+	});
+
 	it("shows the pushed config only when asked", async () => {
 		const { config } = mount();
 		const button = await screen.findByRole("button", { name: "Show the pushed config" });
@@ -297,6 +313,7 @@ describe("Notifications page", () => {
 		expect(statusSpy).not.toHaveBeenCalled();
 		expect(screen.queryByRole("form", { name: "Send a test" })).toBeNull();
 		expect(screen.queryByRole("search", { name: "Find a player" })).toBeNull();
+		expect(screen.queryByRole("table", { name: "Recent notifications" })).toBeNull();
 	});
 });
 

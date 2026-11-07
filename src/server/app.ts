@@ -817,6 +817,25 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	 * with its opens and plays, the intents) and the player's notify rows from the events (prompt checks / shown / closed
 	 * with where / secs / err, inferred consent, opens, plays) when analytics is open.
 	 */
+	/**
+	 * GET /v1/notify/recent?limit=&kind= (owners): the newest sends of everyone (default 100, at most 500), each with the
+	 * player's username / display name when the profile cache knows it (no Roblox lookup here).
+	 */
+	async function notifyRecent(url: URL): Promise<Response> {
+		const limitText = url.searchParams.get("limit");
+		const limit = limitText === null ? 100 : Number(limitText);
+		if (!Number.isInteger(limit) || limit < 1 || limit > 500) return json(400, { error: "limit is 1..500" });
+		const kind = url.searchParams.get("kind") ?? undefined;
+		if (kind !== undefined && !/^[a-z0-9_]{1,24}$/.test(kind)) return json(400, { error: "bad kind" });
+		const view = await notify.recentView(limit, kind);
+		return json(200, {
+			sends: view.sends.map((s) => {
+				const profile = robloxProfiles.peek(s.userId)?.profile;
+				return { ...s, name: profile?.name ?? null, displayName: profile?.displayName ?? null };
+			}),
+		});
+	}
+
 	async function notifyUser(url: URL): Promise<Response> {
 		const uidText = url.searchParams.get("uid");
 		const pidText = url.searchParams.get("pid");
@@ -875,6 +894,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const answer = (r: Reply) => json(r.status, r.body);
 		if (path === "/v1/notify/status") return method === "GET" ? answer(await notify.status()) : json(405, { error: "GET only" });
 		if (path === "/v1/notify/user") return method === "GET" ? notifyUser(new URL(req.url)) : json(405, { error: "GET only" });
+		if (path === "/v1/notify/recent") return method === "GET" ? notifyRecent(new URL(req.url)) : json(405, { error: "GET only" });
 		if (path === "/v1/notify/config") {
 			if (method === "GET") return answer(await notify.getConfig());
 			if (method !== "PUT") return json(405, { error: "GET or PUT only" });

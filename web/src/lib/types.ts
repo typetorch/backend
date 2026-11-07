@@ -795,6 +795,16 @@ export interface NotifyUserView {
 
 export type NotifyUserLookup = { uid: string } | { pid: string } | { name: string };
 
+/** GET /v1/notify/recent: the newest sends of everyone, newest first, with the cached name when known. */
+export interface NotifyRecentSend extends NotifyUserSend {
+	userId: number;
+	name: string | null;
+	displayName: string | null;
+}
+export interface NotifyRecentView {
+	sends: NotifyRecentSend[];
+}
+
 /** GET /v1/notify/config: the pushed `notifications` object, read-only here. */
 export interface NotifyConfigView {
 	config: Record<string, unknown> | null;
