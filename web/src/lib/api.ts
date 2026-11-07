@@ -27,6 +27,10 @@ import type {
 	FleetServerDetail,
 	FleetServers,
 	GoneServer,
+	NotifyConfigView,
+	NotifyStatus,
+	NotifyTestInput,
+	NotifyTestResult,
 	Health,
 	Identity,
 	PlaceCardInfo,
@@ -250,6 +254,12 @@ export function createApi(options: ApiOptions = {}) {
 			request<SettingsView>("/v1/admin/settings", { method: "PATCH", body: JSON.stringify(changes), ...(signal ? { signal } : {}) }),
 		/** One test alert through the saved webhook (the backend allows 3 a minute). */
 		testAlert: (signal?: AbortSignal) => post<TestAlertResult>("/v1/admin/settings/test-alert", {}, signal),
+		/** Experience notifications (plans/29, owners only): switches, the live queue, the token bucket, halted kinds. */
+		notifyStatus: (signal?: AbortSignal) => get<NotifyStatus>("/v1/notify/status", signal),
+		/** The pushed `notifications` config (read-only in the explorer; `typetorch notify push` changes it). */
+		notifyConfig: (signal?: AbortSignal) => get<NotifyConfigView>("/v1/notify/config", signal),
+		/** One test send now to a UserId, outside the caps and marked `test`. */
+		notifyTest: (input: NotifyTestInput, signal?: AbortSignal) => post<NotifyTestResult>("/v1/notify/test", input, signal),
 		/** The backend alert rules' state on the last run (the rules themselves are the backendAlerts setting). */
 		alertRules: (signal?: AbortSignal) => get<AlertRulesStatus>("/v1/admin/alert-rules", signal),
 		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */
