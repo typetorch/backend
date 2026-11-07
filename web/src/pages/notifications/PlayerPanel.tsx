@@ -254,7 +254,9 @@ export function PlayerPanel() {
 		setProblem(null);
 		const v = text.trim();
 		if (v && !playerLookup(v, pickBy)) return setProblem(pickBy === "uid" ? "A UserId is digits only." : "Letters, digits, _ and - only (names may also have spaces and dots).");
-		open(v, pickBy);
+		// The same player again: the URL doesn't change, so ask the server again (Find = refresh)
+		if (v === player && pickBy === by && lookup) void q.refetch();
+		else open(v, pickBy);
 	};
 	const pick = (uid: number) => {
 		setText(String(uid));
