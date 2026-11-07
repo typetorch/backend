@@ -406,7 +406,7 @@ function Controls({ status }: { status: NotifyStatus }) {
 		save.mutate({ [key]: value });
 	};
 	const rateNumber = Number(rate);
-	const rateOk = Number.isFinite(rateNumber) && rateNumber >= 1 && rateNumber <= 1000;
+	const rateOk = Number.isFinite(rateNumber) && rateNumber >= 1 && rateNumber <= 4000;
 	const busy = save.isPending;
 	return (
 		<Section title="Controls" description="Runtime settings (audited, no redeploy). Dry run plans and logs every send without posting it to Roblox.">

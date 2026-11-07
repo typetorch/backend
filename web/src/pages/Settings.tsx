@@ -31,6 +31,7 @@ const GROUPS: { id: RuntimeSetting["group"]; title: string; description: string 
 	{ id: "access", title: "Access", description: "Who may reach the explorer, and how owners sign in." },
 	{ id: "limits", title: "Rate limits", description: "Per minute. Game servers past a limit get 429 and retry." },
 	{ id: "retention", title: "Retention and error budgets", description: "How long data is kept, and how much error data is stored." },
+	{ id: "notify", title: "Notifications", description: "Experience notifications: pause, dry run, the send rate ceiling and the day clock. The Notifications page has the per-kind switches." },
 ];
 
 const SOURCE_TEXT: Record<SettingSource, string> = { dashboard: "Dashboard", env: "Env", default: "Default" };
@@ -396,6 +397,11 @@ function SettingsForm({ data }: { data: SettingsView }) {
 						))}
 					</ToggleGroup>
 				);
+			}
+			case "kindSwitches": {
+				// Per kind on / off lives on the Notifications page; here only which kinds are off.
+				const off = Object.entries((shown ?? {}) as Record<string, boolean>).filter(([, v]) => v === false).map(([k]) => k);
+				return <span className="text-sm text-muted-foreground">{off.length ? `Off: ${off.join(", ")}` : "All kinds on"}</span>;
 			}
 			case "switch": {
 				const on = shown === true;

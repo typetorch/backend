@@ -85,7 +85,9 @@ describe("classify", () => {
 		[404, { code: "NOT_FOUND", message: "Message id abc does not exist." }, "bad_template"],
 		[404, { code: "NOT_FOUND", message: "User not found" }, "fatal"],
 		[429, { code: "RESOURCE_EXHAUSTED", message: "Too many requests" }, "rate_limited"],
-		[429, { code: "RESOURCE_EXHAUSTED", message: "daily limit for this user" }, "rate_limited"],
+		[429, { code: "RESOURCE_EXHAUSTED", message: "You can only send 1 notification per recipient per day." }, "daily_limit"],
+		[429, { code: "RESOURCE_EXHAUSTED", message: "Recipient throttle reached" }, "daily_limit"],
+		[429, { code: "TOO_MANY_REQUESTS", message: "1 notification per recipient" }, "rate_limited"],
 		[0, {}, "retry"],
 		[408, {}, "retry"],
 		[500, {}, "retry"],
@@ -268,6 +270,26 @@ describe("sends", () => {
 		]);
 		expect((await s.svc.store.send(nid))?.status).toBe("failed");
 		expect(await s.svc.durable.zscore(DUE_SET, nid)).toBeUndefined();
+	});
+
+	test("daily_limit: failed final, re-planned for the user's next day, the bucket untouched", async () => {
+		const s = await setup({ answers: [{ status: 429, body: { code: "RESOURCE_EXHAUSTED", message: "Only 1 notification per recipient per day" } }] });
+		await s.want(21, "day2");
+		await s.svc.planTick();
+		const nid = s.named("planned")[0].nid;
+		await s.svc.sendTick();
+		expect(s.svc.sender.bucket.view()).toMatchObject({ rate: 50, last429At: null });
+		expect(s.named("failed")).toEqual([{ pid: "pid-21", nid, k: "day2", http: 429, code: "daily_limit", final: true }]);
+		expect(await s.svc.durable.zscore(DUE_SET, nid)).toBeUndefined();
+		expect((await s.svc.store.intent(21, "day2", ""))?.status).toBe("pending");
+		s.t.now += 23 * 3600_000;
+		await s.svc.planTick();
+		expect(s.named("planned")).toHaveLength(1);
+		s.t.now += 3600_000;
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(2);
+		expect((await s.svc.store.intent(21, "day2", ""))?.status).toBe("sent");
 	});
 
 	test("429: the bucket halves, the retry waits for Retry-After", async () => {
