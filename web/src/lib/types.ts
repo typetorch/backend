@@ -789,7 +789,8 @@ export interface NotifyUserView {
 	/** Newest first, at most 200. */
 	sends: NotifyUserSend[];
 	intents: NotifyUserIntent[];
-	events: null | { from: string; to: string; more: boolean; rows: NotifyUserEvent[] };
+	/** `opens` (plans/30): join rows that came from a send (props carry its nid), with their raw join data. */
+	events: null | { from: string; to: string; more: boolean; rows: NotifyUserEvent[]; opens?: NotifyUserOpen[] };
 	eventsError?: string;
 }
 
@@ -2062,4 +2063,13 @@ export interface BackupsStatus {
 	backups: BackupInfo[];
 	/** The data disk (null before the first check, or where it can't be measured). */
 	disk: DiskStatus | null;
+}
+
+/** Plans/30: a join row that came from a notification tap, and its raw join data (`jd`; null when none was stored). */
+export interface NotifyUserOpen {
+	nid: string;
+	at: string;
+	t: number;
+	sid: string;
+	jd: Record<string, unknown> | null;
 }
