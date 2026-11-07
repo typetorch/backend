@@ -73,6 +73,8 @@ export interface RuntimeValues {
 	"notify.clock": NotifyClock;
 	/** Per kind on / off (a kind missing here is on). Set one with `notify.kinds.<kind>.enabled`. */
 	"notify.kinds": Record<string, boolean>;
+	/** Hours an `online` presence counts without a refresh (the framework refreshes every 3 h). */
+	"notify.presenceStaleHours": number;
 }
 export const NOTIFY_CLOCKS = ["rolling24", "utc_day"] as const;
 export type NotifyClock = (typeof NOTIFY_CLOCKS)[number];
@@ -127,6 +129,7 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "notify.dryRun", env: "TYPETORCH_NOTIFY_DRY_RUN", group: "notify", kind: "switch", label: "Dry run", help: "Plan and write the rows, never send to Roblox. On by default: turn it off once the Notifications page looks right." },
 	{ key: "notify.rate", env: "TYPETORCH_NOTIFY_RATE", group: "notify", kind: "number", min: 1, max: 4000, unit: "sends / s", label: "Send rate ceiling", help: "Our own ceiling on sends per second (Roblox allows 4000 a second per key and says so on every answer; the sender follows that too). A 429 halves the rate for a while." },
 	{ key: "notify.clock", env: "TYPETORCH_NOTIFY_CLOCK", group: "notify", kind: "choice", options: NOTIFY_CLOCKS, label: "Daily cap clock", help: "rolling24: the next send at least 24 h after the last; utc_day: one per UTC date." },
+	{ key: "notify.presenceStaleHours", env: "TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS", group: "notify", kind: "number", min: 1, max: 168, unit: "hours", label: "Presence goes stale", help: "A player counts as in game this long after the last online ping (game servers refresh it every 3 h), so a crashed server never keeps them 'online' for good." },
 	{ key: "notify.kinds", env: "TYPETORCH_NOTIFY_KINDS_OFF", group: "notify", kind: "kindSwitches", maxEntries: NOTIFY_KINDS_MAX, label: "Kinds", help: "Per kind on / off (the Notifications page has the switches). A kind not listed is on." },
 ];
 
@@ -343,6 +346,7 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		"notify.rate": config.notifyRate,
 		"notify.clock": config.notifyClock,
 		"notify.kinds": Object.fromEntries(config.notifyKindsOff.map((k) => [k, false])),
+		"notify.presenceStaleHours": config.notifyPresenceStaleHours,
 	};
 }
 

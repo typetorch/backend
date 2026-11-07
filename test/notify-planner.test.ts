@@ -18,7 +18,7 @@ const CONFIG: NotifyConfig = validateConfig({
 	},
 });
 
-const user = (u: Partial<PlannerUser> = {}): PlannerUser => ({ online: false, leftAt: NOW - 10 * HOUR_MS, lastSeen: NOW - 10 * HOUR_MS, hours: [], unopened: 0, backoffAt: null, muteUntil: null, cappedUntil: null, ...u });
+const user = (u: Partial<PlannerUser> = {}): PlannerUser => ({ online: false, onlineUntil: null, leftAt: NOW - 10 * HOUR_MS, lastSeen: NOW - 10 * HOUR_MS, hours: [], unopened: 0, backoffAt: null, muteUntil: null, cappedUntil: null, ...u });
 const intent = (kind: string, key = "", extra: Partial<PlannerIntent> = {}): PlannerIntent => ({ kind, key, at: NOW - HOUR_MS, until: NOW + 3 * DAY_MS, ...extra });
 const input = (o: Partial<DecideInput>): DecideInput => ({ user: user(), intents: [], recent: [], sentKeys: [], config: CONFIG, kindOn: () => true, clock: "rolling24", now: NOW, random: () => 0.5, ...o });
 

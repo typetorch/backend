@@ -174,6 +174,8 @@ export interface ServerConfig {
 	notifyClock: "rolling24" | "utc_day";
 	/** TYPETORCH_NOTIFY_KINDS_OFF: kinds switched off by default (comma separated). */
 	notifyKindsOff: string[];
+	/** TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS (default 6): an online presence older than this no longer counts. */
+	notifyPresenceStaleHours: number;
 	/** TYPETORCH_NOTIFY_KEY: the launch-data signing key (current only), over <data>/notify-keys.json. Never logged. */
 	notifyKey?: string;
 	/** OPENCLOUD_NOTIFY_KEY ?? OPENCLOUD_API_KEY: the Open Cloud key the sends use (user-notifications scope). Never logged. */
@@ -536,6 +538,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		notifyDryRun: flag(env, "TYPETORCH_NOTIFY_DRY_RUN", true),
 		notifyRate: num(env, "TYPETORCH_NOTIFY_RATE", 50, 1, 4000),
 		notifyClock: env.TYPETORCH_NOTIFY_CLOCK === "utc_day" ? "utc_day" : "rolling24",
+		notifyPresenceStaleHours: num(env, "TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS", 6, 1, 168),
 		notifyKindsOff: (env.TYPETORCH_NOTIFY_KINDS_OFF ?? "").split(",").map((k) => k.trim()).filter((k) => /^[a-z0-9_]{1,24}$/.test(k)).slice(0, 64),
 		alertWebhookLevels: levels,
 		fleetNewJobsPerMinute: num(env, "TYPETORCH_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),

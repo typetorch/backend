@@ -11,9 +11,9 @@ import { dirname, join } from "node:path";
 import { openSqlite, type FleetDb } from "../fleet/db.ts";
 import { Durable } from "../store/durable.ts";
 import { CUSTOM_KIND, ConfigError, PARAM_NAME, TEMPLATE, placeholders, validateConfig, type KindConfig, type NotifyConfig } from "./config.ts";
-import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock, type RowSink } from "./planner.ts";
+import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock } from "./planner.ts";
 import { MUTE_MS, Sender } from "./sender.ts";
-import { DUE_SET, NotifyStore, PENDING_MAX, type IntentOp } from "./store.ts";
+import { DUE_SET, NotifyStore, PENDING_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow } from "./store.ts";
 import { DATA_MAX_BYTES, KIND_PATTERN, NID_PATTERN, NotifyKeyStore, newNid, parseKeys, tokenLength, type NotifyKeys } from "./token.ts";
 
 export const INTENTS_BODY_MAX = 256 * 1024;
@@ -42,6 +42,8 @@ export interface NotifySwitches {
 	rate(): number;
 	clock(): DayClock;
 	kindEnabled(kind: string): boolean;
+	/** `notify.presenceStaleHours`: an `online` presence older than this no longer counts. */
+	presenceStaleHours(): number;
 }
 
 export interface NotifyOptions {
@@ -56,10 +58,15 @@ export interface NotifyOptions {
 	switches: NotifySwitches;
 	/** S1b: turn a kind off for good (app.ts: the runtime setting, audited as the system) and alert. */
 	stopKind(kind: string, why: "bad_template"): void;
+	/** A 401 / 403 from Roblox: turn notifications off (app.ts: `notify.enabled = false` as the system, audited). */
+	stopAll(why: "auth"): void;
 	/** UserId -> the pid for backend rows ("" when unknown); erased players are never named. */
 	pidOf(userId: number): Promise<string>;
-	/** Hands rows to the events pipeline (the bus); absent = rows dropped (no analytics part). */
-	publish?(rows: Record<string, unknown>[]): Promise<void>;
+	/**
+	 * Hands rows to the events pipeline (the bus): "published", "unavailable" (analytics not open yet: kept in the
+	 * outbox, tried again) or "off" (no analytics part: dropped). Absent = "off".
+	 */
+	publish?(rows: Record<string, unknown>[]): Promise<"published" | "unavailable" | "off">;
 	clock?: () => number;
 	random?: () => number;
 	fetch?: typeof fetch;
@@ -70,47 +77,24 @@ export interface NotifyOptions {
 /** notify.db's path for a fleet DB path. */
 export const notifyDbPath = (fleetDb: string) => (fleetDb === ":memory:" ? ":memory:" : join(dirname(fleetDb), "notify.db"));
 
-/** Rows the backend writes (src = backend, no sid, pid from identities), buffered and flushed after each step. */
-class RowBuffer {
-	private rows: { uid: number; t: number; name: string; props: Record<string, unknown> }[] = [];
-	dropped = 0;
-
-	constructor(private readonly o: NotifyOptions, private readonly clock: () => number) {}
-
-	readonly push: RowSink = (uid, name, props) => {
-		if (!this.o.publish) return;
-		this.rows.push({ uid, t: this.clock(), name, props });
-		if (this.rows.length > ROWS_MAX) {
-			this.rows.shift();
-			this.dropped++;
-		}
-	};
-
-	async flush(): Promise<void> {
-		if (!this.rows.length || !this.o.publish) return;
-		const batch = this.rows;
-		this.rows = [];
-		const pids = new Map<number, string>();
-		const out: Record<string, unknown>[] = [];
-		for (const r of batch) {
-			if (!pids.has(r.uid)) pids.set(r.uid, await this.o.pidOf(r.uid));
-			out.push({ v: 1, t: r.t, kind: "notify", name: r.name, pid: pids.get(r.uid) ?? "", sid: "", job: "backend", art: "backend", src: "backend", props: JSON.stringify(r.props) });
-		}
-		for (let i = 0; i < out.length; i += 1000) await this.o.publish(out.slice(i, i + 1000));
-	}
-}
-
 interface Halt {
 	why: "bad_template";
 	at: number;
 }
 const HALTED_KEY = "notify:halted";
+const HALTED_TEMPLATES_KEY = "notify:halted_templates";
+const HALTED_ALL_KEY = "notify:halted_all";
+const HALTED_TEMPLATES_MAX = 200;
 
 export class NotifyService {
 	readonly planner: Planner;
 	readonly sender: Sender;
-	readonly rows: RowBuffer;
 	private halted = new Map<string, Halt>();
+	/** Game-supplied templates (allowTemplate) Roblox said don't exist. */
+	private haltedTemplates = new Map<string, number>();
+	/** Every send stopped: the key was refused (401 / 403). */
+	private haltedAll: { why: "auth"; at: number } | undefined;
+	private flushing: Promise<number> | undefined;
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
 	/** notify.db's path (":memory:" in tests): the nightly backup copies it. */
@@ -126,9 +110,18 @@ export class NotifyService {
 		this.clock = o.clock ?? Date.now;
 		this.log = o.log ?? (() => {});
 		this.dbPath = notifyDbPath(o.fleetDb);
-		this.rows = new RowBuffer(o, this.clock);
 		const kindOn = (kind: string) => this.kindOn(kind);
-		this.planner = new Planner({ store, clock: this.clock, ...(o.random ? { random: o.random } : {}), enabled: () => o.switches.enabled(), kindOn, dayClock: () => o.switches.clock(), rows: this.rows.push });
+		const presenceStaleMs = () => this.presenceStaleMs();
+		this.planner = new Planner({
+			store,
+			clock: this.clock,
+			...(o.random ? { random: o.random } : {}),
+			enabled: () => o.switches.enabled() && !this.haltedAll,
+			kindOn,
+			dayClock: () => o.switches.clock(),
+			presenceStaleMs,
+			templateOn: (t) => !this.haltedTemplates.has(t),
+		});
 		this.sender = new Sender({
 			store,
 			durable,
@@ -141,10 +134,13 @@ export class NotifyService {
 			dayClock: () => o.switches.clock(),
 			kindOn,
 			halt: (kind, why) => void this.halt(kind, why),
+			haltTemplate: (template) => void this.haltTemplate(template),
+			haltAll: (why) => void this.haltAll(why),
+			allHalted: () => Boolean(this.haltedAll),
+			presenceStaleMs,
 			keys: () => keys.keys(),
 			apiKey: () => o.apiKey,
 			universeId: () => o.universeId,
-			rows: this.rows.push,
 			log: this.log,
 		});
 	}
@@ -158,7 +154,15 @@ export class NotifyService {
 		const service = new NotifyService(o, db, store, durable, keys);
 		const saved = await durable.getJson<Record<string, Halt>>(HALTED_KEY);
 		if (isRecord(saved)) for (const [kind, h] of Object.entries(saved)) if (KIND_PATTERN.test(kind) && isRecord(h)) service.halted.set(kind, { why: "bad_template", at: Number(h.at) || 0 });
+		const templates = await durable.getJson<Record<string, number>>(HALTED_TEMPLATES_KEY);
+		if (isRecord(templates)) for (const [t, at] of Object.entries(templates).slice(0, HALTED_TEMPLATES_MAX)) service.haltedTemplates.set(t, Number(at) || 0);
+		const all = await durable.getJson<{ why?: unknown; at?: unknown }>(HALTED_ALL_KEY);
+		if (isRecord(all) && all.why === "auth") service.haltedAll = { why: "auth", at: Number(all.at) || 0 };
 		return service;
+	}
+
+	presenceStaleMs(): number {
+		return Math.max(1, this.o.switches.presenceStaleHours()) * HOUR_MS;
 	}
 
 	kindOn(kind: string): boolean {
@@ -182,6 +186,37 @@ export class NotifyService {
 		}
 	}
 
+	/** S1b for a game-supplied template (allowTemplate): only intents with that template wait (until a config push). */
+	async haltTemplate(template: string): Promise<void> {
+		if (this.haltedTemplates.has(template)) return;
+		this.haltedTemplates.set(template, this.clock());
+		while (this.haltedTemplates.size > HALTED_TEMPLATES_MAX) this.haltedTemplates.delete(this.haltedTemplates.keys().next().value as string);
+		await this.durable.setJson(HALTED_TEMPLATES_KEY, Object.fromEntries(this.haltedTemplates));
+		this.log("alert: a game-supplied notification template (message id) does not exist on Roblox: intents using it wait (a config push clears it)");
+	}
+
+	/** 401 / 403: the API key is refused. Every send stops until an owner turns notifications back on (or pushes a config). */
+	async haltAll(why: "auth"): Promise<void> {
+		if (this.haltedAll) return;
+		this.haltedAll = { why, at: this.clock() };
+		await this.durable.setJson(HALTED_ALL_KEY, this.haltedAll);
+		this.log("alert: notifications stopped: Roblox refused the Open Cloud key (401 / 403): check OPENCLOUD_NOTIFY_KEY's scope (user-notifications) and universe, then turn notifications back on");
+		try {
+			this.o.stopAll(why);
+		} catch (error) {
+			this.log(`notify: could not switch notifications off (${((error as Error).message ?? String(error)).slice(0, 120)}); the halt holds them`);
+		}
+	}
+
+	/** Ends the auth halt (an owner turned `notify.enabled` back on, or pushed a config). */
+	async resume(): Promise<boolean> {
+		if (!this.haltedAll) return false;
+		this.haltedAll = undefined;
+		await this.durable.del(HALTED_ALL_KEY);
+		await this.db.run("UPDATE notify_users SET next_check = 0 WHERE next_check > ?", [this.clock()]);
+		return true;
+	}
+
 	/** Clears halts for kinds that were turned back on (the Settings change) or got a new template (a config push). */
 	async clearHalts(kinds: string[]): Promise<void> {
 		let changed = false;
@@ -197,12 +232,42 @@ export class NotifyService {
 		return [...this.halted.keys()];
 	}
 
+	/**
+	 * Publishes the outbox (oldest first, 1000 at a time): rows are deleted only once the events pipeline took them, so
+	 * a crash or an analytics handover never loses one. Returns rows published.
+	 */
+	flushRows(): Promise<number> {
+		this.flushing ??= this.flushOnce().finally(() => (this.flushing = undefined));
+		return this.flushing;
+	}
+
+	private async flushOnce(): Promise<number> {
+		await this.store.outboxTrim();
+		let published = 0;
+		for (let round = 0; round < 50; round++) {
+			const batch = await this.store.outboxTake(1000);
+			if (!batch.length) break;
+			const pids = new Map<number, string>();
+			const out: Record<string, unknown>[] = [];
+			for (const r of batch) {
+				if (!pids.has(r.uid)) pids.set(r.uid, await this.o.pidOf(r.uid));
+				out.push({ v: 1, t: r.t, kind: "notify", name: r.name, pid: pids.get(r.uid) ?? "", sid: "", job: "backend", art: "backend", src: "backend", props: r.props });
+			}
+			const result = this.o.publish ? await this.o.publish(out) : "off";
+			if (result === "unavailable") break;
+			await this.store.outboxDelete((batch[batch.length - 1] as { id: number }).id);
+			if (result === "published") published += batch.length;
+			if (batch.length < 1000) break;
+		}
+		return published;
+	}
+
 	/** The planner's tick (every 30 s), then the rows. */
 	async planTick(): Promise<void> {
 		try {
 			await this.planner.tick();
 		} finally {
-			await this.rows.flush();
+			await this.flushRows();
 		}
 	}
 
@@ -211,16 +276,16 @@ export class NotifyService {
 		try {
 			await this.sender.tick();
 		} finally {
-			await this.rows.flush();
+			await this.flushRows();
 		}
 	}
 
-	/** Every minute: expired kv; every 10 minutes (the app's prune timer): old sends and intents. */
+	/** Every minute: expired kv; every 10 minutes (the app's prune timer): old sends, intents and users. */
 	async sweep(): Promise<void> {
 		await this.durable.sweep();
 	}
 
-	async prune(): Promise<{ sends: number; intents: number }> {
+	async prune(): Promise<{ sends: number; intents: number; users: number }> {
 		return this.store.prune(this.clock());
 	}
 
@@ -230,7 +295,7 @@ export class NotifyService {
 
 	async close(): Promise<void> {
 		await this.sender.idle(2000);
-		await this.rows.flush().catch(() => undefined);
+		await this.flushRows().catch(() => 0);
 		await this.db.close();
 	}
 
@@ -246,13 +311,15 @@ export class NotifyService {
 		const index: number[] = [];
 		const full = (await this.store.pendingCount()) >= PENDING_MAX;
 		body.items.forEach((raw, i) => {
-			const why = parseItem(raw, cfg?.config, now, ops, full);
+			const why = parseItem(raw, cfg?.config, now, ops, full, this.presenceStaleMs());
 			if (why) rejected.push({ i, why });
 			else index.push(i);
 		});
-		const result = ops.length ? await this.store.apply(ops, (cfg?.config.quietAfterLeaveMinutes ?? 120) * 60_000) : { accepted: 0, stale: 0, cancelled: [] };
-		for (const c of result.cancelled) if (c.dropped) this.rows.push(c.userId, "skipped", { k: c.kind, why: "dropped" });
-		await this.rows.flush();
+		const kinds = cfg?.config.kinds ?? {};
+		const result = ops.length
+			? await this.store.apply(ops, { quietMs: (cfg?.config.quietAfterLeaveMinutes ?? 120) * 60_000, priority: (k) => kinds[k]?.priority })
+			: { accepted: 0, stale: 0, cancelled: [] };
+		await this.flushRows();
 		return reply(200, { ok: true, accepted: result.accepted + result.stale, rejected, stale: result.stale });
 	}
 
@@ -290,6 +357,12 @@ export class NotifyService {
 		await this.store.setConfig(config, by);
 		const fixed = this.haltedKinds().filter((k) => config.kinds[k] && config.kinds[k]?.template !== before?.kinds[k]?.template);
 		await this.clearHalts(fixed);
+		// A config push also ends the auth halt (the owner fixed the key) and the game-supplied template halts.
+		await this.resume();
+		if (this.haltedTemplates.size) {
+			this.haltedTemplates.clear();
+			await this.durable.del(HALTED_TEMPLATES_KEY);
+		}
 		return { ...reply(200, { ok: true, kinds: Object.keys(config.kinds).length, updatedAt: (await this.store.config())?.updatedAt ?? this.clock() }), kinds: Object.keys(config.kinds) };
 	}
 
@@ -327,12 +400,18 @@ export class NotifyService {
 			config: Boolean(cfg),
 			keys: this.keys.summary(),
 			kinds,
-			halted: [...this.halted].map(([kind, h]) => ({ kind, why: h.why, at: h.at })),
+			// Per kind ({kind, why: "bad_template", at}), plus a kind-less {why: "auth", at} while every send is stopped.
+			halted: [...[...this.halted].map(([kind, h]) => ({ kind, why: h.why, at: h.at })), ...(this.haltedAll ? [{ why: this.haltedAll.why, at: this.haltedAll.at }] : [])],
+			// Every send stopped: Roblox refused the key (401 / 403). Ends when an owner turns notify.enabled back on.
+			haltedAll: this.haltedAll ? { why: this.haltedAll.why, at: this.haltedAll.at } : null,
+			haltedTemplates: [...this.haltedTemplates].map(([template, at]) => ({ template, at })),
+			presenceStaleHours: s.presenceStaleHours(),
 			queue: { pending: [...pending.values()].reduce((a, b) => a + b, 0), due1h: await this.durable.zcount(DUE_SET, 0, now + HOUR_MS), sending: await this.durable.zleased(DUE_SET, now) },
 			bucket: { rate: bucket.rate, tokens: bucket.tokens, last429At: bucket.last429At },
 			sends24h: await this.store.sendCounts(now - DAY_MS),
 			mutes: await this.store.mutes(now),
-			rowsDropped: this.rows.dropped,
+			outbox: await this.store.outboxCount(),
+			rowsDropped: this.store.outboxDropped,
 		});
 	}
 
@@ -347,9 +426,10 @@ export class NotifyService {
 		const mismatch = paramsMismatch(kind, extra.params ? (JSON.parse(extra.params) as Record<string, string>) : null);
 		if (mismatch) return reply(400, { error: `${mismatch}: params must be exactly the placeholders of the kind's text` });
 		const nid = newNid();
-		await this.store.plan({ nid, userId: body.userId, kind: body.kind, key: `test:${nid}`, rev: 0, template: kind.template ?? null, category: kind.category ?? body.kind, params: extra.params, data: extra.data, plannedAt: this.clock(), test: true });
-		this.rows.push(body.userId, "planned", { nid, k: body.kind, for: Math.floor(this.clock() / 1000), why: "asap", test: true });
-		await this.rows.flush();
+		await this.store.plan(
+			{ nid, userId: body.userId, kind: body.kind, key: `test:${nid}`, rev: 0, template: kind.template ?? null, category: kind.category ?? body.kind, params: extra.params, data: extra.data, plannedAt: this.clock(), test: true },
+			{ rows: [{ uid: body.userId, name: "planned", props: { nid, k: body.kind, for: Math.floor(this.clock() / 1000), why: "asap", test: true } }] },
+		);
 		void this.sendTick().catch(() => undefined);
 		return reply(200, { nid, status: "planned" });
 	}
@@ -368,11 +448,61 @@ export class NotifyService {
 		const recent = await this.store.recentSends(body.userId, now - 2 * DAY_MS);
 		if (dayFreeAt(recent.map((r) => r.at), cap, this.o.switches.clock(), now) > now) return reply(200, { skipped: "capped_day" });
 		const nid = newNid();
-		await this.store.plan({ nid, userId: body.userId, kind: CUSTOM_KIND, key: `send:${nid}`, rev: 0, template: body.template, category: body.template.slice(0, 64), params: extra.params, data: extra.data, plannedAt: now, test: false });
-		this.rows.push(body.userId, "planned", { nid, k: CUSTOM_KIND, for: Math.floor(now / 1000), why: "asap" });
-		await this.rows.flush();
+		await this.store.plan(
+			{ nid, userId: body.userId, kind: CUSTOM_KIND, key: `send:${nid}`, rev: 0, template: body.template, category: body.template.slice(0, 64), params: extra.params, data: extra.data, plannedAt: now, test: false },
+			{ rows: [{ uid: body.userId, name: "planned", props: { nid, k: CUSTOM_KIND, for: Math.floor(now / 1000), why: "asap" } }] },
+		);
 		void this.sendTick().catch(() => undefined);
 		return reply(200, { nid, status: "planned" });
+	}
+
+	/**
+	 * GET /v1/notify/user (owners): one player's notification state from notify.db: consent as the backend learned it
+	 * (optin + when, mute), every send (planned / sent time, status, error, opened, played), the intents. app.ts adds the
+	 * identity and the consent rows from the events.
+	 */
+	async userView(userId: number): Promise<Record<string, unknown>> {
+		const now = this.clock();
+		const u = await this.store.user(userId);
+		const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+		const sends = await this.store.userSends(userId, 200);
+		const intents = await this.store.userIntents(userId, 200);
+		return {
+			userId,
+			known: Boolean(u),
+			state: u
+				? {
+						optin: u.optin,
+						optinAt: n(u.optin_at),
+						muteUntil: n(u.mute_until),
+						muted: Boolean(u.mute_until && Number(u.mute_until) > now),
+						online: isOnline(u, now, this.presenceStaleMs()),
+						presenceAt: n(u.presence_at) || null,
+						lastSeen: n(u.last_seen),
+						leftAt: n(u.left_at),
+						unopened: Number(u.unopened),
+						backoffAt: n(u.backoff_at),
+						cappedUntil: n(u.capped_until),
+						nextCheck: n(u.next_check) || null,
+						busy: u.busy,
+					}
+				: null,
+			sends: sends.map((x) => ({
+				nid: x.nid,
+				kind: x.kind,
+				status: x.status,
+				test: Boolean(Number(x.test)),
+				plannedAt: n(x.planned_at),
+				sentAt: n(x.sent_at),
+				http: n(x.http),
+				code: x.code,
+				try: Number(x.try),
+				openedAt: n(x.opened_at),
+				playedSecs: n(x.played_secs),
+				category: x.category,
+			})),
+			intents: intents.map((x) => ({ kind: x.kind, key: x.key, status: x.status, at: n(x.at), until: n(x.until), updated: n(x.updated), planned: x.nid !== null, params: x.params ? (JSON.parse(x.params) as unknown) : null })),
+		};
 	}
 
 	/** For tests and the status line: the mute that S1 sets. */
@@ -414,13 +544,16 @@ function checkParams(raw: unknown): Record<string, string> | null | false {
 }
 
 /** Checks one intent item; pushes the op, or returns why it is rejected. */
-function parseItem(raw: unknown, config: NotifyConfig | undefined, now: number, ops: IntentOp[], full: boolean): string | undefined {
+function parseItem(raw: unknown, config: NotifyConfig | undefined, now: number, ops: IntentOp[], full: boolean, staleMs: number): string | undefined {
 	if (!isRecord(raw)) return "bad_item";
 	if (raw.op === "presence") {
 		if (!uidOk(raw.u)) return "bad_user";
 		if (typeof raw.online !== "boolean") return "bad_item";
-		if (!secondsOk(raw.at) || raw.at * 1000 > now + HOUR_MS) return "bad_time";
-		ops.push({ op: "presence", u: raw.u, online: raw.online, at: raw.at * 1000 });
+		// Unix ms (the contract); a value under 1e11 is unix seconds (older senders).
+		if (typeof raw.at !== "number" || !Number.isSafeInteger(raw.at) || raw.at <= 0) return "bad_time";
+		const at = raw.at < SECONDS_BELOW ? raw.at * 1000 : raw.at;
+		if (at > now + HOUR_MS) return "bad_time";
+		ops.push({ op: "presence", u: raw.u, online: raw.online, at, staleMs });
 		return undefined;
 	}
 	if (raw.op !== "want" && raw.op !== "drop") return "bad_op";

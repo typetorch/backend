@@ -17,7 +17,7 @@
  */
 import { newNid } from "./token.ts";
 import type { KindConfig, NotifyConfig } from "./config.ts";
-import type { IntentRow, NotifyStore, UserRow } from "./store.ts";
+import { isOnline, type IntentRow, type NotifyStore, type OutRow, type UserRow } from "./store.ts";
 
 export const HOUR_MS = 3_600_000;
 export const DAY_MS = 86_400_000;
@@ -33,7 +33,10 @@ export type DayClock = "rolling24" | "utc_day";
 export type SkipWhy = "online" | "quiet" | "capped_day" | "capped_week" | "lapsed" | "muted" | "outranked" | "expired" | "dropped" | "repeat";
 
 export interface PlannerUser {
+	/** In game: an `online` presence newer than `notify.presenceStaleHours`. */
 	online: boolean;
+	/** When that presence goes stale (look again then), or null. */
+	onlineUntil: number | null;
 	leftAt: number | null;
 	lastSeen: number | null;
 	hours: number[];
@@ -194,7 +197,7 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 		return out;
 	};
 	if (user.muteUntil !== null && user.muteUntil > now) return skip("muted", user.muteUntil);
-	if (user.online) return skip("online", now + DAY_MS);
+	if (user.online) return skip("online", user.onlineUntil ?? now + DAY_MS);
 	const quietUntil = user.leftAt !== null ? user.leftAt + config.quietAfterLeaveMinutes * 60_000 : 0;
 	if (quietUntil > now) return skip("quiet", quietUntil);
 	if (user.cappedUntil !== null && user.cappedUntil > now) return skip("capped_day", user.cappedUntil);
@@ -244,18 +247,22 @@ export interface PlannerOptions {
 	enabled(): boolean;
 	kindOn(kind: string): boolean;
 	dayClock(): DayClock;
-	rows: RowSink;
+	/** `notify.presenceStaleHours` in ms. */
+	presenceStaleMs(): number;
+	/** A game-supplied template (allowTemplate) Roblox said doesn't exist: its intents wait. */
+	templateOn(template: string): boolean;
 	batch?: number;
 }
 
-export const toPlannerUser = (u: UserRow | undefined): PlannerUser => {
+export const toPlannerUser = (u: UserRow | undefined, now: number = Date.now(), staleMs: number = 6 * HOUR_MS): PlannerUser => {
 	let hours: number[] = [];
 	try {
 		hours = (JSON.parse(u?.hours ?? "[]") as unknown[]).filter((h): h is number => typeof h === "number" && h >= 0 && h < 24);
 	} catch {}
 	const n = (v: number | null | undefined) => (v === null || v === undefined ? null : Number(v));
 	return {
-		online: Boolean(u && Number(u.online)),
+		online: isOnline(u, now, staleMs),
+		onlineUntil: u && Number(u.online) ? Number(u.presence_at) + staleMs : null,
 		leftAt: n(u?.left_at),
 		lastSeen: n(u?.last_seen),
 		hours,
@@ -289,7 +296,6 @@ export class Planner {
 		const { store } = this.o;
 		const now = this.o.clock();
 		const expired = await store.expire(now, 5000);
-		for (const e of expired) this.o.rows(e.userId, "skipped", { k: e.kind, why: "expired" });
 		const cfg = await store.config();
 		if (!this.o.enabled() || !cfg) return { expired: expired.length, looked: 0, planned: 0 };
 		const config = cfg.config;
@@ -299,14 +305,15 @@ export class Planner {
 			// Yield now and then: a full batch never holds the event loop for long.
 			if (i % 50 === 49) await new Promise((done) => setTimeout(done, 0));
 			const user = await store.user(userId);
-			const u = toPlannerUser(user);
+			const u = toPlannerUser(user, now, this.o.presenceStaleMs());
 			// The unopened backoff ran its course: start counting again.
 			if (user && u.backoffAt !== null && now - u.backoffAt >= config.unopenedBackoff.days * DAY_MS) {
 				await store.userField(userId, { unopened: 0, backoff_at: null });
 				u.unopened = 0;
 				u.backoffAt = null;
 			}
-			const intents = await store.pendingIntents(userId);
+			// A game-supplied template Roblox refused (S1b, allowTemplate): those intents wait until a config push clears it.
+			const intents = (await store.pendingIntents(userId)).filter((x) => !(x.template && config.kinds[x.kind]?.allowTemplate && !this.o.templateOn(x.template)));
 			const kinds = [...new Set(intents.map((x) => x.kind))];
 			const d = decide<IntentRow & PlannerIntent>({
 				user: u,
@@ -319,16 +326,16 @@ export class Planner {
 				now,
 				random: this.random,
 			});
-			for (const s of d.skips) this.o.rows(userId, "skipped", { k: s.kind, why: s.why });
-			if (d.superseded.length) await store.markIntents(userId, d.superseded, "superseded");
+			const rows: OutRow[] = d.skips.map((s) => ({ uid: userId, name: "skipped", props: { k: s.kind, why: s.why } }));
 			if (!d.plan) {
-				await store.setNextCheck(userId, d.nextCheck);
+				await store.decided(userId, { nextCheck: d.nextCheck, superseded: d.superseded, rows });
 				continue;
 			}
 			const intent = d.plan.intent;
 			const kind = config.kinds[intent.kind] as KindConfig;
 			const nid = newNid();
-			await store.plan({
+			await store.plan(
+				{
 				nid,
 				userId,
 				kind: intent.kind,
@@ -338,12 +345,11 @@ export class Planner {
 				category: kind.category ?? intent.kind,
 				params: intent.params,
 				data: intent.data,
-				plannedAt: d.plan.at,
-				test: false,
-			});
-			// Looked at again once the send is over (the sender clears `busy`).
-			await store.setNextCheck(userId, 0);
-			this.o.rows(userId, "planned", { nid, k: intent.kind, for: Math.floor(d.plan.at / 1000), why: d.plan.why });
+					plannedAt: d.plan.at,
+					test: false,
+				},
+				{ superseded: d.superseded, rows: [...rows, { uid: userId, name: "planned", props: { nid, k: intent.kind, for: Math.floor(d.plan.at / 1000), why: d.plan.why } }] },
+			);
 			planned++;
 		}
 		return { expired: expired.length, looked: users.length, planned };

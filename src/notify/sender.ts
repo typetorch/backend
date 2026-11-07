@@ -15,8 +15,8 @@
  */
 import { signToken, type NotifyKeys } from "./token.ts";
 import type { Durable } from "../store/durable.ts";
-import { DUE_SET, type NotifyStore, type SendRow } from "./store.ts";
-import { DAY_MS, type DayClock, type RowSink } from "./planner.ts";
+import { DUE_SET, isOnline, type NotifyStore, type OutRow, type SendRow } from "./store.ts";
+import { DAY_MS, type DayClock } from "./planner.ts";
 
 export const SEND_URL = (userId: number) => `https://apis.roblox.com/cloud/v2/users/${userId}/notifications`;
 /**
@@ -219,10 +219,17 @@ export interface SenderOptions {
 	kindOn(kind: string): boolean;
 	/** S1b: a kind's template doesn't exist on Roblox: stop the kind (app.ts sets the switch, audits, alerts). */
 	halt(kind: string, why: "bad_template"): void;
+	/** S1b for a game-supplied template (allowTemplate): only that template stops. */
+	haltTemplate(template: string): void;
+	/** 401 / 403: the API key is wrong or lacks the scope: every send stops until an owner turns notifications back on. */
+	haltAll(why: "auth"): void;
+	/** Every send stopped (the auth halt). */
+	allHalted(): boolean;
+	/** `notify.presenceStaleHours` in ms. */
+	presenceStaleMs(): number;
 	keys(): NotifyKeys | undefined;
 	apiKey(): string | undefined;
 	universeId(): number | undefined;
-	rows: RowSink;
 	log?: (line: string) => void;
 	workers?: number;
 }
@@ -265,7 +272,7 @@ export class Sender {
 			const saved = await this.o.durable.getJson<Record<string, unknown>>(BUCKET_KEY);
 			if (saved) this.bucket.restore(saved);
 		}
-		if (!this.o.enabled()) return 0;
+		if (!this.o.enabled() || this.o.allHalted()) return 0;
 		const now = this.o.clock();
 		// No more than about a minute's worth at the current rate, so leases never run out while waiting for tokens.
 		const limit = Math.max(1, Math.min(500, Math.floor(this.bucket.rate * 60)));
@@ -287,8 +294,8 @@ export class Sender {
 	}
 
 	private async cancel(send: SendRow, why: string | null, user: { next_check?: number } = {}): Promise<void> {
-		await this.o.store.finish(send.nid, { status: "cancelled", user });
-		if (why) this.o.rows(Number(send.user_id), "skipped", { k: send.kind, why });
+		const rows: OutRow[] = why ? [{ uid: Number(send.user_id), name: "skipped", props: { k: send.kind, why } }] : [];
+		await this.o.store.finish(send.nid, { status: "cancelled", user, rows });
 	}
 
 	private async one(nid: string): Promise<void> {
@@ -310,7 +317,7 @@ export class Sender {
 		}
 		if (!test) {
 			const user = await store.user(userId);
-			if (user && Number(user.online)) return this.cancel(send, "online", { next_check: now + DAY_MS });
+			if (user && isOnline(user, now, this.o.presenceStaleMs())) return this.cancel(send, "online", { next_check: Number(user.presence_at) + this.o.presenceStaleMs() });
 			if (user?.mute_until && Number(user.mute_until) > now) return this.cancel(send, "muted", { next_check: Number(user.mute_until) });
 		}
 		const dry = this.o.dryRun() || !send.template;
@@ -320,13 +327,16 @@ export class Sender {
 			return;
 		}
 		const attempt = Number(send.try) + 1;
+		const category = send.category ?? send.kind;
+		const row = (name: string, props: Record<string, unknown>): OutRow => ({ uid: userId, name, props });
 		if (dry) {
-			await store.finish(nid, { status: "dry", sentAt: now, intent: test ? undefined : "sent", user: { sent_at: now } });
-			this.o.rows(userId, "sent", { nid, k: send.kind, try: attempt, category: send.category ?? send.kind, dry: true, ...(test ? { test: true } : {}) });
+			// A rehearsal: the intent stays pending (the real send goes out once dry run is off); the dry row counts for the caps.
+			await store.finish(nid, { status: "dry", sentAt: now, rows: [row("sent", { nid, k: send.kind, try: attempt, category, dry: true, ...(test ? { test: true } : {}) })] });
 			return;
 		}
 		// The token bucket (a wait ends early only when the stop runs out the lease, which returns the send).
 		for (;;) {
+			if (this.o.allHalted()) return store.retryAt(nid, this.o.clock() + 60_000);
 			const wait = this.bucket.take();
 			if (wait <= 0) break;
 			await this.sleep(Math.min(wait, 5000));
@@ -337,11 +347,15 @@ export class Sender {
 		const at = this.o.clock();
 		const user = await store.user(userId);
 		const subscribed = user?.optin === "subscribed";
+		const inferred = subscribed ? [] : [row("optin_inferred", { state: "subscribed" })];
 		const code = typeof (body as { code?: unknown })?.code === "string" ? String((body as { code: string }).code).slice(0, 64) : http ? String(http) : "network";
+		const failed = (c: string, final: boolean) => row("failed", { nid, k: send.kind, http, code: c, final });
 		switch (outcome) {
 			case "ok": {
-				const id = (body as { id?: unknown; path?: unknown }) ?? {};
-				const robloxId = typeof id.id === "string" ? id.id.slice(0, 128) : typeof id.path === "string" ? id.path.slice(0, 256) : null;
+				// Roblox's id only: its `path` names the user (users/<UserId>/...), never stored or sent to the events.
+				const id = (body as { id?: unknown }) ?? {};
+				const robloxId = typeof id.id === "string" ? id.id.slice(0, 128) : "";
+				const cfg = await store.config();
 				await store.finish(nid, {
 					status: "sent",
 					http,
@@ -350,29 +364,39 @@ export class Sender {
 					intent: test ? undefined : "sent",
 					user: { sent_at: at, ...(subscribed ? {} : { optin: "subscribed", optin_at: at }) },
 					unopenedInc: true,
+					...(cfg ? { backoffAfter: cfg.config.unopenedBackoff.after } : {}),
+					rows: [...inferred, row("sent", { nid, k: send.kind, try: attempt, roblox_id: robloxId, category, ...(test ? { test: true } : {}) })],
 				});
-				if (!subscribed) this.o.rows(userId, "optin_inferred", { state: "subscribed" });
-				this.o.rows(userId, "sent", { nid, k: send.kind, try: attempt, roblox_id: robloxId ?? "", category: send.category ?? send.kind, ...(test ? { test: true } : {}) });
 				break;
 			}
 			case "not_subscribed":
-				await store.finish(nid, { status: "failed", http, code: "not_subscribed", user: { mute_until: at + MUTE_MS, optin: "not_subscribed", optin_at: at, next_check: at + MUTE_MS } });
-				this.o.rows(userId, "optin_inferred", { state: "not_subscribed" });
-				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "not_subscribed", final: true });
+				await store.finish(nid, {
+					status: "failed",
+					http,
+					code: "not_subscribed",
+					user: { mute_until: at + MUTE_MS, optin: "not_subscribed", optin_at: at, next_check: at + MUTE_MS },
+					rows: [row("optin_inferred", { state: "not_subscribed" }), failed("not_subscribed", true)],
+				});
 				break;
-			case "bad_template":
-				// The kind's config is wrong, not the user: stop the kind, keep the intent pending.
-				await store.finish(nid, { status: "failed", http, code: "bad_template", user: subscribed ? {} : { optin: "subscribed", optin_at: at } });
-				if (!subscribed) this.o.rows(userId, "optin_inferred", { state: "subscribed" });
-				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "bad_template", final: true });
-				if (send.kind !== "custom") this.o.halt(send.kind, "bad_template");
-				else this.log("notify: a one-off send's template (message id) does not exist on Roblox");
+			case "bad_template": {
+				// The config is wrong, not the user: stop the kind (or only a game-supplied template), keep the intent pending.
+				await store.finish(nid, { status: "failed", http, code: "bad_template", user: subscribed ? {} : { optin: "subscribed", optin_at: at }, rows: [...inferred, failed("bad_template", true)] });
+				const kind = (await store.config())?.config.kinds[send.kind];
+				if (send.kind === "custom") this.log("notify: a one-off send's template (message id) does not exist on Roblox");
+				else if (kind?.allowTemplate && send.template && send.template !== kind.template) this.o.haltTemplate(send.template);
+				else this.o.halt(send.kind, "bad_template");
 				break;
+			}
 			case "daily_limit": {
+				// A retry after a send that may have left (a crash or a timeout mid-POST): Roblox refusing it means the first
+				// one most likely went out. Counted as delivered (caps, repeat), code dup_refused.
+				if (attempt > 1) {
+					await store.finish(nid, { status: "sent", http, code: "dup_refused", sentAt: at, intent: test ? undefined : "sent", user: { sent_at: at }, rows: [failed("dup_refused", true)] });
+					break;
+				}
 				// Roblox's per-recipient limit: the intent stays pending for the user's next day (the clock's), no backoff.
 				const free = this.o.dayClock() === "utc_day" ? Math.floor(at / DAY_MS) * DAY_MS + DAY_MS : at + DAY_MS;
-				await store.finish(nid, { status: "failed", http, code: "daily_limit", user: { capped_until: free, next_check: free } });
-				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "daily_limit", final: true });
+				await store.finish(nid, { status: "failed", http, code: "daily_limit", user: { capped_until: free, next_check: free }, rows: [failed("daily_limit", true)] });
 				break;
 			}
 			case "rate_limited":
@@ -382,15 +406,20 @@ export class Sender {
 					await this.o.durable.setJson(BUCKET_KEY, this.bucket.snapshot(), 7 * DAY_MS);
 				}
 				const final = attempt >= MAX_TRIES;
-				this.o.rows(userId, "failed", { nid, k: send.kind, http, code, final });
-				if (final) await store.finish(nid, { status: "failed", http, code, user: { next_check: at + FATAL_RECHECK_MS } });
-				else await store.retryAt(nid, at + Math.max(RETRY_DELAYS_MS[attempt - 1] as number, retryAfter));
+				if (final) await store.finish(nid, { status: "failed", http, code, user: { next_check: at + FATAL_RECHECK_MS }, rows: [failed(code, true)] });
+				else await store.retryAt(nid, at + Math.max(RETRY_DELAYS_MS[attempt - 1] as number, retryAfter), [failed(code, false)]);
 				break;
 			}
 			case "fatal":
-				await store.finish(nid, { status: "failed", http, code, user: { next_check: at + FATAL_RECHECK_MS } });
-				this.o.rows(userId, "failed", { nid, k: send.kind, http, code, final: true });
-				this.log(`notify: Roblox refused a send (HTTP ${http}, ${code})`);
+				if (http === 401 || http === 403) {
+					// The key, not the user: put the send back untouched and stop every send until an owner turns them back on.
+					await store.finish(nid, { status: "cancelled", http, code, rows: [failed(code, false)] });
+					this.o.haltAll("auth");
+					break;
+				}
+				// Anything else Roblox refuses for good (a 400 INVALID_ARGUMENT, ...): this intent is done, never planned again.
+				await store.finish(nid, { status: "failed", http, code, intent: test ? undefined : "failed", rows: [failed(code, true)] });
+				this.log(`notify: Roblox refused a send for good (HTTP ${http}, ${code})`);
 				break;
 		}
 	}

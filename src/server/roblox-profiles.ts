@@ -89,6 +89,23 @@ export class RobloxProfiles {
 		return this.cache.size;
 	}
 
+	/**
+	 * UserIds whose cached username or display name matches `name` (case-insensitive; exact usernames first), at most
+	 * `limit`. Memory only: no Roblox lookup, so a name is found only once its profile was looked up.
+	 */
+	findByName(name: string, limit = 10): number[] {
+		const want = name.trim().toLowerCase();
+		if (!want || want.length > 64) return [];
+		const exact: number[] = [];
+		const display: number[] = [];
+		for (const [userId, entry] of this.cache) {
+			const p = entry.answer.profile;
+			if (p.name && p.name.toLowerCase() === want) exact.push(userId);
+			else if (p.displayName && p.displayName.toLowerCase() === want) display.push(userId);
+		}
+		return [...exact, ...display].slice(0, limit);
+	}
+
 	/** A UserId's profile from memory only (no lookup, no rate limit used), and whether it is still fresh; undefined when not cached. */
 	peek(userId: number): { profile: RobloxProfile; fresh: boolean } | undefined {
 		const hit = this.cache.get(userId);

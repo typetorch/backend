@@ -6,7 +6,7 @@
  * nid: 10 chars [0-9a-z] (crypto random per send); k: the kind name; uid36 / t36: the UserId and the send time (unix
  * seconds) in lowercase base36; data: the intent's data as base64url without padding ("" when none); sig: base64url (no
  * padding) of the first 16 bytes of HMAC-SHA256(key, everything before the last "."), the key being the ASCII bytes of
- * the key string (43 chars of base64url, never decoded). At most 200 bytes. The framework verifies it on join; the
+ * the key string (43 chars of base64url, never decoded). At most 200 bytes. The previous key verifies for 14 days. The framework verifies it on join; the
  * backend signs, and has `verifyToken` for its tests (the same rules as the framework's).
  *
  * The keys live in <data>/notify-keys.json (mode 0600; written by PUT /v1/notify/keys, i.e. `typetorch notify key
@@ -23,8 +23,8 @@ export const KIND_PATTERN = /^[a-z0-9_]{1,24}$/;
 export const NID_PATTERN = /^[0-9a-z]{10}$/;
 /** A key string: base64url of 32 random bytes (43 characters). */
 export const KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-/** The previous key stays valid this long after a rotation. */
-export const PREVIOUS_KEY_MS = 7 * 86_400_000;
+/** The previous key stays valid this long after a rotation (14 days: the token lifetime; contract "Review fixes"). */
+export const PREVIOUS_KEY_MS = 14 * 86_400_000;
 /** A token older than this is refused (`old`). */
 export const TOKEN_MAX_AGE_S = 14 * 86_400;
 
