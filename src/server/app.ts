@@ -255,7 +255,7 @@ const PROFILE_PER_MINUTE = 120;
 /** Uncached Roblox names one error/experiment/funnel -> players read looks up in the background (the profile cache's caps still apply). */
 const PLAYER_NAME_WARM = 8;
 /** POST /v1/notify/intents | opened | played per address per minute (on top of the ingest limit per address). */
-const NOTIFY_IP_PER_MINUTE = 1200;
+const NOTIFY_IP_PER_MINUTE = 6000;
 /** POST /v1/notify/test | send, PUT config / keys per minute (owners). */
 const NOTIFY_ADMIN_PER_MINUTE = 30;
 /** Backups: downloads and "back up now" per minute (each one copies the data folder). */
