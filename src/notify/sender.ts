@@ -1,0 +1,380 @@
+/**
+ * The sender (plans/29 "Sender"): due sends are leased from the durable queue (`notify:due`), each goes to Roblox's
+ * Open Cloud send API behind one token bucket, and its outcome lands in notify_sends, the user's state and the rows.
+ *
+ *   POST https://apis.roblox.com/cloud/v2/users/{userId}/notifications   x-api-key: OPENCLOUD_NOTIFY_KEY ?? OPENCLOUD_API_KEY
+ *   { source: { universe: "universes/<id>" }, payload: { message_id, type: "MOMENT", parameters },
+ *     join_experience: { launch_data }, analytics_data: { category } }  ->  { path, id }
+ *
+ * Dry run (`notify.dryRun`, on by default, and any kind without a template): everything but the POST. The send ends
+ * with status `dry` and a `sent` row with `dry: true`; it counts toward the day / week caps like a real one (the dry run
+ * is a rehearsal of the schedule), but not toward once_ever / per_key, so the real send still happens once it's off.
+ *
+ * Retries (network, 5xx, 429): 30 s, 2 min, 8 min, then failed. A 429 also halves the bucket's rate and honours
+ * Retry-After; the rate climbs back 10 % a minute. Keys and tokens are never logged.
+ */
+import { signToken, type NotifyKeys } from "./token.ts";
+import type { Durable } from "../store/durable.ts";
+import { DUE_SET, type NotifyStore, type SendRow } from "./store.ts";
+import { DAY_MS, type DayClock, type RowSink } from "./planner.ts";
+
+export const SEND_URL = (userId: number) => `https://apis.roblox.com/cloud/v2/users/${userId}/notifications`;
+// TODO(S2): Roblox's real rate limit per key / universe is unknown; 10 / s is the guess until the spike measures it.
+export const DEFAULT_RATE = 10;
+export const RETRY_DELAYS_MS = [30_000, 120_000, 480_000] as const;
+/** First try + the retries. */
+export const MAX_TRIES = RETRY_DELAYS_MS.length + 1;
+/** A leased send must finish (or be put back) within this; a crash returns it after it. */
+export const LEASE_MS = 120_000;
+export const WORKERS = 4;
+export const SEND_TIMEOUT_MS = 30_000;
+/** S1: a user who isn't opted in is left alone this long. */
+export const MUTE_MS = 7 * DAY_MS;
+/** Failed for good (a fatal answer): the user is looked at again after this. */
+export const FATAL_RECHECK_MS = 3_600_000;
+
+export type Outcome = "ok" | "not_subscribed" | "bad_template" | "daily_limit" | "rate_limited" | "retry" | "fatal";
+
+/** Roblox's answer -> what to do. `http` 0 = no answer (network error, timeout). */
+export function classify(http: number, body: unknown): Outcome {
+	const b = (typeof body === "object" && body !== null ? body : {}) as { code?: unknown; message?: unknown };
+	const code = typeof b.code === "string" ? b.code : "";
+	const message = typeof b.message === "string" ? b.message : "";
+	if (http >= 200 && http < 300) return "ok";
+	if (http === 0 || http === 408 || http >= 500) return "retry";
+	// S1: not opted in (checked by Roblox before the template).
+	if (http === 400 && code === "FAILED_PRECONDITION" && /not opted in/i.test(message)) return "not_subscribed";
+	// S1b: an opted-in user and a message id that doesn't exist: the kind's config is wrong.
+	if (http === 404 && code === "NOT_FOUND" && /message id/i.test(message)) return "bad_template";
+	if (http === 429) {
+		// TODO(S3): the real per-user daily-limit answer is unknown; this mapping is a guess until the spike sees one.
+		if (code === "RESOURCE_EXHAUSTED" && /daily|per day|limit for (this )?user/i.test(message)) return "daily_limit";
+		return "rate_limited";
+	}
+	return "fatal";
+}
+
+/** Retry-After: seconds, or an HTTP date. Returns ms (0 when absent or odd), at most an hour. */
+export function retryAfterMs(header: string | null, now: number): number {
+	if (!header) return 0;
+	const s = header.trim();
+	if (/^\d{1,6}$/.test(s)) return Math.min(3_600_000, Number(s) * 1000);
+	const t = Date.parse(s);
+	return Number.isFinite(t) ? Math.min(3_600_000, Math.max(0, t - now)) : 0;
+}
+
+/**
+ * The token bucket: `rate` tokens a second (capacity one second's worth). A 429 halves the rate (not under 0.1 / s) and
+ * blocks until Retry-After; every minute without a 429 adds 10 % back, up to the configured rate.
+ */
+export class TokenBucket {
+	rate: number;
+	tokens: number;
+	last429At: number | null = null;
+	private blockedUntil = 0;
+	private refilledAt: number;
+	private recoveredAt: number;
+
+	constructor(
+		private readonly target: () => number,
+		private readonly clock: () => number,
+	) {
+		this.rate = target();
+		this.tokens = Math.max(1, this.rate);
+		this.refilledAt = clock();
+		this.recoveredAt = clock();
+	}
+
+	private refresh(now: number): void {
+		const target = Math.max(0.1, this.target());
+		if (this.rate > target) this.rate = target;
+		// +10 % per whole minute since the last 429 or step, up to the target.
+		while (this.rate < target && now - this.recoveredAt >= 60_000) {
+			this.recoveredAt += 60_000;
+			this.rate = Math.min(target, this.rate * 1.1);
+		}
+		if (this.rate >= target) this.recoveredAt = now;
+		const cap = Math.max(1, this.rate);
+		this.tokens = Math.min(cap, this.tokens + ((now - this.refilledAt) / 1000) * this.rate);
+		this.refilledAt = now;
+	}
+
+	/** Takes a token now (0), or says how long to wait (ms) before asking again. */
+	take(): number {
+		const now = this.clock();
+		this.refresh(now);
+		if (now < this.blockedUntil) return this.blockedUntil - now;
+		if (this.tokens >= 1) {
+			this.tokens -= 1;
+			return 0;
+		}
+		return Math.max(1, Math.ceil(((1 - this.tokens) / this.rate) * 1000));
+	}
+
+	on429(retryAfter: number): void {
+		const now = this.clock();
+		this.refresh(now);
+		this.rate = Math.max(0.1, this.rate / 2);
+		this.tokens = 0;
+		this.last429At = now;
+		this.recoveredAt = now;
+		this.blockedUntil = Math.max(this.blockedUntil, now + retryAfter);
+	}
+
+	view(): { rate: number; tokens: number; last429At: number | null; blockedUntil: number | null } {
+		this.refresh(this.clock());
+		return { rate: Math.round(this.rate * 100) / 100, tokens: Math.round(this.tokens * 100) / 100, last429At: this.last429At, blockedUntil: this.blockedUntil > this.clock() ? this.blockedUntil : null };
+	}
+
+	/** The state worth keeping across a deploy (kv). */
+	snapshot(): { rate: number; last429At: number | null; blockedUntil: number } {
+		return { rate: this.rate, last429At: this.last429At, blockedUntil: this.blockedUntil };
+	}
+
+	restore(s: { rate?: unknown; last429At?: unknown; blockedUntil?: unknown }): void {
+		if (typeof s.rate === "number" && s.rate > 0) this.rate = Math.min(this.target(), s.rate);
+		if (typeof s.last429At === "number") this.last429At = s.last429At;
+		if (typeof s.blockedUntil === "number") this.blockedUntil = s.blockedUntil;
+		this.recoveredAt = this.last429At ?? this.clock();
+	}
+}
+
+export interface SenderOptions {
+	store: NotifyStore;
+	durable: Durable;
+	clock: () => number;
+	fetch?: typeof fetch;
+	sleep?: (ms: number) => Promise<void>;
+	enabled(): boolean;
+	dryRun(): boolean;
+	rate(): number;
+	dayClock(): DayClock;
+	kindOn(kind: string): boolean;
+	/** S1b: a kind's template doesn't exist on Roblox: stop the kind (app.ts sets the switch, audits, alerts). */
+	halt(kind: string, why: "bad_template"): void;
+	keys(): NotifyKeys | undefined;
+	apiKey(): string | undefined;
+	universeId(): number | undefined;
+	rows: RowSink;
+	log?: (line: string) => void;
+	workers?: number;
+}
+
+const BUCKET_KEY = "notify:bucket";
+
+export class Sender {
+	readonly bucket: TokenBucket;
+	private running: Promise<number> | undefined;
+	private readonly sleep: (ms: number) => Promise<void>;
+	private readonly log: (line: string) => void;
+	private restored = false;
+	/** A send's POST in flight (the stop waits for them; their leases cover a kill). */
+	private inflight = 0;
+
+	constructor(private readonly o: SenderOptions) {
+		this.bucket = new TokenBucket(() => o.rate(), o.clock);
+		this.sleep = o.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+		this.log = o.log ?? (() => {});
+	}
+
+	/** Real sends are possible: an API key and the universe. Without them only dry runs go. */
+	configured(): { apiKey: boolean; universe: boolean } {
+		return { apiKey: Boolean(this.o.apiKey()), universe: Boolean(this.o.universeId()) };
+	}
+
+	get busy(): number {
+		return this.inflight;
+	}
+
+	/** One pass (never two at once): lease the due sends and work them off with N workers. Returns sends handled. */
+	tick(): Promise<number> {
+		this.running ??= this.pass().finally(() => (this.running = undefined));
+		return this.running;
+	}
+
+	private async pass(): Promise<number> {
+		if (!this.restored) {
+			this.restored = true;
+			const saved = await this.o.durable.getJson<Record<string, unknown>>(BUCKET_KEY);
+			if (saved) this.bucket.restore(saved);
+		}
+		if (!this.o.enabled()) return 0;
+		const now = this.o.clock();
+		// No more than about a minute's worth at the current rate, so leases never run out while waiting for tokens.
+		const limit = Math.max(1, Math.min(500, Math.floor(this.bucket.rate * 60)));
+		const leased = await this.o.durable.lease(DUE_SET, now, LEASE_MS, limit);
+		if (!leased.length) return 0;
+		let next = 0;
+		const work = async () => {
+			while (next < leased.length) {
+				const item = leased[next++] as { member: string };
+				try {
+					await this.one(item.member);
+				} catch (error) {
+					this.log(`notify: send ${item.member} failed: ${((error as Error).message ?? String(error)).slice(0, 200)}`);
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(this.o.workers ?? WORKERS, leased.length) }, work));
+		return leased.length;
+	}
+
+	private async cancel(send: SendRow, why: string | null, user: { next_check?: number } = {}): Promise<void> {
+		await this.o.store.finish(send.nid, { status: "cancelled", user });
+		if (why) this.o.rows(Number(send.user_id), "skipped", { k: send.kind, why });
+	}
+
+	private async one(nid: string): Promise<void> {
+		const { store } = this.o;
+		const send = await store.send(nid);
+		if (!send || (send.status !== "planned" && send.status !== "sending")) {
+			await this.o.durable.zrem(DUE_SET, nid);
+			return;
+		}
+		const now = this.o.clock();
+		const userId = Number(send.user_id);
+		const test = Boolean(Number(send.test));
+		// Look again at send time: the reason may be gone, the player may be in game, the kind switched off.
+		if (!test && send.kind !== "custom") {
+			const intent = await store.intent(userId, send.kind, send.key);
+			if (!intent || intent.status !== "pending" || intent.nid !== nid) return this.cancel(send, intent && intent.status === "dropped" ? "dropped" : null);
+			if (Number(intent.until) <= now) return this.cancel(send, "expired");
+			if (!this.o.kindOn(send.kind)) return this.cancel(send, null, { next_check: now + 600_000 });
+		}
+		if (!test) {
+			const user = await store.user(userId);
+			if (user && Number(user.online)) return this.cancel(send, "online", { next_check: now + DAY_MS });
+			if (user?.mute_until && Number(user.mute_until) > now) return this.cancel(send, "muted", { next_check: Number(user.mute_until) });
+		}
+		const dry = this.o.dryRun() || !send.template;
+		if (!dry && !(this.o.apiKey() && this.o.universeId())) {
+			// Not set up for real sends: back in the queue in a minute (the status page says why).
+			await store.retryAt(nid, now + 60_000);
+			return;
+		}
+		const attempt = Number(send.try) + 1;
+		if (dry) {
+			await store.finish(nid, { status: "dry", sentAt: now, intent: test ? undefined : "sent", user: { sent_at: now } });
+			this.o.rows(userId, "sent", { nid, k: send.kind, try: attempt, category: send.category ?? send.kind, dry: true, ...(test ? { test: true } : {}) });
+			return;
+		}
+		// The token bucket (a wait ends early only when the stop runs out the lease, which returns the send).
+		for (;;) {
+			const wait = this.bucket.take();
+			if (wait <= 0) break;
+			await this.sleep(Math.min(wait, 5000));
+		}
+		await store.sending(nid, attempt);
+		const { http, body, retryAfter } = await this.post(send);
+		const outcome = classify(http, body);
+		const at = this.o.clock();
+		const user = await store.user(userId);
+		const subscribed = user?.optin === "subscribed";
+		const code = typeof (body as { code?: unknown })?.code === "string" ? String((body as { code: string }).code).slice(0, 64) : http ? String(http) : "network";
+		switch (outcome) {
+			case "ok": {
+				const id = (body as { id?: unknown; path?: unknown }) ?? {};
+				const robloxId = typeof id.id === "string" ? id.id.slice(0, 128) : typeof id.path === "string" ? id.path.slice(0, 256) : null;
+				await store.finish(nid, {
+					status: "sent",
+					http,
+					robloxId,
+					sentAt: at,
+					intent: test ? undefined : "sent",
+					user: { sent_at: at, ...(subscribed ? {} : { optin: "subscribed", optin_at: at }) },
+					unopenedInc: true,
+				});
+				if (!subscribed) this.o.rows(userId, "optin_inferred", { state: "subscribed" });
+				this.o.rows(userId, "sent", { nid, k: send.kind, try: attempt, roblox_id: robloxId ?? "", category: send.category ?? send.kind, ...(test ? { test: true } : {}) });
+				break;
+			}
+			case "not_subscribed":
+				await store.finish(nid, { status: "failed", http, code: "not_subscribed", user: { mute_until: at + MUTE_MS, optin: "not_subscribed", optin_at: at, next_check: at + MUTE_MS } });
+				this.o.rows(userId, "optin_inferred", { state: "not_subscribed" });
+				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "not_subscribed", final: true });
+				break;
+			case "bad_template":
+				// The kind's config is wrong, not the user: stop the kind, keep the intent pending.
+				await store.finish(nid, { status: "failed", http, code: "bad_template", user: subscribed ? {} : { optin: "subscribed", optin_at: at } });
+				if (!subscribed) this.o.rows(userId, "optin_inferred", { state: "subscribed" });
+				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "bad_template", final: true });
+				if (send.kind !== "custom") this.o.halt(send.kind, "bad_template");
+				else this.log("notify: a one-off send's template (message id) does not exist on Roblox");
+				break;
+			case "daily_limit": {
+				// Roblox says this user had their one today: look again tomorrow (the clock's), not a backoff.
+				const free = this.o.dayClock() === "utc_day" ? Math.floor(at / DAY_MS) * DAY_MS + DAY_MS : at + DAY_MS;
+				await store.finish(nid, { status: "failed", http, code: "daily_limit", user: { capped_until: free, next_check: free } });
+				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "daily_limit", final: true });
+				break;
+			}
+			case "rate_limited":
+			case "retry": {
+				if (outcome === "rate_limited") {
+					this.bucket.on429(retryAfter);
+					await this.o.durable.setJson(BUCKET_KEY, this.bucket.snapshot(), 7 * DAY_MS);
+				}
+				const final = attempt >= MAX_TRIES;
+				this.o.rows(userId, "failed", { nid, k: send.kind, http, code, final });
+				if (final) await store.finish(nid, { status: "failed", http, code, user: { next_check: at + FATAL_RECHECK_MS } });
+				else await store.retryAt(nid, at + Math.max(RETRY_DELAYS_MS[attempt - 1] as number, retryAfter));
+				break;
+			}
+			case "fatal":
+				await store.finish(nid, { status: "failed", http, code, user: { next_check: at + FATAL_RECHECK_MS } });
+				this.o.rows(userId, "failed", { nid, k: send.kind, http, code, final: true });
+				this.log(`notify: Roblox refused a send (HTTP ${http}, ${code})`);
+				break;
+		}
+	}
+
+	private async post(send: SendRow): Promise<{ http: number; body: unknown; retryAfter: number }> {
+		const userId = Number(send.user_id);
+		const keys = this.o.keys();
+		let launchData: string | undefined;
+		if (keys) {
+			try {
+				launchData = signToken(keys.current, { nid: send.nid, kind: send.kind, userId, t: Math.floor(this.o.clock() / 1000), data: send.data ?? "" });
+			} catch {
+				launchData = undefined;
+			}
+		}
+		const parameters: Record<string, { string_value: string }> = {};
+		if (send.params) {
+			try {
+				for (const [k, v] of Object.entries(JSON.parse(send.params) as Record<string, unknown>)) if (typeof v === "string") parameters[k] = { string_value: v };
+			} catch {}
+		}
+		const body = {
+			source: { universe: `universes/${this.o.universeId()}` },
+			payload: { message_id: send.template, type: "MOMENT", ...(Object.keys(parameters).length ? { parameters } : {}) },
+			...(launchData ? { join_experience: { launch_data: launchData } } : {}),
+			analytics_data: { category: send.category ?? send.kind },
+		};
+		this.inflight++;
+		try {
+			const res = await (this.o.fetch ?? fetch)(SEND_URL(userId), {
+				method: "POST",
+				headers: { "content-type": "application/json", "x-api-key": this.o.apiKey() as string },
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+			});
+			const text = (await res.text()).slice(0, 4096);
+			let parsed: unknown = {};
+			try {
+				parsed = JSON.parse(text);
+			} catch {}
+			return { http: res.status, body: parsed, retryAfter: retryAfterMs(res.headers.get("retry-after"), this.o.clock()) };
+		} catch {
+			return { http: 0, body: {}, retryAfter: 0 };
+		} finally {
+			this.inflight--;
+		}
+	}
+
+	/** Waits (up to `ms`) for the POSTs in flight; the rest keep their lease and come back to the next server. */
+	async idle(ms: number): Promise<void> {
+		const until = Date.now() + ms;
+		while (this.inflight > 0 && Date.now() < until) await new Promise((done) => setTimeout(done, 20));
+	}
+}
