@@ -9,6 +9,9 @@ import { events, players, values } from "./explore.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
+import { notifyFunnel } from "./notify-funnel.ts";
+import { notifyOptin } from "./notify-optin.ts";
+import { notifyQueue } from "./notify-queue.ts";
 import { monetization, monetizationPlayers, monetizationPurchases } from "./monetization.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
@@ -45,6 +48,9 @@ export const QUERIES = {
 	monetization,
 	"monetization-players": monetizationPlayers,
 	"monetization-purchases": monetizationPurchases,
+	"notify-funnel": notifyFunnel,
+	"notify-optin": notifyOptin,
+	"notify-queue": notifyQueue,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;
