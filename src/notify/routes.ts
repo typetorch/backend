@@ -3,6 +3,7 @@
  * notify.db, the planner, the sender and the keys, and the request handlers app.ts routes to after its own gates.
  *
  *   game key   POST /v1/notify/intents  { v: 1, items }  -> { ok, accepted, rejected: [{ i, why }], stale }
+ *                                            items: want | drop | presence | prefs (the player's switched-off kinds)
  *              POST /v1/notify/opened   { nid, u }       -> { state: first | repeat | unknown }
  *              POST /v1/notify/played   { nid, u, secs } -> { ok }
  *   admin      GET|PUT /v1/notify/config, GET /v1/notify/status, PUT /v1/notify/keys, POST /v1/notify/test, POST /v1/notify/send
@@ -13,7 +14,7 @@ import { Durable } from "../store/durable.ts";
 import { CUSTOM_KIND, ConfigError, PARAM_NAME, TEMPLATE, placeholders, validateConfig, type KindConfig, type NotifyConfig } from "./config.ts";
 import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock } from "./planner.ts";
 import { MUTE_MS, Sender } from "./sender.ts";
-import { DUE_SET, NotifyStore, PENDING_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow, type SendRow } from "./store.ts";
+import { DUE_SET, NotifyStore, PENDING_MAX, PREFS_OFF_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow, type SendRow } from "./store.ts";
 import { DATA_MAX_BYTES, KIND_PATTERN, NID_PATTERN, NotifyKeyStore, newNid, parseKeys, tokenLength, type NotifyKeys } from "./token.ts";
 
 export const INTENTS_BODY_MAX = 256 * 1024;
@@ -467,9 +468,12 @@ export class NotifyService {
 		const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
 		const sends = await this.store.userSends(userId, 200);
 		const intents = await this.store.userIntents(userId, 200);
+		const prefs = await this.store.prefs(userId);
 		return {
 			userId,
-			known: Boolean(u),
+			known: Boolean(u || prefs),
+			// The kinds the player switched off in the game (the planner skips them: `pref_off`); null = never set.
+			prefs: prefs ? { off: prefs.off, rev: prefs.rev, updated: prefs.updated } : null,
 			state: u
 				? {
 						optin: u.optin,
@@ -566,6 +570,17 @@ function parseItem(raw: unknown, config: NotifyConfig | undefined, now: number, 
 		const at = raw.at < SECONDS_BELOW ? raw.at * 1000 : raw.at;
 		if (at > now + HOUR_MS) return "bad_time";
 		ops.push({ op: "presence", u: raw.u, online: raw.online, at, staleMs });
+		return undefined;
+	}
+	if (raw.op === "prefs") {
+		// Replaces the player's off set. Any valid kind name (a kind pushed later is covered too); `custom` sends ignore it.
+		if (!uidOk(raw.u)) return "bad_user";
+		if (!Array.isArray(raw.off)) return "bad_item";
+		if (raw.off.some((k) => typeof k !== "string" || !KIND_PATTERN.test(k))) return "bad_kind";
+		const off = [...new Set(raw.off as string[])].sort();
+		if (off.length > PREFS_OFF_MAX) return "too_many";
+		if (typeof raw.rev !== "number" || !Number.isSafeInteger(raw.rev) || raw.rev <= 0) return "bad_rev";
+		ops.push({ op: "prefs", u: raw.u, off, rev: raw.rev });
 		return undefined;
 	}
 	if (raw.op !== "want" && raw.op !== "drop") return "bad_op";

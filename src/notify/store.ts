@@ -11,6 +11,8 @@
  *   notify_sends   nid PK                    user_id, kind, key, rev, template, category, params, data, planned_at,
  *                                            sent_at, status planned | sending | sent | dry | failed | cancelled, http,
  *                                            code, roblox_id, try, opened_at, played_secs, test
+ *   notify_prefs   user_id PK                off JSON (the kinds the player switched off, sorted), rev, updated: the
+ *                                            planner skips their intents (`pref_off`) but keeps them
  *   notify_config  id = 1                    the pushed `notifications` object, updated_at, by
  *   notify_outbox  id                        backend rows (uid, t, name, props) written in the same transaction as the
  *                                            state change they describe, deleted once published to the events
@@ -35,6 +37,7 @@ CREATE INDEX IF NOT EXISTS notify_sends_status ON notify_sends (status, updated)
 CREATE INDEX IF NOT EXISTS notify_sends_created ON notify_sends (created);
 CREATE TABLE IF NOT EXISTS notify_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, t INTEGER NOT NULL, name TEXT NOT NULL, props TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS notify_outbox_uid ON notify_outbox (uid);
+CREATE TABLE IF NOT EXISTS notify_prefs (user_id INTEGER PRIMARY KEY, off TEXT NOT NULL DEFAULT '[]', rev INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS notify_config (id INTEGER PRIMARY KEY CHECK (id = 1), config TEXT NOT NULL, updated_at INTEGER NOT NULL, by TEXT NOT NULL);
 `;
 
@@ -50,6 +53,8 @@ export const PENDING_MAX = 2_000_000;
 export const USERS_KEEP_MS = 180 * 86_400_000;
 /** Rows waiting in the outbox at most (the oldest go past it, counted). */
 export const OUTBOX_MAX = 200_000;
+/** Kinds a player can switch off at most (one `prefs` item). */
+export const PREFS_OFF_MAX = 32;
 /** Presence `at` under this is unix seconds (older senders); at or over it, unix ms. */
 export const SECONDS_BELOW = 1e11;
 
@@ -125,7 +130,9 @@ export interface SendRow {
 export type IntentOp =
 	| { op: "want"; u: number; k: string; key: string; at: number; until: number; params: Record<string, string> | null; data: string | null; template: string | null; rev: number }
 	| { op: "drop"; u: number; k: string; key: string | null; why: string | null; rev: number }
-	| { op: "presence"; u: number; online: boolean; at: number; staleMs: number };
+	| { op: "presence"; u: number; online: boolean; at: number; staleMs: number }
+	/** Replaces the user's switched-off kinds (sorted, unique). */
+	| { op: "prefs"; u: number; off: string[]; rev: number };
 
 export interface ApplyOptions {
 	quietMs: number;
@@ -200,6 +207,11 @@ export class NotifyStore {
 				if (item.op === "presence") {
 					presence(tx, item, now, o.quietMs);
 					out.accepted++;
+					continue;
+				}
+				if (item.op === "prefs") {
+					if (prefs(tx, item, now, out)) out.accepted++;
+					else out.stale++;
 					continue;
 				}
 				if (item.op === "want") {
@@ -278,6 +290,16 @@ export class NotifyStore {
 			[now, now, limit],
 		);
 		return rows.map((r) => num(r.user_id));
+	}
+
+	/** The kinds the user switched off (empty when none). */
+	async prefsOff(userId: number): Promise<string[]> {
+		return (await this.prefs(userId))?.off ?? [];
+	}
+
+	async prefs(userId: number): Promise<{ off: string[]; rev: number; updated: number } | undefined> {
+		const row = await this.db.first<{ off: string; rev: number; updated: number }>("SELECT off, rev, updated FROM notify_prefs WHERE user_id = ?", [userId]);
+		return row ? { off: parseOff(row.off), rev: num(row.rev), updated: num(row.updated) } : undefined;
 	}
 
 	async user(userId: number): Promise<UserRow | undefined> {
@@ -476,10 +498,12 @@ export class NotifyStore {
 					[now - USERS_KEEP_MS, now],
 				)
 			).changes;
+			// Prefs of users pruned above (their consent state went with them).
+			const p = (await this.db.run("DELETE FROM notify_prefs WHERE rowid IN (SELECT p.rowid FROM notify_prefs p WHERE NOT EXISTS (SELECT 1 FROM notify_users u WHERE u.user_id = p.user_id) LIMIT 2000)")).changes;
 			sends += a;
 			intents += b;
 			users += c;
-			if (a < 2000 && b < 2000 && c < 2000) break;
+			if (a < 2000 && b < 2000 && c < 2000 && p < 2000) break;
 			await new Promise((done) => setTimeout(done, 0));
 		}
 		return { sends, intents, users };
@@ -538,6 +562,7 @@ export class NotifyStore {
 			let n = tx.run("DELETE FROM notify_sends WHERE user_id = ?", [userId]).changes;
 			n += tx.run("DELETE FROM notify_intents WHERE user_id = ?", [userId]).changes;
 			n += tx.run("DELETE FROM notify_users WHERE user_id = ?", [userId]).changes;
+			n += tx.run("DELETE FROM notify_prefs WHERE user_id = ?", [userId]).changes;
 			n += tx.run("DELETE FROM notify_outbox WHERE uid = ?", [userId]).changes;
 			return n;
 		});
@@ -567,6 +592,39 @@ function presence(tx: SyncTx, item: { u: number; online: boolean; at: number; st
 		tx.run("UPDATE notify_users SET online = 1, presence_at = ?, last_seen = ?, hours = ?, next_check = ? WHERE user_id = ?", [item.at, item.at, JSON.stringify(hours), Math.max(now, item.at + item.staleMs), item.u]);
 	} else {
 		tx.run("UPDATE notify_users SET online = 0, presence_at = ?, left_at = ?, last_seen = ?, next_check = ? WHERE user_id = ?", [item.at, item.at, item.at, item.at + quietMs, item.u]);
+	}
+}
+
+/**
+ * One prefs item: replaces the user's off set when `rev` is newer (false = stale). A send still planned for a kind now
+ * off is cancelled (`skipped` pref_off; its intent stays pending); any change makes the planner look again at once, so
+ * a kind switched back on resumes its intents.
+ */
+function prefs(tx: SyncTx, item: { u: number; off: string[]; rev: number }, now: number, out: ApplyResult): boolean {
+	const old = tx.first<{ off: string; rev: number }>("SELECT off, rev FROM notify_prefs WHERE user_id = ?", [item.u]);
+	if (old && num(old.rev) >= item.rev) return false;
+	const off = JSON.stringify(item.off);
+	tx.run("INSERT INTO notify_prefs (user_id, off, rev, updated) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET off = excluded.off, rev = excluded.rev, updated = excluded.updated", [item.u, off, item.rev, now]);
+	if (old && old.off === off) return true;
+	const busy = tx.first<{ busy: string | null }>("SELECT busy FROM notify_users WHERE user_id = ?", [item.u])?.busy;
+	if (busy) {
+		const planned = tx.first<{ kind: string; test: number }>("SELECT kind, test FROM notify_sends WHERE nid = ?", [busy]);
+		if (planned && !num(planned.test) && item.off.includes(planned.kind) && cancelPlanned(tx, busy, now, out, false)) {
+			tx.run("UPDATE notify_intents SET nid = NULL WHERE user_id = ? AND nid = ?", [item.u, busy]);
+			outbox(tx, [{ uid: item.u, name: "skipped", props: { k: planned.kind, why: "pref_off" } }], now);
+		}
+	}
+	tx.run("UPDATE notify_users SET next_check = 0 WHERE user_id = ?", [item.u]);
+	return true;
+}
+
+/** A stored off set (a JSON list of kind names); anything else reads as none. */
+export function parseOff(text: string | null | undefined): string[] {
+	try {
+		const v = JSON.parse(text ?? "[]") as unknown;
+		return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+	} catch {
+		return [];
 	}
 }
 

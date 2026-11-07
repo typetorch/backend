@@ -1,7 +1,7 @@
 /** The planner's rules (src/notify/planner.ts `decide`): a pure function over a pinned clock and random. */
 import { describe, expect, test } from "bun:test";
 import { validateConfig, type NotifyConfig } from "../src/notify/config.ts";
-import { DAY_MS, HOUR_MS, JITTER_MS, dayFreeAt, decide, isoWeekStart, preferredHour, weeklyCap, type DecideInput, type PlannerIntent, type PlannerUser } from "../src/notify/planner.ts";
+import { DAY_MS, HOUR_MS, JITTER_MS, PREF_OFF_RECHECK_MS, dayFreeAt, decide, isoWeekStart, preferredHour, weeklyCap, type DecideInput, type PlannerIntent, type PlannerUser } from "../src/notify/planner.ts";
 
 /** Monday 2026-11-09 12:00 UTC. */
 const NOW = Date.UTC(2026, 10, 9, 12, 0, 0);
@@ -175,6 +175,31 @@ describe("when", () => {
 		const d = decide(input({ intents: [intent("gift_expiring", "g", { at: NOW + 5 * 60_000 })] }));
 		expect(d.plan).toBeUndefined();
 		expect(d.nextCheck).toBe(NOW + 5 * 60_000);
+	});
+});
+
+describe("prefs (the player's switched-off kinds)", () => {
+	test("an off kind is never planned: skipped pref_off, looked at again when its window ends (not every tick)", () => {
+		const d = decide(input({ intents: [intent("gift_expiring", "g", { until: NOW + 2 * DAY_MS })], off: new Set(["gift_expiring"]) }));
+		expect(d.plan).toBeUndefined();
+		expect(d.superseded).toEqual([]);
+		expect(d.skips).toEqual([{ kind: "gift_expiring", why: "pref_off" }]);
+		expect(d.nextCheck).toBe(NOW + 2 * DAY_MS);
+		const long = decide(input({ intents: [intent("gift_expiring", "g", { until: NOW + 300 * DAY_MS })], off: new Set(["gift_expiring"]) }));
+		expect(long.nextCheck).toBe(NOW + PREF_OFF_RECHECK_MS);
+	});
+
+	test("the next kind goes instead (an off kind never outranks); other kinds untouched", () => {
+		const d = decide(input({ intents: [intent("gift_expiring", "g"), intent("daily", "1")], off: new Set(["gift_expiring", "streak"]) }));
+		expect(d.plan?.intent.kind).toBe("daily");
+		expect(d.skips).toEqual([{ kind: "gift_expiring", why: "pref_off" }]);
+		expect(decide(input({ intents: [intent("gift_expiring", "g")], off: new Set(["daily"]) })).plan?.intent.kind).toBe("gift_expiring");
+	});
+
+	test("a window not yet open still wakes the planner at its start", () => {
+		const d = decide(input({ intents: [intent("gift_expiring", "g"), intent("daily", "1", { at: NOW + HOUR_MS })], off: new Set(["gift_expiring"]) }));
+		expect(d.plan).toBeUndefined();
+		expect(d.nextCheck).toBe(NOW + HOUR_MS);
 	});
 });
 

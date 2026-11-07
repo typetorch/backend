@@ -108,6 +108,7 @@ const userView: NotifyUserView = {
 	name: "Tester",
 	displayName: "Test Player",
 	otherMatches: [5151],
+	prefs: { off: ["daily", "streak"], rev: 5, updated: T0 },
 	state: { optin: "subscribed", optinAt: T0, muteUntil: null, muted: false, online: false, presenceAt: T0, lastSeen: T0, leftAt: T0, unopened: 1, backoffAt: null, cappedUntil: null, nextCheck: null, busy: null },
 	sends: [
 		{ nid: "nid-1", kind: "gift_new", status: "sent", test: false, plannedAt: T0, sentAt: T0 + 1000, http: 200, code: null, try: 1, openedAt: T0 + 60_000, playedSecs: 95, category: null },
@@ -240,6 +241,9 @@ describe("Notifications page", () => {
 		const region = await screen.findByRole("region", { name: "Player notifications" });
 		expect(within(region).getByText("Test Player")).toBeTruthy();
 		expect(within(region).getByText("pid-aaaa")).toBeTruthy();
+		const off = within(region).getByLabelText("Kinds switched off");
+		expect(within(off).getByText("daily")).toBeTruthy();
+		expect(within(off).getByText("streak")).toBeTruthy();
 		const consent = within(region).getByRole("table", { name: "Prompt and consent rows" });
 		expect(within(consent).getByText("prompt check")).toBeTruthy();
 		expect(within(consent).getByText("prompt closed")).toBeTruthy();

@@ -786,6 +786,8 @@ export interface NotifyUserView {
 	displayName: string | null;
 	otherMatches?: number[];
 	state: NotifyUserState | null;
+	/** The kinds the player switched off in the game (`prefs`; the planner skips them as `pref_off`); null = never set. */
+	prefs?: { off: string[]; rev: number; updated: number } | null;
 	/** Newest first, at most 200. */
 	sends: NotifyUserSend[];
 	intents: NotifyUserIntent[];

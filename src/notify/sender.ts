@@ -314,6 +314,8 @@ export class Sender {
 			if (!intent || intent.status !== "pending" || intent.nid !== nid) return this.cancel(send, intent && intent.status === "dropped" ? "dropped" : null);
 			if (Number(intent.until) <= now) return this.cancel(send, "expired");
 			if (!this.o.kindOn(send.kind)) return this.cancel(send, null, { next_check: now + 600_000 });
+			// The player switched the kind off since it was planned: the intent stays pending (back on = it resumes).
+			if ((await store.prefsOff(userId)).includes(send.kind)) return this.cancel(send, "pref_off");
 		}
 		if (!test) {
 			const user = await store.user(userId);

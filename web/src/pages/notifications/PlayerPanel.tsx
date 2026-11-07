@@ -3,7 +3,8 @@
  * a pid or a username / display name the server's name cache knows; the search lives in the URL (`player`, and `by` when
  * it isn't guessed) so a link can open it (the player detail links here with `?player=<pid>&by=pid`).
  *
- * Shows who it is, the consent the backend learned (opt-in, mute, the game's prompt rows and the inferred answers), every
+ * Shows who it is, the consent the backend learned (opt-in, mute, the kinds the player switched off in the game, the
+ * game's prompt rows and the inferred answers), every
  * send with its opens and plays, and the intents (pending and past).
  */
 import { useQuery } from "@tanstack/react-query";
@@ -155,6 +156,22 @@ function Consent({ view }: { view: NotifyUserView }) {
 	return (
 		<div className="space-y-2">
 			<h3 className="text-sm font-medium">Consent</h3>
+			<KeyValue label="Switched off">
+				{view.prefs?.off.length ? (
+					<span className="inline-flex flex-wrap gap-1" aria-label="Kinds switched off">
+						{view.prefs.off.map((k) => (
+							<Badge key={k} variant="outline" className="font-mono">
+								{k}
+							</Badge>
+						))}
+						<span className="text-muted-foreground">set {fmtAgo(view.prefs.updated)}</span>
+					</span>
+				) : view.prefs ? (
+					<span>none (set {fmtAgo(view.prefs.updated)})</span>
+				) : (
+					<span className="text-muted-foreground">never set</span>
+				)}
+			</KeyValue>
 			{s ? (
 				<div className="flex flex-wrap gap-x-4 gap-y-1">
 					<KeyValue label="Opt-in">

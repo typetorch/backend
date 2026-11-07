@@ -4,7 +4,8 @@
  *
  * `decide` is the whole rule set as a pure function over the user's state, their intents and sends, the config, the
  * switches, `now` and `random` (tests pin both). In order:
- *   1. intents: window open (at <= now < until), kind in the config and switched on (and not halted);
+ *   1. intents: window open (at <= now < until), kind in the config and switched on (and not halted), and not a kind
+ *      the player switched off (`prefs`: skipped `pref_off`, the intent kept for when they switch it back on);
  *      repeat: once_ever = no real send of the kind ever, per_key = none of that key (else the intent is superseded);
  *      daily = none of the kind this day (the `notify.clock` day), and under `perWeek` this ISO week (Mon 00:00 UTC);
  *   2. the user: muted, online, quiet after leaving, the day cap (`dailyCap` per the clock: rolling24 = 24 h after a
@@ -28,9 +29,14 @@ export const JITTER_MS = 20 * 60_000;
 export const PLANNER_BATCH = 500;
 /** How long a user with nothing plannable (kinds off, no config) waits before the next look. */
 export const IDLE_RECHECK_MS = 10 * 60_000;
+/**
+ * A user whose only open intents are of kinds they switched off is looked at again when the last of those windows ends,
+ * capped here: a prefs change (or a new want) brings the look forward, so the `pref_off` row is not repeated every tick.
+ */
+export const PREF_OFF_RECHECK_MS = 30 * DAY_MS;
 
 export type DayClock = "rolling24" | "utc_day";
-export type SkipWhy = "online" | "quiet" | "capped_day" | "capped_week" | "lapsed" | "muted" | "outranked" | "expired" | "dropped" | "repeat";
+export type SkipWhy = "online" | "quiet" | "capped_day" | "capped_week" | "lapsed" | "muted" | "outranked" | "expired" | "dropped" | "repeat" | "pref_off";
 
 export interface PlannerUser {
 	/** In game: an `online` presence newer than `notify.presenceStaleHours`. */
@@ -69,6 +75,8 @@ export interface DecideInput<I extends PlannerIntent = PlannerIntent> {
 	sentKeys: { kind: string; key: string }[];
 	config: NotifyConfig;
 	kindOn(kind: string): boolean;
+	/** The kinds the player switched off (`prefs`); none when absent. */
+	off?: ReadonlySet<string>;
 	clock: DayClock;
 	now: number;
 	random: () => number;
@@ -138,6 +146,8 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 	// 1. The intents that could go now.
 	const eligible: { intent: I; kind: KindConfig }[] = [];
 	const kindSkips = new Map<string, SkipWhy>();
+	const prefOff = new Set<string>();
+	let prefOffUntil = 0;
 	for (const intent of input.intents) {
 		if (intent.at > now) {
 			later(intent.at);
@@ -147,6 +157,11 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 		const kind = config.kinds[intent.kind];
 		if (!kind || !input.kindOn(intent.kind)) {
 			later(now + IDLE_RECHECK_MS);
+			continue;
+		}
+		if (input.off?.has(intent.kind)) {
+			prefOff.add(intent.kind);
+			prefOffUntil = Math.max(prefOffUntil, intent.until);
 			continue;
 		}
 		if ((kind.repeat === "once_ever" && sentKind.has(intent.kind)) || (kind.repeat === "per_key" && sentKey.has(`${intent.kind}\u0000${intent.key}`))) {
@@ -171,7 +186,8 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 		eligible.push({ intent, kind });
 	}
 	if (!eligible.length) {
-		if (!Number.isFinite(out.nextCheck)) out.nextCheck = now + IDLE_RECHECK_MS;
+		if (!Number.isFinite(out.nextCheck)) out.nextCheck = prefOff.size ? Math.max(now + 1000, Math.min(prefOffUntil, now + PREF_OFF_RECHECK_MS)) : now + IDLE_RECHECK_MS;
+		for (const kind of prefOff) out.skips.push({ kind, why: "pref_off" });
 		for (const [kind, why] of kindSkips) if (why !== "repeat") out.skips.push({ kind, why });
 		for (const [kind, why] of kindSkips) if (why === "repeat") out.skips.push({ kind, why });
 		return out;
@@ -209,9 +225,10 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 	const week = times.filter((t) => t > now - WEEK_MS).sort((a, b) => a - b);
 	if (week.length >= cap) return skip("lapsed", (week[week.length - cap] as number) + WEEK_MS);
 
-	// 3. Outranked kinds (one row each).
+	// 3. Outranked kinds (one row each), and the kinds the player switched off (once per planned send).
 	const losers = new Set(eligible.filter((e) => e !== best && e.intent.kind !== k).map((e) => e.intent.kind));
 	for (const kind of losers) out.skips.push({ kind, why: "outranked" });
+	for (const kind of prefOff) out.skips.push({ kind, why: "pref_off" });
 
 	// 4. When.
 	const intent = best.intent;
@@ -322,6 +339,7 @@ export class Planner {
 				sentKeys: await store.sentKeys(userId, kinds),
 				config,
 				kindOn: (k) => this.o.kindOn(k),
+				off: new Set(await store.prefsOff(userId)),
 				clock: this.o.dayClock(),
 				now,
 				random: this.random,
