@@ -195,9 +195,12 @@ describe("sends", () => {
 		const call = s.roblox.calls[0] as Call;
 		expect(call.url).toBe("https://apis.roblox.com/cloud/v2/users/123456789/notifications");
 		expect(call.headers.get("x-api-key")).toBe(OPEN_CLOUD);
-		expect(call.body).toMatchObject({ source: { universe: "universes/4242" }, payload: { message_id: "msg-gift", type: "MOMENT", parameters: { gift: { string_value: "5 coins" } } }, analytics_data: { category: "gift" } });
+		expect(call.body).toMatchObject({ source: { universe: "universes/4242" }, payload: { message_id: "msg-gift", type: "MOMENT", parameters: { gift: { string_value: "5 coins" } }, analytics_data: { category: "gift" } } });
+		// joinExperience / analyticsData belong inside payload (UserNotification_Payload): at the top level Roblox drops them
+		expect(call.body.join_experience).toBeUndefined();
+		expect(call.body.analytics_data).toBeUndefined();
 		const nid = s.named("planned")[0].nid;
-		const v = verifyToken(call.body.join_experience.launch_data, { current: KEY, since: 1 }, 123456789, Math.floor(s.t.now / 1000));
+		const v = verifyToken(call.body.payload.join_experience.launch_data, { current: KEY, since: 1 }, 123456789, Math.floor(s.t.now / 1000));
 		expect(v).toMatchObject({ ok: true, nid, kind: "gift", data: "mail:42" });
 		expect(s.named("optin_inferred")).toEqual([{ pid: "pid-123456789", state: "subscribed" }]);
 		expect(s.named("sent")).toEqual([{ pid: "pid-123456789", nid, k: "gift", try: 1, roblox_id: "roblox-1", category: "gift" }]);
@@ -375,7 +378,7 @@ describe("sends", () => {
 		const ok = await s.svc.send({ userId: 19, template: "msg-x", data: "x" });
 		expect(ok.body).toMatchObject({ status: "planned" });
 		await s.svc.sendTick();
-		expect(s.roblox.calls.at(-1)?.body).toMatchObject({ payload: { message_id: "msg-x" }, analytics_data: { category: "msg-x" } });
+		expect(s.roblox.calls.at(-1)?.body).toMatchObject({ payload: { message_id: "msg-x", analytics_data: { category: "msg-x" } } });
 		expect((await s.svc.test({ userId: 18, kind: "gift" })).status).toBe(400);
 	});
 

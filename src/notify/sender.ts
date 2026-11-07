@@ -3,8 +3,8 @@
  * Open Cloud send API behind one token bucket, and its outcome lands in notify_sends, the user's state and the rows.
  *
  *   POST https://apis.roblox.com/cloud/v2/users/{userId}/notifications   x-api-key: OPENCLOUD_NOTIFY_KEY ?? OPENCLOUD_API_KEY
- *   { source: { universe: "universes/<id>" }, payload: { message_id, type: "MOMENT", parameters },
- *     join_experience: { launch_data }, analytics_data: { category } }  ->  { path, id }
+ *   { source: { universe: "universes/<id>" },
+ *     payload: { message_id, type: "MOMENT", parameters, join_experience: { launch_data }, analytics_data: { category } } }  ->  { path, id }
  *
  * Dry run (`notify.dryRun`, on by default, and any kind without a template): everything but the POST. The send ends
  * with status `dry` and a `sent` row with `dry: true`; it counts toward the day / week caps like a real one (the dry run
@@ -441,11 +441,18 @@ export class Sender {
 				for (const [k, v] of Object.entries(JSON.parse(send.params) as Record<string, unknown>)) if (typeof v === "string") parameters[k] = { string_value: v };
 			} catch {}
 		}
+		// joinExperience / analyticsData live INSIDE payload (the API reference, UserNotification_Payload). The Open Cloud guide's curl
+		// example puts them at the top level, where Roblox accepts the request (200) and silently drops both: no launch data on Join,
+		// no category in the dashboard (found 2026-11-07).
 		const body = {
 			source: { universe: `universes/${this.o.universeId()}` },
-			payload: { message_id: send.template, type: "MOMENT", ...(Object.keys(parameters).length ? { parameters } : {}) },
-			...(launchData ? { join_experience: { launch_data: launchData } } : {}),
-			analytics_data: { category: send.category ?? send.kind },
+			payload: {
+				message_id: send.template,
+				type: "MOMENT",
+				...(Object.keys(parameters).length ? { parameters } : {}),
+				...(launchData ? { join_experience: { launch_data: launchData } } : {}),
+				analytics_data: { category: send.category ?? send.kind },
+			},
 		};
 		this.inflight++;
 		try {
