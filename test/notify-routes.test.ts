@@ -181,6 +181,39 @@ describe("notify routes", () => {
 		expect((await h.call("/v1/notify/played", post(API, { nid: t.nid, u: 1, secs: -1 }))).status).toBe(400);
 	});
 
+	test("the per-player view: consent rows with dates, sends with opens and plays, intents; by uid, pid or name", async () => {
+		const t = h.now();
+		const row = (name: string, props: object, dt: number) => ({ v: 1, t: t + dt, kind: "notify", name, pid: "player-one", sid: "s1", job: "job-1", art: "a1", src: "server", props: JSON.stringify(props) });
+		const ingest = await h.call(
+			"/v1/ingest",
+			post(API, { events: [row("optin_check", { can: true, where: "shop" }, -3000), row("optin_shown", { where: "shop" }, -2000), row("optin_closed", { where: "shop", secs: 4, err: "timeout" }, -1000)] }),
+		);
+		expect(ingest.status).toBe(202);
+		await h.app.load();
+		const r = await h.call("/v1/notify/user?uid=1", { headers: bearer(ADMIN) });
+		expect(r.status).toBe(200);
+		const v = await asJson(r);
+		expect(v).toMatchObject({ userId: 1, known: true, pids: ["player-one"] });
+		expect(v.sends.length).toBeGreaterThan(0);
+		expect(v.sends.find((x: { test: boolean }) => x.test)).toMatchObject({ kind: "streak", openedAt: expect.any(Number), playedSecs: 61 });
+		expect(v.intents.length).toBeGreaterThan(0);
+		const names = v.events.rows.map((x: { name: string }) => x.name);
+		expect(names).toEqual(expect.arrayContaining(["optin_check", "optin_shown", "optin_closed"]));
+		expect(v.events.rows.find((x: { name: string }) => x.name === "optin_closed")).toMatchObject({ where: "shop", secs: 4, err: "timeout" });
+		expect(v.events.rows.find((x: { name: string }) => x.name === "optin_check")).toMatchObject({ can: "true", where: "shop" });
+		expect((await asJson(await h.call("/v1/notify/user?pid=player-one", { headers: bearer(ADMIN) }))).userId).toBe(1);
+		expect((await h.call("/v1/notify/user?name=nobody_known", { headers: bearer(ADMIN) })).status).toBe(404);
+		expect((await h.call("/v1/notify/user", { headers: bearer(ADMIN) })).status).toBe(400);
+		expect((await h.call("/v1/notify/user?uid=1", { headers: bearer(API) })).status).toBe(401);
+	});
+
+	test("until must be after at; presence `at` in ms", async () => {
+		const now = Math.floor(h.now() / 1000);
+		const r = await asJson(await intents([{ op: "want", u: 1, k: "streak", key: "eq", at: now, until: now, rev: rev++ }, { op: "presence", u: 9, online: true, at: h.now() }]));
+		expect(r.rejected).toEqual([{ i: 0, why: "bad_time" }]);
+		expect(Number((await h.app.notify.store.user(9))?.presence_at)).toBe(h.now());
+	});
+
 	test("erasure by pid removes the user's notification rows", async () => {
 		expect(await h.app.notify.store.user(1)).toBeDefined();
 		const r = await h.call("/v1/erasure", post(ADMIN, { pid: "player-one" }));

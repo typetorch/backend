@@ -46,11 +46,11 @@ describe("notify token", () => {
 		expect(verifyToken("mail:42", keys, 1, FIELDS.t)).toEqual({ ok: false, why: "not_ours" });
 	});
 
-	test("the previous key: accepted for 7 days after the rotation, refused after", () => {
-		const since = FIELDS.t + 100;
+	test("the previous key: accepted for 14 days after the rotation, refused after", () => {
+		const since = FIELDS.t - 100;
 		const keys = { current: OTHER, previous: KEY, since };
-		expect(verifyToken(VECTOR, keys, 123456789, since + 6 * 86_400).ok).toBe(true);
-		expect(verifyToken(VECTOR, keys, 123456789, since + 7 * 86_400 + 1)).toEqual({ ok: false, why: "sig" });
+		expect(verifyToken(VECTOR, keys, 123456789, since + 13 * 86_400).ok).toBe(true);
+		expect(verifyToken(VECTOR, keys, 123456789, since + 14 * 86_400 + 1)).toEqual({ ok: false, why: "sig" });
 	});
 
 	test("signing refuses bad fields and more than 200 bytes", () => {

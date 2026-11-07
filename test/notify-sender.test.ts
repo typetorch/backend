@@ -4,6 +4,9 @@
  * retries, the lease handover, and the planner + sender together.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { NotifyService } from "../src/notify/routes.ts";
 import { LEASE_MS, MUTE_MS, TokenBucket, classify, parseRateHeaders, retryAfterMs } from "../src/notify/sender.ts";
 import { DUE_SET } from "../src/notify/store.ts";
@@ -43,9 +46,10 @@ afterEach(async () => {
 	for (const s of open.splice(0)) await s.close();
 });
 
-async function setup(o: { answers?: Answer[]; dryRun?: boolean; fleetDb?: string } = {}) {
-	const t = { now: T0 };
-	const sw = { enabled: true, dryRun: o.dryRun ?? false, rate: 50, clock: "rolling24" as "rolling24" | "utc_day", kinds: {} as Record<string, boolean> };
+async function setup(o: { answers?: Answer[]; dryRun?: boolean; fleetDb?: string; publish?: "published" | "unavailable" | "off"; now?: number } = {}) {
+	const t = { now: o.now ?? T0 };
+	const sw = { enabled: true, dryRun: o.dryRun ?? false, rate: 50, clock: "rolling24" as "rolling24" | "utc_day", kinds: {} as Record<string, boolean>, stale: 6, publish: (o.publish ?? "published") as "published" | "unavailable" | "off" };
+	const stoppedAll: string[] = [];
 	const rows: Record<string, any>[] = [];
 	const stopped: string[] = [];
 	const roblox = fakeRoblox(o.answers);
@@ -55,13 +59,20 @@ async function setup(o: { answers?: Answer[]; dryRun?: boolean; fleetDb?: string
 		envKey: KEY,
 		apiKey: OPEN_CLOUD,
 		universeId: 4242,
-		switches: { enabled: () => sw.enabled, dryRun: () => sw.dryRun, rate: () => sw.rate, clock: () => sw.clock, kindEnabled: (k) => sw.kinds[k] !== false },
+		switches: { enabled: () => sw.enabled, dryRun: () => sw.dryRun, rate: () => sw.rate, clock: () => sw.clock, kindEnabled: (k) => sw.kinds[k] !== false, presenceStaleHours: () => sw.stale },
 		stopKind: (k) => {
 			stopped.push(k);
 			sw.kinds[k] = false;
 		},
+		stopAll: (why) => {
+			stoppedAll.push(why);
+			sw.enabled = false;
+		},
 		pidOf: async (u) => (u === 7 ? "" : `pid-${u}`),
-		publish: async (r) => void rows.push(...r),
+		publish: async (r) => {
+			if (sw.publish === "published") rows.push(...r);
+			return sw.publish;
+		},
 		clock: () => t.now,
 		random: () => 0.5,
 		fetch: roblox.fetch,
@@ -73,7 +84,7 @@ async function setup(o: { answers?: Answer[]; dryRun?: boolean; fleetDb?: string
 	let rev = 1;
 	const want = async (u: number, k: string, extra: Record<string, unknown> = {}) => svc.intents({ v: 1, items: [{ op: "want", u, k, rev: rev++, ...(k === "gift" ? { params: { gift: "5 coins" } } : {}), ...extra }] });
 	const named = (name: string) => rows.filter((r) => r.name === name).map((r) => ({ pid: r.pid, ...JSON.parse(r.props) }));
-	return { svc, t, sw, rows, named, stopped, roblox, want, nextRev: () => rev++ };
+	return { svc, t, sw, rows, named, stopped, stoppedAll, roblox, want, nextRev: () => rev++ };
 }
 
 describe("classify", () => {
@@ -376,5 +387,203 @@ describe("sends", () => {
 		expect(await s.svc.store.user(20)).toBeUndefined();
 		expect(await s.svc.store.pendingIntents(20)).toEqual([]);
 		expect(await s.svc.durable.zcount(DUE_SET, 0, Number.MAX_SAFE_INTEGER)).toBe(0);
+	});
+});
+
+describe("review fixes (backend#23)", () => {
+	const presence = (s: Awaited<ReturnType<typeof setup>>, u: number, online: boolean, at: number) => s.svc.intents({ v: 1, items: [{ op: "presence", u, online, at }] });
+
+	test("presence goes stale after notify.presenceStaleHours; at in ms (seconds still read); a tie: online wins", async () => {
+		const s = await setup();
+		// ms
+		await presence(s, 30, true, T0);
+		await s.want(30, "day2");
+		await s.svc.planTick();
+		expect(s.named("skipped")).toEqual([{ pid: "pid-30", k: "day2", why: "online" }]);
+		expect(Number((await s.svc.store.user(30))?.next_check)).toBe(T0 + 6 * 3600_000);
+		// No refresh for 6 h: no longer online, the send goes.
+		s.t.now = T0 + 6 * 3600_000;
+		await s.svc.planTick();
+		expect(s.named("planned")).toHaveLength(1);
+		// Seconds still read; leave and join at the same instant: online wins.
+		await presence(s, 31, true, Math.floor(T0 / 1000));
+		expect(Number((await s.svc.store.user(31))?.presence_at)).toBe(T0);
+		await presence(s, 31, false, T0);
+		expect(Number((await s.svc.store.user(31))?.online)).toBe(1);
+		await presence(s, 32, false, T0);
+		await presence(s, 32, true, T0);
+		expect(Number((await s.svc.store.user(32))?.online)).toBe(1);
+	});
+
+	test("dry run keeps the intent pending: the caps count the dry row, the real send goes once dry run is off (once_ever too)", async () => {
+		const s = await setup({ dryRun: true });
+		await s.want(33, "day2");
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.named("sent")[0]).toMatchObject({ k: "day2", dry: true });
+		expect((await s.svc.store.intent(33, "day2", ""))?.status).toBe("pending");
+		// Same day: the dry row holds the day cap.
+		s.t.now += 3600_000;
+		await s.svc.planTick();
+		expect(s.named("planned")).toHaveLength(1);
+		s.sw.dryRun = false;
+		s.t.now = T0 + 24 * 3600_000 + 1000;
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(1);
+		expect((await s.svc.store.intent(33, "day2", ""))?.status).toBe("sent");
+	});
+
+	test("the unopened backoff starts after `after` unopened real sends", async () => {
+		const s = await setup();
+		await s.svc.putConfig({ lapse: [[60, 7]], unopenedBackoff: { after: 2, factor: 0.5, days: 14 }, kinds: CONFIG.kinds }, "test");
+		for (let i = 0; i < 2; i++) {
+			await s.want(34, "gift", { key: `g${i}` });
+			await s.svc.planTick();
+			await s.svc.sendTick();
+			s.t.now += 25 * 3600_000;
+		}
+		const u = await s.svc.store.user(34);
+		expect([Number(u?.unopened), Number(u?.backoff_at)]).toEqual([2, T0 + 25 * 3600_000]);
+		// An open ends it.
+		await s.svc.opened({ nid: s.named("planned")[1].nid, u: 34 });
+		expect((await s.svc.store.user(34))?.backoff_at).toBeNull();
+	});
+
+	test("priority: a want that outranks a send still planned for later cancels it and goes now", async () => {
+		const s = await setup();
+		await s.svc.putConfig({ kinds: { ...CONFIG.kinds, daily: { template: "msg-daily", priority: 70, repeat: "daily", send: "preferred_hour" }, gift_expiring: { template: "msg-exp", priority: 20, repeat: "per_key", send: "asap" } } }, "test");
+		s.t.now = Date.UTC(2026, 10, 9, 18);
+		await s.want(35, "daily", { key: "d1" });
+		await s.svc.planTick();
+		const daily = s.named("planned")[0];
+		expect(daily.for).toBe(Date.UTC(2026, 10, 10, 17) / 1000);
+		await s.want(35, "gift_expiring", { key: "e1" });
+		expect((await s.svc.store.send(daily.nid))?.status).toBe("cancelled");
+		expect(s.named("skipped")).toEqual([{ pid: "pid-35", k: "daily", why: "outranked" }]);
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls.map((c) => c.body.payload.message_id)).toEqual(["msg-exp"]);
+		expect((await s.svc.store.intent(35, "daily", "d1"))?.status).toBe("pending");
+	});
+
+	test("the outbox: rows survive a crash before the publish and go out once, later", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "tt-notify-outbox-"));
+		try {
+			const fleetDb = join(dir, "fleet.sqlite");
+			const a = await setup({ fleetDb, publish: "unavailable" });
+			await a.want(36, "day2");
+			await a.svc.planTick();
+			await a.svc.sendTick();
+			expect(a.rows).toEqual([]);
+			expect(await a.svc.store.outboxCount()).toBe(3);
+			// "Crash": the process goes away with the rows unpublished (close keeps them: analytics unavailable).
+			await a.svc.close();
+			open.splice(open.indexOf(a.svc), 1);
+			const b = await setup({ fleetDb, publish: "published", now: a.t.now });
+			// planned, optin_inferred, sent
+			expect(await b.svc.flushRows()).toBe(3);
+			expect(await b.svc.flushRows()).toBe(0);
+			expect(b.named("planned")).toHaveLength(1);
+			expect(b.named("sent")).toHaveLength(1);
+			expect(await b.svc.store.outboxCount()).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("401 / 403: every send stops (kind-less halted entry), nobody is muted; turning notifications back on resumes", async () => {
+		// Both sends were already on their way (4 workers): both refused, nothing more leaves after.
+		const refused = { status: 403, body: { code: "PERMISSION_DENIED", message: "scope" } };
+		const s = await setup({ answers: [refused, refused] });
+		await s.want(37, "day2");
+		await s.want(38, "gift", { key: "a" });
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(2);
+		expect(s.stoppedAll).toEqual(["auth"]);
+		const status = (await s.svc.status()).body as Record<string, any>;
+		expect(status.halted).toContainEqual({ why: "auth", at: T0 });
+		expect(status.haltedAll).toEqual({ why: "auth", at: T0 });
+		for (const u of [37, 38]) expect([(await s.svc.store.user(u))?.mute_until ?? null, (await s.svc.store.intent(u, u === 37 ? "day2" : "gift", u === 37 ? "" : "a"))?.status]).toEqual([null, "pending"]);
+		// The owner fixes the key and turns notifications back on.
+		s.sw.enabled = true;
+		expect(await s.svc.resume()).toBe(true);
+		s.t.now += 60_000;
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(4);
+	});
+
+	test("a 400 other than not-opted-in fails that intent for good (no re-plan)", async () => {
+		const s = await setup({ answers: [{ status: 400, body: { code: "INVALID_ARGUMENT", message: "bad parameter" } }] });
+		await s.want(39, "day2");
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect((await s.svc.store.intent(39, "day2", ""))?.status).toBe("failed");
+		expect(s.named("failed")[0]).toMatchObject({ http: 400, code: "INVALID_ARGUMENT", final: true });
+		s.t.now += 2 * 86_400_000;
+		await s.svc.planTick();
+		expect(s.named("planned")).toHaveLength(1);
+	});
+
+	test("dup_refused: a retry Roblox refuses as over the per-recipient limit counts as delivered", async () => {
+		const s = await setup({ answers: [{ status: 503 }, { status: 429, body: { code: "RESOURCE_EXHAUSTED", message: "1 notification per recipient" } }] });
+		await s.want(40, "day2");
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		s.t.now += 30_000;
+		await s.svc.sendTick();
+		const nid = s.named("planned")[0].nid;
+		expect(await s.svc.store.send(nid)).toMatchObject({ status: "sent", code: "dup_refused" });
+		expect((await s.svc.store.intent(40, "day2", ""))?.status).toBe("sent");
+		expect(s.svc.sender.bucket.view().last429At).toBeNull();
+		expect(s.named("failed").at(-1)).toMatchObject({ code: "dup_refused", final: true });
+	});
+
+	test("roblox_id is Roblox's id only, never the path (it names the user)", async () => {
+		const s = await setup({ answers: [{ status: 200, body: { path: "users/41/notifications/abc" } }] });
+		await s.want(41, "day2");
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.named("sent")[0].roblox_id).toBe("");
+		expect((await s.svc.store.send(s.named("planned")[0].nid))?.roblox_id).toBe("");
+	});
+
+	test("allowTemplate: a game-supplied template that doesn't exist halts that template only", async () => {
+		const s = await setup({ answers: [{ status: 404, body: { code: "NOT_FOUND", message: "Message id game-t does not exist." } }] });
+		await s.svc.putConfig({ kinds: { ...CONFIG.kinds, promo: { template: "msg-promo", priority: 40, repeat: "per_key", send: "asap", allowTemplate: true } } }, "test");
+		await s.want(42, "promo", { key: "a", template: "game-t" });
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.stopped).toEqual([]);
+		const status = (await s.svc.status()).body as Record<string, any>;
+		expect(status.haltedTemplates).toEqual([{ template: "game-t", at: T0 }]);
+		expect(status.kinds.find((k: { kind: string }) => k.kind === "promo").enabled).toBe(true);
+		// Another user with the kind's own template still gets theirs; the halted template's intent waits.
+		await s.want(43, "promo", { key: "b" });
+		s.t.now += 25 * 3600_000;
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls.map((c) => [c.url.split("/")[6], c.body.payload.message_id])).toEqual([
+			["42", "game-t"],
+			["43", "msg-promo"],
+		]);
+		expect((await s.svc.store.intent(42, "promo", "a"))?.status).toBe("pending");
+	});
+
+	test("prune: users unseen 180 days with nothing pending go; one with a pending intent stays; erasure takes the outbox too", async () => {
+		const s = await setup({ publish: "unavailable" });
+		await presence(s, 44, false, T0 - 200 * 86_400_000);
+		await presence(s, 45, false, T0 - 200 * 86_400_000);
+		await s.want(45, "day2", { until: Math.floor(T0 / 1000) + 86_400 });
+		expect((await s.svc.prune()).users).toBe(1);
+		expect(await s.svc.store.user(44)).toBeUndefined();
+		expect(await s.svc.store.user(45)).toBeDefined();
+		await s.svc.planTick();
+		expect(await s.svc.store.outboxCount()).toBeGreaterThan(0);
+		await s.svc.eraseUser(45);
+		expect(await s.svc.store.outboxCount()).toBe(0);
 	});
 });

@@ -11,6 +11,7 @@ import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from 
 import { flow, playerGraph } from "./graph.ts";
 import { notifyFunnel } from "./notify-funnel.ts";
 import { notifyOptin } from "./notify-optin.ts";
+import { notifyPlayer } from "./notify-player.ts";
 import { notifyQueue } from "./notify-queue.ts";
 import { monetization, monetizationPlayers, monetizationPurchases } from "./monetization.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
@@ -51,6 +52,7 @@ export const QUERIES = {
 	"notify-funnel": notifyFunnel,
 	"notify-optin": notifyOptin,
 	"notify-queue": notifyQueue,
+	"notify-player": notifyPlayer,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;

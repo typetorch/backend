@@ -358,6 +358,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			rate: () => runtime.get("notify.rate"),
 			clock: () => runtime.get("notify.clock"),
 			kindEnabled: (kind) => runtime.get("notify.kinds")[kind] !== false,
+			presenceStaleHours: () => runtime.get("notify.presenceStaleHours"),
+		},
+		stopAll: (why) => {
+			// 401 / 403: every send stops; an owner turning notify.enabled back on (or a config push) resumes them.
+			try {
+				runtime.patchBySystem({ "notify.enabled": false }, "system (notify: Open Cloud key refused)");
+			} catch (error) {
+				if (!(error instanceof SettingsError)) throw error;
+			}
+			void audit.record({ actor: { kind: "system", label: "notify sender" }, role: "none", via: "none", ip: "", action: "notify.stop", outcome: "ok", details: { why } });
 		},
 		stopKind: (kind, why) => {
 			// S1b: the switch goes off as the system (audited); with runtime settings off, the halt flag alone holds it.
@@ -370,12 +380,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			void audit.record({ actor: { kind: "system", label: "notify sender" }, role: "none", via: "none", ip: "", action: "notify.kind.stop", outcome: "ok", details: { kind, why } });
 		},
 		pidOf: async (userId) => (await identities.byUid(userId)).map((i) => i.pid).find((pid) => !warehouse?.isErased(pid)) ?? "",
+		// The outbox (notify.db) holds rows until the events pipeline takes them: in a handover they wait.
 		publish: async (rows) => {
-			if (!warehouse || analytics !== "ready") return;
+			if (!config.parts.has("analytics")) return "off";
+			if (!warehouse || analytics !== "ready" || stopping) return "unavailable";
 			try {
 				await bus.publish("events", { events: rows as unknown as EventRow[], recordings: [], rejected: 0, rt: clock() });
+				return "published";
 			} catch (error) {
-				if (!(error instanceof RawLogClosed)) throw error;
+				if (error instanceof RawLogClosed) return "unavailable";
+				throw error;
 			}
 		},
 		clock,
@@ -430,6 +444,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	function attachWarehouse(w: Warehouse): void {
 		warehouse = w;
 		analytics = "ready";
+		// Notification rows waiting in the outbox (written while analytics wasn't open) go out once the writer is subscribed.
+		queueMicrotask(() => void notify.flushRows().catch((e) => log(`notify rows failed: ${(e as Error).message}`)));
 		bus.subscribe(
 			"duckdb-writer",
 			["events"],
@@ -794,6 +810,55 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return json(r.status, r.body);
 	}
 
+	/**
+	 * GET /v1/notify/user?uid=|pid=|name= (owners): one player's notifications. The player is found by UserId, by pid
+	 * (identities) or by a username / display name already in the profile cache (no Roblox lookup); erased pids are
+	 * unknown. Answers the identity, the backend's state from notify.db (consent as inferred and when, mute, every send
+	 * with its opens and plays, the intents) and the player's notify rows from the events (prompt checks / shown / closed
+	 * with where / secs / err, inferred consent, opens, plays) when analytics is open.
+	 */
+	async function notifyUser(url: URL): Promise<Response> {
+		const uidText = url.searchParams.get("uid");
+		const pidText = url.searchParams.get("pid");
+		const name = url.searchParams.get("name");
+		let uid: number | undefined;
+		let matches: number[] = [];
+		if (uidText) {
+			uid = parseUid(uidText);
+			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
+		} else if (pidText) {
+			if (!PID_PATTERN.test(pidText)) return json(400, { error: "bad pid" });
+			if (warehouse?.isErased(pidText)) return json(404, { error: "no such player" });
+			uid = (await identities.byPid(pidText))?.uid;
+			if (uid === undefined) return json(404, { error: "no UserId known for that pid" });
+		} else if (name) {
+			if (!/^[A-Za-z0-9_ .-]{1,64}$/.test(name)) return json(400, { error: "name is a Roblox username or display name" });
+			matches = robloxProfiles.findByName(name);
+			uid = matches[0];
+			if (uid === undefined) return json(404, { error: "no player with that name in the name cache: search by UserId or pid (names are known once a player card was looked up)" });
+		} else return json(400, { error: "give uid, pid or name" });
+		const pids = (await identities.byUid(uid)).map((i) => i.pid).filter((p) => !warehouse?.isErased(p));
+		const profile = robloxProfiles.peek(uid)?.profile;
+		let events: unknown = null;
+		let eventsError: string | undefined;
+		if (warehouse && analytics === "ready" && pids.length) {
+			try {
+				events = await warehouse.query("notify-player", { from: new Date(clock() - 400 * DAY_MS).toISOString() }, { pids: pids.slice(0, 20) });
+			} catch (error) {
+				eventsError = ((error as Error).message ?? String(error)).slice(0, 200);
+			}
+		} else if (config.parts.has("analytics") && pids.length) eventsError = "analytics is not open yet (a deploy handover): try again in a few seconds";
+		return json(200, {
+			...(await notify.userView(uid)),
+			pids,
+			name: profile?.name ?? null,
+			displayName: profile?.displayName ?? null,
+			...(matches.length > 1 ? { otherMatches: matches.slice(1) } : {}),
+			events,
+			...(eventsError ? { eventsError } : {}),
+		});
+	}
+
 	/** The plans/29 admin routes (owners; the gate ran): config, status, keys, test, send. */
 	async function notifyAdmin(req: Request, path: string, admin: Principal & { role: "admin" }): Promise<Response> {
 		const method = req.method;
@@ -809,6 +874,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		};
 		const answer = (r: Reply) => json(r.status, r.body);
 		if (path === "/v1/notify/status") return method === "GET" ? answer(await notify.status()) : json(405, { error: "GET only" });
+		if (path === "/v1/notify/user") return method === "GET" ? notifyUser(new URL(req.url)) : json(405, { error: "GET only" });
 		if (path === "/v1/notify/config") {
 			if (method === "GET") return answer(await notify.getConfig());
 			if (method !== "PUT") return json(405, { error: "GET or PUT only" });
@@ -1883,6 +1949,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const kinds = runtime.get("notify.kinds");
 				await notify.clearHalts(notify.haltedKinds().filter((k) => kinds[k] !== false));
 			}
+			// Notifications turned back on: the auth halt (a refused Open Cloud key) ends.
+			if (result.changed.includes("notify.enabled") && runtime.get("notify.enabled")) await notify.resume();
 			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
 			noteAudit(req, {
 				action: "settings.change",
@@ -2464,6 +2532,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		jobs.push(
 			setInterval(() => void notify.planTick().catch((e) => log(`notify planner failed: ${(e as Error).message}`)), 30_000),
 			setInterval(() => void notify.sendTick().catch((e) => log(`notify sender failed: ${(e as Error).message}`)), 1000),
+			// The outbox: rows written while analytics was not open (start, a handover) go out once it is.
+			setInterval(() => void notify.flushRows().catch((e) => log(`notify rows failed: ${(e as Error).message}`)), 5000),
 			setInterval(() => void notify.sweep().catch((e) => log(`notify sweep failed: ${(e as Error).message}`)), 60_000),
 			setInterval(() => void notify.prune().catch((e) => log(`notify prune failed: ${(e as Error).message}`)), 10 * 60_000),
 		);
