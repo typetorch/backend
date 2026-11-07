@@ -534,7 +534,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		fleetDb: resolve(env.TYPETORCH_SQLITE ?? resolve(dataDir, "fleet.sqlite")),
 		notifyEnabled: flag(env, "TYPETORCH_NOTIFY_ENABLED", true),
 		notifyDryRun: flag(env, "TYPETORCH_NOTIFY_DRY_RUN", true),
-		notifyRate: num(env, "TYPETORCH_NOTIFY_RATE", 10, 1, 1000),
+		notifyRate: num(env, "TYPETORCH_NOTIFY_RATE", 50, 1, 4000),
 		notifyClock: env.TYPETORCH_NOTIFY_CLOCK === "utc_day" ? "utc_day" : "rolling24",
 		notifyKindsOff: (env.TYPETORCH_NOTIFY_KINDS_OFF ?? "").split(",").map((k) => k.trim()).filter((k) => /^[a-z0-9_]{1,24}$/.test(k)).slice(0, 64),
 		alertWebhookLevels: levels,

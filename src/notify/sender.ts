@@ -19,8 +19,11 @@ import { DUE_SET, type NotifyStore, type SendRow } from "./store.ts";
 import { DAY_MS, type DayClock, type RowSink } from "./planner.ts";
 
 export const SEND_URL = (userId: number) => `https://apis.roblox.com/cloud/v2/users/${userId}/notifications`;
-// TODO(S2): Roblox's real rate limit per key / universe is unknown; 10 / s is the guess until the spike measures it.
-export const DEFAULT_RATE = 10;
+/**
+ * S2: Roblox allows 4000 requests per 1 s window per key and says so on every answer (x-ratelimit-limit / -remaining /
+ * -reset); the bucket follows those headers. `notify.rate` (default 50 / s) is only our own lower ceiling.
+ */
+export const DEFAULT_RATE = 50;
 export const RETRY_DELAYS_MS = [30_000, 120_000, 480_000] as const;
 /** First try + the retries. */
 export const MAX_TRIES = RETRY_DELAYS_MS.length + 1;
@@ -33,7 +36,11 @@ export const MUTE_MS = 7 * DAY_MS;
 /** Failed for good (a fatal answer): the user is looked at again after this. */
 export const FATAL_RECHECK_MS = 3_600_000;
 
-export type Outcome = "ok" | "not_subscribed" | "bad_template" | "daily_limit" | "rate_limited" | "retry" | "fatal";
+/**
+ * S3: Roblox does not refuse a second send to one user the same day (both answered 200), so there is no daily-limit
+ * outcome: `dailyCap` (planner) is the only guard.
+ */
+export type Outcome = "ok" | "not_subscribed" | "bad_template" | "rate_limited" | "retry" | "fatal";
 
 /** Roblox's answer -> what to do. `http` 0 = no answer (network error, timeout). */
 export function classify(http: number, body: unknown): Outcome {
@@ -46,11 +53,7 @@ export function classify(http: number, body: unknown): Outcome {
 	if (http === 400 && code === "FAILED_PRECONDITION" && /not opted in/i.test(message)) return "not_subscribed";
 	// S1b: an opted-in user and a message id that doesn't exist: the kind's config is wrong.
 	if (http === 404 && code === "NOT_FOUND" && /message id/i.test(message)) return "bad_template";
-	if (http === 429) {
-		// TODO(S3): the real per-user daily-limit answer is unknown; this mapping is a guess until the spike sees one.
-		if (code === "RESOURCE_EXHAUSTED" && /daily|per day|limit for (this )?user/i.test(message)) return "daily_limit";
-		return "rate_limited";
-	}
+	if (http === 429) return "rate_limited";
 	return "fatal";
 }
 
@@ -63,40 +66,80 @@ export function retryAfterMs(header: string | null, now: number): number {
 	return Number.isFinite(t) ? Math.min(3_600_000, Math.max(0, t - now)) : 0;
 }
 
+/** What Roblox's x-ratelimit-* headers say: requests per window, left in this window, seconds until it resets. */
+export interface RateHeaders {
+	limit?: number;
+	windowMs?: number;
+	remaining?: number;
+	resetMs?: number;
+}
+
 /**
- * The token bucket: `rate` tokens a second (capacity one second's worth). A 429 halves the rate (not under 0.1 / s) and
- * blocks until Retry-After; every minute without a 429 adds 10 % back, up to the configured rate.
+ * S2: `x-ratelimit-limit: 4000, 4000;w=1, 4000;w=1` (the first number, its window from the first `w=`, default 1 s),
+ * `x-ratelimit-remaining: n`, `x-ratelimit-reset: seconds`. Missing or odd values are left out.
+ */
+export function parseRateHeaders(get: (name: string) => string | null): RateHeaders {
+	const out: RateHeaders = {};
+	const limit = get("x-ratelimit-limit");
+	if (limit) {
+		const first = /^\s*(\d{1,9})/.exec(limit);
+		if (first) out.limit = Number(first[1]);
+		const w = /;\s*w=(\d{1,6})/.exec(limit);
+		out.windowMs = (w ? Math.max(1, Number(w[1])) : 1) * 1000;
+	}
+	const remaining = get("x-ratelimit-remaining");
+	if (remaining && /^\s*\d{1,9}\s*$/.test(remaining)) out.remaining = Number(remaining);
+	const reset = get("x-ratelimit-reset");
+	if (reset && /^\s*\d{1,6}(\.\d+)?\s*$/.test(reset)) out.resetMs = Math.min(3_600_000, Math.round(Number(reset) * 1000));
+	return out;
+}
+
+/**
+ * The token bucket. Its rate is the lowest of: our ceiling (`notify.rate`), Roblox's (x-ratelimit-limit / its window,
+ * once an answer said it), and the 429 fallback (halved on each 429, +10 % a minute back). Capacity: one second's worth.
+ * On top, Roblox's window: never more requests in it than the last x-ratelimit-remaining said; at 0, wait for the reset.
+ * A 429 blocks until its Retry-After.
  */
 export class TokenBucket {
 	rate: number;
 	tokens: number;
 	last429At: number | null = null;
+	/** Roblox's own limit per second, from the headers (undefined until an answer carried them). */
+	robloxRate: number | undefined;
 	private blockedUntil = 0;
 	private refilledAt: number;
 	private recoveredAt: number;
+	/** The 429 fallback's rate (Infinity = no 429 lately). */
+	private backoffRate = Number.POSITIVE_INFINITY;
+	private window: { remaining: number; endsAt: number } | undefined;
 
 	constructor(
 		private readonly target: () => number,
 		private readonly clock: () => number,
 	) {
-		this.rate = target();
+		this.rate = Math.max(0.1, target());
 		this.tokens = Math.max(1, this.rate);
 		this.refilledAt = clock();
 		this.recoveredAt = clock();
 	}
 
+	private ceiling(): number {
+		return Math.max(0.1, Math.min(this.target(), this.robloxRate ?? Number.POSITIVE_INFINITY));
+	}
+
 	private refresh(now: number): void {
-		const target = Math.max(0.1, this.target());
-		if (this.rate > target) this.rate = target;
-		// +10 % per whole minute since the last 429 or step, up to the target.
-		while (this.rate < target && now - this.recoveredAt >= 60_000) {
+		const ceiling = this.ceiling();
+		// +10 % per whole minute since the last 429 or step, until the fallback no longer limits.
+		while (Number.isFinite(this.backoffRate) && now - this.recoveredAt >= 60_000) {
 			this.recoveredAt += 60_000;
-			this.rate = Math.min(target, this.rate * 1.1);
+			this.backoffRate *= 1.1;
+			if (this.backoffRate >= ceiling) this.backoffRate = Number.POSITIVE_INFINITY;
 		}
-		if (this.rate >= target) this.recoveredAt = now;
+		this.rate = Math.min(ceiling, this.backoffRate);
 		const cap = Math.max(1, this.rate);
 		this.tokens = Math.min(cap, this.tokens + ((now - this.refilledAt) / 1000) * this.rate);
 		this.refilledAt = now;
+		if (this.window && now >= this.window.endsAt) this.window = undefined;
 	}
 
 	/** Takes a token now (0), or says how long to wait (ms) before asking again. */
@@ -104,38 +147,58 @@ export class TokenBucket {
 		const now = this.clock();
 		this.refresh(now);
 		if (now < this.blockedUntil) return this.blockedUntil - now;
+		if (this.window && this.window.remaining <= 0) return Math.max(1, this.window.endsAt - now);
 		if (this.tokens >= 1) {
 			this.tokens -= 1;
+			if (this.window) this.window.remaining--;
 			return 0;
 		}
 		return Math.max(1, Math.ceil(((1 - this.tokens) / this.rate) * 1000));
 	}
 
+	/** An answer's x-ratelimit-* headers. */
+	onHeaders(h: RateHeaders): void {
+		const now = this.clock();
+		if (h.limit !== undefined && h.limit > 0) this.robloxRate = h.limit / ((h.windowMs ?? 1000) / 1000);
+		if (h.remaining !== undefined) this.window = { remaining: h.remaining, endsAt: now + (h.resetMs ?? h.windowMs ?? 1000) };
+		this.refresh(now);
+	}
+
 	on429(retryAfter: number): void {
 		const now = this.clock();
 		this.refresh(now);
-		this.rate = Math.max(0.1, this.rate / 2);
+		this.backoffRate = Math.max(0.1, this.rate / 2);
+		this.rate = this.backoffRate;
 		this.tokens = 0;
 		this.last429At = now;
 		this.recoveredAt = now;
 		this.blockedUntil = Math.max(this.blockedUntil, now + retryAfter);
 	}
 
-	view(): { rate: number; tokens: number; last429At: number | null; blockedUntil: number | null } {
+	view(): { rate: number; tokens: number; last429At: number | null; blockedUntil: number | null; robloxRate: number | null; windowRemaining: number | null } {
 		this.refresh(this.clock());
-		return { rate: Math.round(this.rate * 100) / 100, tokens: Math.round(this.tokens * 100) / 100, last429At: this.last429At, blockedUntil: this.blockedUntil > this.clock() ? this.blockedUntil : null };
+		return {
+			rate: Math.round(this.rate * 100) / 100,
+			tokens: Math.round(this.tokens * 100) / 100,
+			last429At: this.last429At,
+			blockedUntil: this.blockedUntil > this.clock() ? this.blockedUntil : null,
+			robloxRate: this.robloxRate ?? null,
+			windowRemaining: this.window?.remaining ?? null,
+		};
 	}
 
 	/** The state worth keeping across a deploy (kv). */
-	snapshot(): { rate: number; last429At: number | null; blockedUntil: number } {
-		return { rate: this.rate, last429At: this.last429At, blockedUntil: this.blockedUntil };
+	snapshot(): { backoffRate: number | null; last429At: number | null; blockedUntil: number; robloxRate: number | null } {
+		return { backoffRate: Number.isFinite(this.backoffRate) ? this.backoffRate : null, last429At: this.last429At, blockedUntil: this.blockedUntil, robloxRate: this.robloxRate ?? null };
 	}
 
-	restore(s: { rate?: unknown; last429At?: unknown; blockedUntil?: unknown }): void {
-		if (typeof s.rate === "number" && s.rate > 0) this.rate = Math.min(this.target(), s.rate);
+	restore(s: { backoffRate?: unknown; last429At?: unknown; blockedUntil?: unknown; robloxRate?: unknown }): void {
+		if (typeof s.backoffRate === "number" && s.backoffRate > 0) this.backoffRate = s.backoffRate;
+		if (typeof s.robloxRate === "number" && s.robloxRate > 0) this.robloxRate = s.robloxRate;
 		if (typeof s.last429At === "number") this.last429At = s.last429At;
 		if (typeof s.blockedUntil === "number") this.blockedUntil = s.blockedUntil;
 		this.recoveredAt = this.last429At ?? this.clock();
+		this.refresh(this.clock());
 	}
 }
 
@@ -301,13 +364,6 @@ export class Sender {
 				if (send.kind !== "custom") this.o.halt(send.kind, "bad_template");
 				else this.log("notify: a one-off send's template (message id) does not exist on Roblox");
 				break;
-			case "daily_limit": {
-				// Roblox says this user had their one today: look again tomorrow (the clock's), not a backoff.
-				const free = this.o.dayClock() === "utc_day" ? Math.floor(at / DAY_MS) * DAY_MS + DAY_MS : at + DAY_MS;
-				await store.finish(nid, { status: "failed", http, code: "daily_limit", user: { capped_until: free, next_check: free } });
-				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "daily_limit", final: true });
-				break;
-			}
 			case "rate_limited":
 			case "retry": {
 				if (outcome === "rate_limited") {
@@ -364,6 +420,7 @@ export class Sender {
 			try {
 				parsed = JSON.parse(text);
 			} catch {}
+			this.bucket.onHeaders(parseRateHeaders((name) => res.headers.get(name)));
 			return { http: res.status, body: parsed, retryAfter: retryAfterMs(res.headers.get("retry-after"), this.o.clock()) };
 		} catch {
 			return { http: 0, body: {}, retryAfter: 0 };
