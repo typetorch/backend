@@ -11,7 +11,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import { AuthProvider } from "@/lib/auth";
 import type { AuthInfo, NotifyFunnelCounts, NotifyFunnelResult, NotifyOptinResult, NotifyQueueResult, NotifyStatus, NotifyUserView, SettingsView } from "@/lib/types";
-import Notifications, { parseParams } from "./Notifications";
+import Notifications, { placeholdersOf, rowsToParams } from "./Notifications";
 import { playerLookup } from "./notifications/PlayerPanel";
 
 beforeAll(() => {
@@ -272,7 +272,11 @@ describe("Notifications page", () => {
 		fireEvent.click(within(form).getByRole("button", { name: "Send a test" }));
 		expect(await within(form).findByText("UserId must be a positive whole number.")).toBeTruthy();
 		fireEvent.change(within(form).getByLabelText("UserId"), { target: { value: "123456789" } });
-		fireEvent.change(within(form).getByLabelText("Params"), { target: { value: "gift=5 coins\n" } });
+		fireEvent.click(within(form).getByRole("button", { name: "Add param" }));
+		fireEvent.change(within(form).getByLabelText("Param 1 name"), { target: { value: "gift" } });
+		fireEvent.change(within(form).getByLabelText("gift value"), { target: { value: "5 coins" } });
+		fireEvent.click(within(form).getByRole("button", { name: "Add param" }));
+		fireEvent.click(within(form).getByRole("button", { name: "Remove param 2" }));
 		fireEvent.click(within(form).getByRole("button", { name: "Send a test" }));
 		await waitFor(() => expect(test).toHaveBeenCalledWith({ userId: 123456789, kind: "gift_new", params: { gift: "5 coins" } }));
 		expect(await within(form).findByText("abc0123xyz")).toBeTruthy();
@@ -309,10 +313,16 @@ describe("playerLookup", () => {
 	});
 });
 
-describe("parseParams", () => {
-	it("reads name=value lines", () => {
-		expect(parseParams("a=1\n\n b = two words \n")).toEqual({ a: "1", b: "two words" });
-		expect(parseParams("  ")).toBeUndefined();
-		expect(() => parseParams("nope")).toThrow(/name=value/);
+describe("test params", () => {
+	it("reads a kind's placeholders once, in order (dashes allowed)", () => {
+		expect(placeholdersOf("{user-streak-remaining} until your {user-streak} ({user-streak})")).toEqual(["user-streak-remaining", "user-streak"]);
+		expect(placeholdersOf(undefined)).toEqual([]);
+	});
+	it("turns rows into params: blank custom rows skipped, nameless values and duplicates refused", () => {
+		const row = (name: string, value: string, fixed = false) => ({ id: Math.random(), name, value, fixed });
+		expect(rowsToParams([row("a", "1", true), row(" b ", "two words"), row("", "")])).toEqual({ a: "1", b: "two words" });
+		expect(rowsToParams([row("", "")])).toBeUndefined();
+		expect(() => rowsToParams([row("", "x")])).toThrow(/no name/);
+		expect(() => rowsToParams([row("a", "1"), row("a", "2")])).toThrow(/twice/);
 	});
 });
