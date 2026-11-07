@@ -14,7 +14,7 @@
  * Only the time range of the filter bar applies (backend rows have no device, artifact or place).
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, Send } from "lucide-react";
+import { CircleAlert, Plus, Send, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
@@ -26,7 +26,6 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
@@ -290,40 +289,72 @@ function OnOff({ label, value, disabled, onChange, on = "On", off = "Off" }: { l
 	);
 }
 
-/** "name=value" lines into params (empty lines skipped). Throws on a line without "=". */
-export function parseParams(text: string): Record<string, string> | undefined {
+/** A test param row: `fixed` = a placeholder of the kind's text (its name can't be edited or removed). */
+export interface ParamRow {
+	id: number;
+	name: string;
+	value: string;
+	fixed: boolean;
+}
+
+/** The `{placeholders}` of a kind's text, in order, each once (the backend's PARAM_NAME rule). */
+export function placeholdersOf(text: string | undefined): string[] {
+	const out: string[] = [];
+	for (const m of (text ?? "").matchAll(/\{([A-Za-z0-9_-]{1,32})\}/g)) if (!out.includes(m[1])) out.push(m[1]);
+	return out;
+}
+
+/** The rows as params: blank custom rows skipped; a value without a name or a name twice throws. */
+export function rowsToParams(rows: ParamRow[]): Record<string, string> | undefined {
 	const out: Record<string, string> = {};
-	for (const raw of text.split("\n")) {
-		const line = raw.trim();
-		if (!line) continue;
-		const at = line.indexOf("=");
-		if (at <= 0) throw new Error(`"${line}" is not name=value`);
-		out[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+	for (const row of rows) {
+		const name = row.name.trim();
+		if (!name) {
+			if (row.value.trim()) throw new Error("A param has a value but no name.");
+			continue;
+		}
+		if (name in out) throw new Error(`"${name}" is there twice.`);
+		out[name] = row.value;
 	}
 	return Object.keys(out).length ? out : undefined;
 }
 
-function TestSend({ kinds }: { kinds: string[] }) {
+let nextRowId = 1;
+function rowsFor(text: string | undefined, keep: ParamRow[] = []): ParamRow[] {
+	const fixed = placeholdersOf(text).map((name) => ({ id: nextRowId++, name, value: keep.find((r) => r.name === name)?.value ?? "", fixed: true }));
+	const custom = keep.filter((r) => !r.fixed && !fixed.some((f) => f.name === r.name.trim()));
+	return [...fixed, ...custom];
+}
+
+function TestSend({ kinds }: { kinds: { kind: string; text?: string }[] }) {
 	const [userId, setUserId] = useState("");
 	const [kind, setKind] = useState("");
-	const [params, setParams] = useState("");
+	const picked = kind || kinds[0]?.kind || "";
+	const textOf = (k: string) => kinds.find((x) => x.kind === k)?.text;
+	const [rows, setRows] = useState<ParamRow[]>(() => rowsFor(textOf(picked)));
+	const [rowsKind, setRowsKind] = useState(picked);
+	// the kinds arrive after the first render, or the kind changed: re-seed the placeholder rows, keeping typed values and custom rows
+	if (rowsKind !== picked) {
+		setRowsKind(picked);
+		setRows(rowsFor(textOf(picked), rows));
+	}
 	const [data, setData] = useState("");
 	const [problem, setProblem] = useState<string | null>(null);
 	const send = useMutation({ mutationFn: (input: Parameters<typeof api.notifyTest>[0]) => api.notifyTest(input) });
+	const edit = (id: number, patch: Partial<ParamRow>) => setRows((all) => all.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 	const submit = (e: FormEvent) => {
 		e.preventDefault();
 		setProblem(null);
 		const id = Number(userId.trim());
 		if (!Number.isSafeInteger(id) || id <= 0) return setProblem("UserId must be a positive whole number.");
-		const k = kind || kinds[0] || "";
-		if (!k) return setProblem("Pick a kind.");
+		if (!picked) return setProblem("Pick a kind.");
 		let p: Record<string, string> | undefined;
 		try {
-			p = parseParams(params);
+			p = rowsToParams(rows);
 		} catch (error) {
 			return setProblem((error as Error).message);
 		}
-		send.mutate({ userId: id, kind: k, ...(p ? { params: p } : {}), ...(data.trim() ? { data: data.trim() } : {}) });
+		send.mutate({ userId: id, kind: picked, ...(p ? { params: p } : {}), ...(data.trim() ? { data: data.trim() } : {}) });
 	};
 	return (
 		<form className="space-y-3" onSubmit={submit} aria-label="Send a test">
@@ -334,23 +365,48 @@ function TestSend({ kinds }: { kinds: string[] }) {
 				</div>
 				<div className="space-y-1">
 					<Label htmlFor="notify-test-kind">Kind</Label>
-					<Select value={kind || kinds[0] || ""} onValueChange={setKind}>
+					<Select value={picked} onValueChange={setKind}>
 						<SelectTrigger id="notify-test-kind" size="sm" className="w-full" aria-label="Test kind">
 							<SelectValue placeholder="No kinds pushed" />
 						</SelectTrigger>
 						<SelectContent>
 							{kinds.map((k) => (
-								<SelectItem key={k} value={k}>
-									{k}
+								<SelectItem key={k.kind} value={k.kind}>
+									{k.kind}
 								</SelectItem>
 							))}
 						</SelectContent>
 					</Select>
 				</div>
-				<div className="space-y-1">
-					<Label htmlFor="notify-test-params">Params</Label>
-					<Textarea id="notify-test-params" rows={2} className="font-mono text-xs" spellCheck={false} placeholder="name=value, one per line" value={params} onChange={(e) => setParams(e.target.value)} />
-				</div>
+				<fieldset className="space-y-1.5 sm:col-span-2" aria-label="Params">
+					<legend className="text-sm font-medium leading-none">Params</legend>
+					{textOf(picked) ? <p className="font-mono text-xs text-muted-foreground">{`Text: ${textOf(picked)}`}</p> : null}
+					{rows.map((row, index) => (
+						<div key={row.id} className="flex items-center gap-2">
+							<Input
+								aria-label={`Param ${index + 1} name`}
+								className="h-8 w-1/3 font-mono text-xs"
+								spellCheck={false}
+								readOnly={row.fixed}
+								value={row.name}
+								placeholder="name"
+								onChange={(e) => edit(row.id, { name: e.target.value })}
+							/>
+							<Input aria-label={`${row.name || `Param ${index + 1}`} value`} className="h-8 flex-1 font-mono text-xs" spellCheck={false} value={row.value} placeholder="value" onChange={(e) => edit(row.id, { value: e.target.value })} />
+							{row.fixed ? (
+								<span className="w-8" aria-hidden />
+							) : (
+								<Button type="button" variant="ghost" size="icon" className="size-8" aria-label={`Remove ${row.name || `param ${index + 1}`}`} onClick={() => setRows((all) => all.filter((r) => r.id !== row.id))}>
+									<X />
+								</Button>
+							)}
+						</div>
+					))}
+					<Button type="button" variant="outline" size="sm" onClick={() => setRows((all) => [...all, { id: nextRowId++, name: "", value: "", fixed: false }])}>
+						<Plus />
+						Add param
+					</Button>
+				</fieldset>
 				<div className="space-y-1">
 					<Label htmlFor="notify-test-data">Launch data</Label>
 					<Input id="notify-test-data" className="h-8 font-mono text-xs" maxLength={64} value={data} onChange={(e) => setData(e.target.value)} placeholder="optional, up to 64 bytes" />
@@ -512,7 +568,7 @@ function Controls({ status }: { status: NotifyStatus }) {
 				</div>
 				<div className="space-y-1">
 					<h3 className="text-sm font-medium">Send a test</h3>
-					<TestSend kinds={status.kinds.map((k) => k.kind)} />
+					<TestSend kinds={status.kinds.map((k) => ({ kind: k.kind, text: k.text }))} />
 				</div>
 				<ConfigView />
 			</div>
