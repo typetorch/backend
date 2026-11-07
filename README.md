@@ -542,7 +542,7 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
 | `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `bundle`, `deploy`, `mark` | game | the kernel's fleet posts (`bundle`: a [debug bundle](#debug-bundles-and-offline-history)) and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
-| `POST /v1/notify/intents`, `opened`, `played` | game | [experience notifications](#experience-notifications): intents (want / drop / presence), a verified open (`first` / `repeat` / `unknown`), the session length after it |
+| `POST /v1/notify/intents`, `opened`, `played` | game | [experience notifications](#experience-notifications): intents (want / drop / presence / prefs), a verified open (`first` / `repeat` / `unknown`), the session length after it |
 | `GET /v1/fleet/commands`, `POST /v1/fleet/results` | game | [remote debug](#remote-debug): a watched server's long-poll for read-only commands, and its answers |
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin, web | the logical queries |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin, web | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
@@ -1720,7 +1720,7 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
 `config.ts`, `routes.ts`) and `src/store/durable.ts`.
 
 - **Storage**: `notify.db` next to the fleet SQLite file (`/data/notify.db`; WAL, the fleet wrapper): `notify_intents`,
-  `notify_users`, `notify_sends`, `notify_config`, `notify_outbox` (backend rows written in the same transaction as the
+  `notify_users`, `notify_sends`, `notify_prefs`, `notify_config`, `notify_outbox` (backend rows written in the same transaction as the
   change they describe, published to the events and then deleted: a crash or a handover never loses one), plus the durable layer's `kv` and `zset` (`src/store/durable.ts`: a small
   Redis-like layer on SQLite with get / set (ttl) / del / incr, sorted sets and leases; one `UPDATE ... RETURNING` hands a due
   send to exactly one worker, and a crashed worker's sends come back after the lease). Survives deploys (the data volume);
@@ -1729,6 +1729,12 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
 - **Presence**: `{op: "presence", u, online, at}` with `at` in unix ms (a value under 1e11 is read as seconds); per user the
   latest `at` wins, on a tie online wins. An `online` older than `notify.presenceStaleHours` (default 6; game servers refresh
   every 3 h) no longer counts, so a crashed server never keeps a player "online".
+- **Prefs** (per-player opt-out of kinds): `{op: "prefs", u, off: string[], rev}` REPLACES the user's switched-off kinds
+  (kind names, at most 32, duplicates removed; `bad_kind` / `too_many`); an older `rev` is ignored (`stale`). Stored in
+  `notify_prefs`, so it holds whichever server issues a want (a gift sent while the player is offline). The planner skips
+  the intents of an off kind (`skipped {why: "pref_off"}`) but keeps them: switching the kind back on resumes them while
+  their window is open. A send still planned for a kind just switched off is cancelled (and re-checked at send time).
+  `POST /v1/notify/test` and custom sends (`/v1/notify/send`) ignore prefs. The per-player view shows them (`prefs`).
 - **Config**: `typetorch notify push` (`PUT /v1/notify/config`, audited `notify.config`) uploads `typetorch.json` ->
   `notifications`: `dailyCap`, `quietAfterLeaveMinutes`, `lapse`, `unopenedBackoff`, `kinds` (`text`, `template`, `priority`,
   `repeat`, `send`, `perWeek`, `maxWaitHours`, `category`, `allowTemplate`, `beats`). Intents for kinds not in the pushed

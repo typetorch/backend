@@ -393,6 +393,95 @@ describe("sends", () => {
 	});
 });
 
+describe("prefs: the player's switched-off kinds", () => {
+	const prefs = (s: Awaited<ReturnType<typeof setup>>, u: number, off: string[], rev = s.nextRev()) => s.svc.intents({ v: 1, items: [{ op: "prefs", u, off, rev }] });
+
+	test("an off kind is skipped (pref_off) but kept; switched back on, it goes out while its window is open", async () => {
+		const s = await setup();
+		expect((await prefs(s, 30, ["gift", "gift", "day2"])).body).toMatchObject({ accepted: 1, rejected: [], stale: 0 });
+		expect(await s.svc.store.prefsOff(30)).toEqual(["day2", "gift"]);
+		await s.want(30, "gift", { key: "letter-1" });
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(0);
+		expect(s.named("planned")).toEqual([]);
+		expect(s.named("skipped")).toEqual([{ pid: "pid-30", k: "gift", why: "pref_off" }]);
+		expect((await s.svc.store.intent(30, "gift", "letter-1"))?.status).toBe("pending");
+		// The next ticks don't repeat the row (the user is looked at again when the window ends or the prefs change).
+		s.t.now += 60_000;
+		await s.svc.planTick();
+		expect(s.named("skipped")).toHaveLength(1);
+		// Back on (a newer rev, `gift` no longer listed): planned at once and sent.
+		await prefs(s, 30, ["day2"]);
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.named("planned")).toHaveLength(1);
+		expect(s.roblox.calls).toHaveLength(1);
+		expect((await s.svc.store.intent(30, "gift", "letter-1"))?.status).toBe("sent");
+	});
+
+	test("ordered by rev: an older prefs item is stale and changes nothing", async () => {
+		const s = await setup();
+		const newer = s.nextRev() + 10;
+		await prefs(s, 31, ["gift"], newer);
+		expect((await prefs(s, 31, [], newer - 1)).body).toMatchObject({ accepted: 1, stale: 1 });
+		expect((await prefs(s, 31, [], newer)).body).toMatchObject({ stale: 1 });
+		expect(await s.svc.store.prefsOff(31)).toEqual(["gift"]);
+		// An empty list replaces the set: everything on again.
+		await prefs(s, 31, [], newer + 1);
+		expect(await s.svc.store.prefsOff(31)).toEqual([]);
+	});
+
+	test("switching a kind off cancels its send still planned for later; the intent stays pending", async () => {
+		const s = await setup();
+		await s.svc.putConfig({ kinds: { ...CONFIG.kinds, day2: { template: "msg-day2", priority: 30, repeat: "once_ever" } } }, "test");
+		await s.want(32, "day2");
+		await s.svc.planTick();
+		const nid = s.named("planned").at(-1).nid;
+		await prefs(s, 32, ["day2"]);
+		expect((await s.svc.store.send(nid))?.status).toBe("cancelled");
+		expect(s.named("skipped")).toEqual([{ pid: "pid-32", k: "day2", why: "pref_off" }]);
+		expect(await s.svc.store.intent(32, "day2", "")).toMatchObject({ status: "pending", nid: null });
+		expect((await s.svc.store.user(32))?.busy).toBeNull();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(0);
+	});
+
+	test("checked again at send time: a kind switched off after planning is cancelled, not sent", async () => {
+		const s = await setup();
+		await s.want(33, "day2");
+		await s.svc.planTick();
+		// As if the prefs landed while the send was leased (apply leaves a leased send to its holder).
+		await s.svc.store.db.run("INSERT INTO notify_prefs (user_id, off, rev, updated) VALUES (33, '[\"day2\"]', 1, 0)");
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(0);
+		expect(s.named("skipped")).toEqual([{ pid: "pid-33", k: "day2", why: "pref_off" }]);
+		expect((await s.svc.store.intent(33, "day2", ""))?.status).toBe("pending");
+	});
+
+	test("test sends bypass prefs; custom sends are unaffected", async () => {
+		const s = await setup();
+		await prefs(s, 34, ["gift", "day2"]);
+		expect((await s.svc.test({ userId: 34, kind: "gift", params: { gift: "x" } })).body).toMatchObject({ status: "planned" });
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(1);
+		await prefs(s, 35, ["custom", "gift"]);
+		expect((await s.svc.send({ userId: 35, template: "msg-x" })).body).toMatchObject({ status: "planned" });
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(2);
+	});
+
+	test("the per-player view shows the off kinds; erasure removes them", async () => {
+		const s = await setup();
+		expect((await s.svc.userView(36)).prefs).toBeNull();
+		await prefs(s, 36, ["gift"]);
+		const view = await s.svc.userView(36);
+		expect(view).toMatchObject({ known: true, prefs: { off: ["gift"], updated: T0 } });
+		await s.svc.eraseUser(36);
+		expect(await s.svc.store.prefs(36)).toBeUndefined();
+	});
+});
+
 describe("review fixes (backend#23)", () => {
 	const presence = (s: Awaited<ReturnType<typeof setup>>, u: number, online: boolean, at: number) => s.svc.intents({ v: 1, items: [{ op: "presence", u, online, at }] });
 

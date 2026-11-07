@@ -91,6 +91,33 @@ describe("notify routes", () => {
 		expect(await asJson(await h.call("/v1/notify/intents", { method: "POST", body: gz, headers: { ...bearer(API), "content-encoding": "gzip" } }))).toMatchObject({ accepted: 1 });
 	});
 
+	test("prefs items: kind names (any, pushed or not), at most 32 after duplicates go, a rev", async () => {
+		const many = Array.from({ length: 33 }, (_, i) => `k${i}`);
+		const r = await asJson(
+			await intents([
+				{ op: "prefs", u: 9, off: ["gift", "streak", "gift", "not_pushed_yet"], rev: rev++ },
+				{ op: "prefs", u: 9, off: ["Gift"], rev: rev++ },
+				{ op: "prefs", u: 9, off: many, rev: rev++ },
+				{ op: "prefs", u: 9, off: [...many.slice(0, 32), "k0"], rev: rev++ },
+				{ op: "prefs", u: 9, off: "gift", rev: rev++ },
+				{ op: "prefs", u: 9, off: [], rev: 0 },
+				{ op: "prefs", u: -1, off: [], rev: rev++ },
+				{ op: "prefs", u: 9, off: ["x".repeat(25)], rev: rev++ },
+			]),
+		);
+		expect(r.rejected).toEqual([
+			{ i: 1, why: "bad_kind" },
+			{ i: 2, why: "too_many" },
+			{ i: 4, why: "bad_item" },
+			{ i: 5, why: "bad_rev" },
+			{ i: 6, why: "bad_user" },
+			{ i: 7, why: "bad_kind" },
+		]);
+		expect(r.accepted).toBe(2);
+		const view = await asJson(await h.call("/v1/notify/user?uid=9", { headers: bearer(ADMIN) }));
+		expect(view.prefs.off).toEqual(many.slice(0, 32).sort());
+	});
+
 	test("stale revs: an older want or drop is accepted and counted, never applied", async () => {
 		const newer = rev++;
 		await intents([{ op: "want", u: 4, k: "streak", key: "s", rev: newer }]);
