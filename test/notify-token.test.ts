@@ -21,6 +21,13 @@ describe("notify token", () => {
 		expect(tokenLength(FIELDS)).toBe(VECTOR.length);
 	});
 
+	test("the second shared vector: no data, signed with what becomes the previous key", () => {
+		const P = "p".repeat(43);
+		const t = signToken(P, { nid: "zzzzzzzzzz", kind: "streak", userId: 123456789, t: 1762500000 });
+		expect(t).toBe("tt1n.zzzzzzzzzz.streak.21i3v9.t5chpc..KhyQ1AJ5cpd4v62lfhqqUg");
+		expect(verifyToken(t, { current: KEY, previous: P, since: 1762500000 }, 123456789, 1762500000 + 3600)).toMatchObject({ ok: true, kind: "streak", data: "" });
+	});
+
 	test("no data: an empty part", () => {
 		const t = signToken(KEY, { ...FIELDS, data: "" });
 		expect(t.split(".")).toHaveLength(7);
