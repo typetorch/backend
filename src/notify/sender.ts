@@ -37,10 +37,14 @@ export const MUTE_MS = 7 * DAY_MS;
 export const FATAL_RECHECK_MS = 3_600_000;
 
 /**
- * S3: Roblox does not refuse a second send to one user the same day (both answered 200), so there is no daily-limit
- * outcome: `dailyCap` (planner) is the only guard.
+ * S3: Roblox's per-recipient limit answers at send time with 429 RESOURCE_EXHAUSTED and a per-recipient message
+ * (`daily_limit`: no retry, no backoff, re-planned for the user's next day); any other 429 is `rate_limited`.
+ * Our `dailyCap` (planner) stays the first guard.
  */
-export type Outcome = "ok" | "not_subscribed" | "bad_template" | "rate_limited" | "retry" | "fatal";
+export type Outcome = "ok" | "not_subscribed" | "bad_template" | "daily_limit" | "rate_limited" | "retry" | "fatal";
+
+// TODO(S3): the exact per-recipient message is to be confirmed on a non-owner account (the owner skips the throttle).
+export const DAILY_LIMIT_MESSAGE = /per recipient|recipient.*(limit|throttl)|notifications? per (user|day)/i;
 
 /** Roblox's answer -> what to do. `http` 0 = no answer (network error, timeout). */
 export function classify(http: number, body: unknown): Outcome {
@@ -53,7 +57,7 @@ export function classify(http: number, body: unknown): Outcome {
 	if (http === 400 && code === "FAILED_PRECONDITION" && /not opted in/i.test(message)) return "not_subscribed";
 	// S1b: an opted-in user and a message id that doesn't exist: the kind's config is wrong.
 	if (http === 404 && code === "NOT_FOUND" && /message id/i.test(message)) return "bad_template";
-	if (http === 429) return "rate_limited";
+	if (http === 429) return code === "RESOURCE_EXHAUSTED" && DAILY_LIMIT_MESSAGE.test(message) ? "daily_limit" : "rate_limited";
 	return "fatal";
 }
 
@@ -364,6 +368,13 @@ export class Sender {
 				if (send.kind !== "custom") this.o.halt(send.kind, "bad_template");
 				else this.log("notify: a one-off send's template (message id) does not exist on Roblox");
 				break;
+			case "daily_limit": {
+				// Roblox's per-recipient limit: the intent stays pending for the user's next day (the clock's), no backoff.
+				const free = this.o.dayClock() === "utc_day" ? Math.floor(at / DAY_MS) * DAY_MS + DAY_MS : at + DAY_MS;
+				await store.finish(nid, { status: "failed", http, code: "daily_limit", user: { capped_until: free, next_check: free } });
+				this.o.rows(userId, "failed", { nid, k: send.kind, http, code: "daily_limit", final: true });
+				break;
+			}
 			case "rate_limited":
 			case "retry": {
 				if (outcome === "rate_limited") {
