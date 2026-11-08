@@ -13,7 +13,7 @@ import { openSqlite, type FleetDb } from "../fleet/db.ts";
 import { Durable } from "../store/durable.ts";
 import { CUSTOM_KIND, ConfigError, PARAM_NAME, TEMPLATE, placeholders, validateConfig, type KindConfig, type NotifyConfig } from "./config.ts";
 import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock } from "./planner.ts";
-import { MUTE_MS, Sender } from "./sender.ts";
+import { MUTE_MS, requestBody, Sender } from "./sender.ts";
 import { DUE_SET, NotifyStore, PENDING_MAX, PREFS_OFF_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow, type SendRow } from "./store.ts";
 import { DATA_MAX_BYTES, KIND_PATTERN, NID_PATTERN, NotifyKeyStore, newNid, parseKeys, tokenLength, type NotifyKeys } from "./token.ts";
 
@@ -491,7 +491,7 @@ export class NotifyService {
 						busy: u.busy,
 					}
 				: null,
-			sends: sends.map(sendView),
+			sends: sends.map((x) => ({ ...sendView(x), ...sendDetail(x, this.o.universeId) })),
 			intents: intents.map((x) => ({ kind: x.kind, key: x.key, status: x.status, at: n(x.at), until: n(x.until), updated: n(x.updated), planned: x.nid !== null, params: x.params ? (JSON.parse(x.params) as unknown) : null })),
 		};
 	}
@@ -504,6 +504,27 @@ export class NotifyService {
 
 	/** For tests and the status line: the mute that S1 sets. */
 	static readonly MUTE_MS = MUTE_MS;
+}
+
+/**
+ * A send's debugging detail (the per-player view only): the template, params and data it was planned with, Roblox's id or
+ * refusal text, and the request body it posts (`request`; the signed launch data is made per send and left out).
+ */
+function sendDetail(x: SendRow, universeId: number | undefined) {
+	let params: unknown = null;
+	try {
+		params = x.params ? JSON.parse(x.params) : null;
+	} catch {
+		params = x.params;
+	}
+	return {
+		template: x.template,
+		params,
+		data: x.data,
+		robloxId: x.roblox_id,
+		error: x.error ?? null,
+		request: requestBody(x, universeId ?? "?"),
+	};
 }
 
 /** One notify_sends row as the explorer reads it (the per-player view and the recent table). */

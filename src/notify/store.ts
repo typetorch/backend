@@ -10,7 +10,8 @@
  *                                            outstanding send's nid)
  *   notify_sends   nid PK                    user_id, kind, key, rev, template, category, params, data, planned_at,
  *                                            sent_at, status planned | sending | sent | dry | failed | cancelled, http,
- *                                            code, roblox_id, try, opened_at, played_secs, test
+ *                                            code, roblox_id, try, opened_at, played_secs, test, error (Roblox's
+ *                                            refusal text on a failed send, up to 1000 chars)
  *   notify_prefs   user_id PK                off JSON (the kinds the player switched off, sorted), rev, updated: the
  *                                            planner skips their intents (`pref_off`) but keeps them
  *   notify_config  id = 1                    the pushed `notifications` object, updated_at, by
@@ -122,6 +123,7 @@ export interface SendRow {
 	opened_at: number | null;
 	played_secs: number | null;
 	test: number;
+	error?: string | null;
 	created: number;
 	updated: number;
 }
@@ -162,6 +164,9 @@ export class NotifyStore {
 
 	static async open(db: FleetDb, clock: () => number = Date.now): Promise<NotifyStore> {
 		await db.exec(NOTIFY_SCHEMA);
+		// Added 2026-11-08 (Roblox's refusal text on a failed send): older databases lack the column
+		const cols = await db.all<{ name: string }>("PRAGMA table_info(notify_sends)", []);
+		if (!cols.some((c) => c.name === "error")) await db.exec("ALTER TABLE notify_sends ADD COLUMN error TEXT");
 		return new NotifyStore(db, clock);
 	}
 
@@ -391,18 +396,19 @@ export class NotifyStore {
 	 */
 	async finish(
 		nid: string,
-		o: { status: SendStatus; http?: number | null; code?: string | null; robloxId?: string | null; sentAt?: number; intent?: IntentStatus; user?: Partial<Pick<UserRow, "mute_until" | "optin" | "optin_at" | "capped_until" | "next_check" | "sent_at">>; unopenedInc?: boolean; backoffAfter?: number; rows?: OutRow[] },
+		o: { status: SendStatus; http?: number | null; code?: string | null; error?: string | null; robloxId?: string | null; sentAt?: number; intent?: IntentStatus; user?: Partial<Pick<UserRow, "mute_until" | "optin" | "optin_at" | "capped_until" | "next_check" | "sent_at">>; unopenedInc?: boolean; backoffAfter?: number; rows?: OutRow[] },
 	): Promise<void> {
 		const now = this.clock();
 		await this.db.transaction((tx) => {
 			outbox(tx, o.rows ?? [], now);
 			const s = tx.first<{ user_id: number; kind: string; key: string; test: number }>("SELECT user_id, kind, key, test FROM notify_sends WHERE nid = ?", [nid]);
-			tx.run("UPDATE notify_sends SET status = ?, http = COALESCE(?, http), code = COALESCE(?, code), roblox_id = COALESCE(?, roblox_id), sent_at = COALESCE(?, sent_at), updated = ? WHERE nid = ?", [
+			tx.run("UPDATE notify_sends SET status = ?, http = COALESCE(?, http), code = COALESCE(?, code), roblox_id = COALESCE(?, roblox_id), sent_at = COALESCE(?, sent_at), error = COALESCE(?, error), updated = ? WHERE nid = ?", [
 				o.status,
 				o.http ?? null,
 				o.code ?? null,
 				o.robloxId ?? null,
 				o.sentAt ?? null,
+				o.error ?? null,
 				now,
 				nid,
 			]);

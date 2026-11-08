@@ -9,11 +9,11 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router";
-import { EmptyState, KeyValue, LoadingBlock, Section } from "@/components/common";
+import { EmptyState, JsonBlock, KeyValue, LoadingBlock, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
-import { UserIdLink } from "@/components/Identity";
+import { PlayerPageLink } from "@/components/PlayerLink";
 import { JoinData } from "@/components/player-detail/JoinData";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -228,20 +228,63 @@ function Opens({ view }: { view: NotifyUserView }) {
 	);
 }
 
+/** The player as one @username link (the Players page, the hover card), like every other player link; the name is
+ * looked up when the notify view doesn't know it. A player with no pid yet: the UserId alone. */
+function Who({ view }: { view: NotifyUserView }) {
+	const pid = view.pids[0];
+	const missing = !view.name && pid !== undefined;
+	const q = useQuery({ queryKey: ["player-profile", pid], queryFn: ({ signal }) => api.playerProfile(pid as string, signal), enabled: missing, retry: false, staleTime: 5 * 60_000 });
+	if (pid === undefined) return <span className="font-medium">UserId {view.userId}</span>;
+	const name = view.name ?? q.data?.name ?? undefined;
+	const displayName = view.displayName ?? q.data?.displayName ?? undefined;
+	return <PlayerPageLink row={{ pid, uid: view.userId, name, displayName }} />;
+}
+
+/** One send's debugging detail: Roblox's refusal, the request it posts, the params / data it was planned with. */
+function SendDetail({ send }: { send: NotifyUserSend }) {
+	return (
+		<div className="space-y-2 rounded-lg border p-3" role="region" aria-label="Notification detail">
+			<div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+				<span className="font-medium">{send.kind}</span>
+				<KeyValue label="nid">{mono(send.nid)}</KeyValue>
+				<KeyValue label="template">{mono(send.template)}</KeyValue>
+				<KeyValue label="Roblox id">{mono(send.robloxId)}</KeyValue>
+			</div>
+			{send.status === "failed" || send.status === "cancelled" ? (
+				<Alert variant="destructive">
+					<AlertTitle>
+						Roblox answered {[send.http, send.code].filter(Boolean).join(" ")}
+					</AlertTitle>
+					<AlertDescription>
+						<p className="break-words font-mono text-xs">{send.error ?? "No message kept (sends before 2026-11-08 kept only the code)."}</p>
+					</AlertDescription>
+				</Alert>
+			) : null}
+			<div className="space-y-1">
+				<h4 className="text-xs font-medium">Request body</h4>
+				<p className="text-xs text-muted-foreground">What the send posts to Roblox (the signed launch data is made per send and left out).</p>
+				{send.request ? <JsonBlock value={send.request} className="max-h-80" /> : <EmptyState>Not available.</EmptyState>}
+			</div>
+			{send.data ? (
+				<div className="space-y-1">
+					<h4 className="text-xs font-medium">Launch data (signed into join_experience)</h4>
+					<JsonBlock value={send.data} className="max-h-40" />
+				</div>
+			) : null}
+		</div>
+	);
+}
+
 export function PlayerView({ view, onPick }: { view: NotifyUserView; onPick(uid: number): void }) {
 	const pending = view.intents.filter((i) => i.status === "pending").length;
+	const [picked, setPicked] = useState<string | null>(null);
+	useEffect(() => setPicked(null), [view.userId]);
+	const shown = view.sends.find((x) => x.nid === picked);
 	return (
 		<div className="space-y-4" aria-label="Player notifications" role="region">
 			<div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-				<span className="font-medium">{view.displayName ?? view.name ?? `UserId ${view.userId}`}</span>
-				{view.name ? <span className="text-sm text-muted-foreground">@{view.name}</span> : null}
-				<UserIdLink uid={view.userId} className="inline-flex items-center gap-1 text-sm underline-offset-2 hover:underline" />
+				<Who view={view} />
 				{!view.known ? <Badge variant="outline">no notify rows yet</Badge> : null}
-			</div>
-			<div className="flex flex-wrap gap-x-4 gap-y-1">
-				<KeyValue label={view.pids.length === 1 ? "pid" : "pids"}>
-					{view.pids.length ? <span className="font-mono text-xs break-all">{view.pids.join(", ")}</span> : <span className="text-muted-foreground">none known</span>}
-				</KeyValue>
 				{view.otherMatches?.length ? (
 					<KeyValue label="Also named so">
 						<span className="flex flex-wrap gap-2">
@@ -258,7 +301,20 @@ export function PlayerView({ view, onPick }: { view: NotifyUserView; onPick(uid:
 			<div className="space-y-1">
 				<h3 className="text-sm font-medium">Notifications ({fmtInt(view.sends.length)})</h3>
 				{view.sends.length ? (
-					<DataTable id="notify-player-sends" label="Past notifications" columns={SEND_COLUMNS} data={view.sends} rowId={(r) => r.nid} density="compact" maxHeight="20rem" />
+					<>
+						<DataTable
+							id="notify-player-sends"
+							label="Past notifications"
+							columns={SEND_COLUMNS}
+							data={view.sends}
+							rowId={(r) => r.nid}
+							density="compact"
+							maxHeight="20rem"
+							onRowClick={(r) => setPicked((p) => (p === r.nid ? null : r.nid))}
+							rowClassName={(r) => (r.nid === picked ? "bg-muted" : undefined)}
+						/>
+						{shown ? <SendDetail send={shown} /> : <p className="text-xs text-muted-foreground">Click a notification to see its payload and Roblox's answer.</p>}
+					</>
 				) : (
 					<EmptyState>Nothing planned or sent to this player.</EmptyState>
 				)}

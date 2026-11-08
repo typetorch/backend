@@ -47,6 +47,33 @@ export type Outcome = "ok" | "not_subscribed" | "bad_template" | "daily_limit" |
 export const DAILY_LIMIT_MESSAGE = /per recipient|recipient.*(limit|throttl)|notifications? per (user|day)/i;
 
 /** Roblox's answer -> what to do. `http` 0 = no answer (network error, timeout). */
+/** Roblox's refusal as the explorer shows it: its message, plus the details when there are any (up to 1000 chars). */
+export function refusalText(body: unknown): string | null {
+	const b = (typeof body === "object" && body !== null ? body : {}) as { message?: unknown; details?: unknown };
+	const parts = [typeof b.message === "string" ? b.message : "", b.details !== undefined ? JSON.stringify(b.details) : ""].filter(Boolean);
+	return parts.length ? parts.join(" ").slice(0, 1000) : null;
+}
+
+/** The request body a send posts (sendBody) without the signed launch data, which only the send itself makes. */
+export function requestBody(send: Pick<SendRow, "template" | "params" | "category" | "kind">, universeId: string | number, launchData?: string) {
+	const parameters: Record<string, { string_value: string }> = {};
+	if (send.params) {
+		try {
+			for (const [k, v] of Object.entries(JSON.parse(send.params) as Record<string, unknown>)) if (typeof v === "string") parameters[k] = { string_value: v };
+		} catch {}
+	}
+	return {
+		source: { universe: `universes/${universeId}` },
+		payload: {
+			message_id: send.template,
+			type: "MOMENT",
+			...(Object.keys(parameters).length ? { parameters } : {}),
+			...(launchData ? { join_experience: { launch_data: launchData } } : {}),
+			analytics_data: { category: send.category ?? send.kind },
+		},
+	};
+}
+
 export function classify(http: number, body: unknown): Outcome {
 	const b = (typeof body === "object" && body !== null ? body : {}) as { code?: unknown; message?: unknown };
 	const code = typeof b.code === "string" ? b.code : "";
@@ -352,6 +379,7 @@ export class Sender {
 		const inferred = subscribed ? [] : [row("optin_inferred", { state: "subscribed" })];
 		const code = typeof (body as { code?: unknown })?.code === "string" ? String((body as { code: string }).code).slice(0, 64) : http ? String(http) : "network";
 		const failed = (c: string, final: boolean) => row("failed", { nid, k: send.kind, http, code: c, final });
+		const error = refusalText(body);
 		switch (outcome) {
 			case "ok": {
 				// Roblox's id only: its `path` names the user (users/<UserId>/...), never stored or sent to the events.
@@ -373,7 +401,7 @@ export class Sender {
 			}
 			case "not_subscribed":
 				await store.finish(nid, {
-					status: "failed",
+					status: "failed", error,
 					http,
 					code: "not_subscribed",
 					user: { mute_until: at + MUTE_MS, optin: "not_subscribed", optin_at: at, next_check: at + MUTE_MS },
@@ -382,7 +410,7 @@ export class Sender {
 				break;
 			case "bad_template": {
 				// The config is wrong, not the user: stop the kind (or only a game-supplied template), keep the intent pending.
-				await store.finish(nid, { status: "failed", http, code: "bad_template", user: subscribed ? {} : { optin: "subscribed", optin_at: at }, rows: [...inferred, failed("bad_template", true)] });
+				await store.finish(nid, { status: "failed", error, http, code: "bad_template", user: subscribed ? {} : { optin: "subscribed", optin_at: at }, rows: [...inferred, failed("bad_template", true)] });
 				const kind = (await store.config())?.config.kinds[send.kind];
 				if (send.kind === "custom") this.log("notify: a one-off send's template (message id) does not exist on Roblox");
 				else if (kind?.allowTemplate && send.template && send.template !== kind.template) this.o.haltTemplate(send.template);
@@ -398,7 +426,7 @@ export class Sender {
 				}
 				// Roblox's per-recipient limit: the intent stays pending for the user's next day (the clock's), no backoff.
 				const free = this.o.dayClock() === "utc_day" ? Math.floor(at / DAY_MS) * DAY_MS + DAY_MS : at + DAY_MS;
-				await store.finish(nid, { status: "failed", http, code: "daily_limit", user: { capped_until: free, next_check: free }, rows: [failed("daily_limit", true)] });
+				await store.finish(nid, { status: "failed", error, http, code: "daily_limit", user: { capped_until: free, next_check: free }, rows: [failed("daily_limit", true)] });
 				break;
 			}
 			case "rate_limited":
@@ -408,19 +436,19 @@ export class Sender {
 					await this.o.durable.setJson(BUCKET_KEY, this.bucket.snapshot(), 7 * DAY_MS);
 				}
 				const final = attempt >= MAX_TRIES;
-				if (final) await store.finish(nid, { status: "failed", http, code, user: { next_check: at + FATAL_RECHECK_MS }, rows: [failed(code, true)] });
+				if (final) await store.finish(nid, { status: "failed", error, http, code, user: { next_check: at + FATAL_RECHECK_MS }, rows: [failed(code, true)] });
 				else await store.retryAt(nid, at + Math.max(RETRY_DELAYS_MS[attempt - 1] as number, retryAfter), [failed(code, false)]);
 				break;
 			}
 			case "fatal":
 				if (http === 401 || http === 403) {
 					// The key, not the user: put the send back untouched and stop every send until an owner turns them back on.
-					await store.finish(nid, { status: "cancelled", http, code, rows: [failed(code, false)] });
+					await store.finish(nid, { status: "cancelled", http, code, error, rows: [failed(code, false)] });
 					this.o.haltAll("auth");
 					break;
 				}
 				// Anything else Roblox refuses for good (a 400 INVALID_ARGUMENT, ...): this intent is done, never planned again.
-				await store.finish(nid, { status: "failed", http, code, intent: test ? undefined : "failed", rows: [failed(code, true)] });
+				await store.finish(nid, { status: "failed", error, http, code, intent: test ? undefined : "failed", rows: [failed(code, true)] });
 				this.log(`notify: Roblox refused a send for good (HTTP ${http}, ${code})`);
 				break;
 		}
@@ -437,25 +465,10 @@ export class Sender {
 				launchData = undefined;
 			}
 		}
-		const parameters: Record<string, { string_value: string }> = {};
-		if (send.params) {
-			try {
-				for (const [k, v] of Object.entries(JSON.parse(send.params) as Record<string, unknown>)) if (typeof v === "string") parameters[k] = { string_value: v };
-			} catch {}
-		}
 		// joinExperience / analyticsData live INSIDE payload (the API reference, UserNotification_Payload). The Open Cloud guide's curl
 		// example puts them at the top level, where Roblox accepts the request (200) and silently drops both: no launch data on Join,
 		// no category in the dashboard (found 2026-11-07).
-		const body = {
-			source: { universe: `universes/${this.o.universeId()}` },
-			payload: {
-				message_id: send.template,
-				type: "MOMENT",
-				...(Object.keys(parameters).length ? { parameters } : {}),
-				...(launchData ? { join_experience: { launch_data: launchData } } : {}),
-				analytics_data: { category: send.category ?? send.kind },
-			},
-		};
+		const body = requestBody(send, this.o.universeId() as number, launchData);
 		this.inflight++;
 		try {
 			const res = await (this.o.fetch ?? fetch)(SEND_URL(userId), {

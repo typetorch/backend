@@ -749,6 +749,15 @@ export interface NotifyUserSend {
 	openedAt: number | null;
 	playedSecs: number | null;
 	category: string | null;
+	/** The per-player view only (GET /v1/notify/user): what the send was planned with and Roblox's answer. */
+	template?: string | null;
+	params?: unknown;
+	data?: string | null;
+	robloxId?: string | null;
+	/** Roblox's refusal text on a failed send (its message + details), sends since 2026-11-08 */
+	error?: string | null;
+	/** The request body the send posts, without the signed launch data */
+	request?: unknown;
 }
 
 export interface NotifyUserIntent {
