@@ -112,7 +112,7 @@ const userView: NotifyUserView = {
 	state: { optin: "subscribed", optinAt: T0, muteUntil: null, muted: false, online: false, presenceAt: T0, lastSeen: T0, leftAt: T0, unopened: 1, backoffAt: null, cappedUntil: null, nextCheck: null, busy: null },
 	sends: [
 		{ nid: "nid-1", kind: "gift_new", status: "sent", test: false, plannedAt: T0, sentAt: T0 + 1000, http: 200, code: null, try: 1, openedAt: T0 + 60_000, playedSecs: 95, category: null },
-		{ nid: "nid-2", kind: "streak", status: "failed", test: true, plannedAt: T0, sentAt: null, http: 400, code: "FAILED_PRECONDITION", try: 2, openedAt: null, playedSecs: null, category: null },
+		{ nid: "nid-2", kind: "streak", status: "failed", test: true, plannedAt: T0, sentAt: null, http: 400, code: "FAILED_PRECONDITION", try: 2, openedAt: null, playedSecs: null, category: null, template: "tmpl-2", params: { days: "3" }, error: "User is not subscribed", request: { payload: { message_id: "tmpl-2", parameters: { days: { string_value: "3" } } } } },
 	],
 	intents: [{ kind: "streak", key: "day-3", status: "pending", at: T0 + 3_600_000, until: null, updated: T0, planned: false, params: { day: "3" } }],
 	events: {
@@ -239,8 +239,10 @@ describe("Notifications page", () => {
 		fireEvent.click(within(form).getByRole("button", { name: "Find" }));
 		await waitFor(() => expect(user).toHaveBeenCalledWith({ uid: "4242" }, expect.anything()));
 		const region = await screen.findByRole("region", { name: "Player notifications" });
-		expect(within(region).getByText("Test Player")).toBeTruthy();
-		expect(within(region).getByText("pid-aaaa")).toBeTruthy();
+		// one player link (the Players page by pid), no separate UserId / pid lines
+		const who = within(region).getByRole("link", { name: "Test Player (@Tester)" });
+		expect(who.getAttribute("href")).toContain("pid=pid-aaaa");
+		expect(within(region).queryByText("pid-aaaa")).toBeNull();
 		const off = within(region).getByLabelText("Kinds switched off");
 		expect(within(off).getByText("daily")).toBeTruthy();
 		expect(within(off).getByText("streak")).toBeTruthy();
@@ -259,6 +261,19 @@ describe("Notifications page", () => {
 		expect(within(region).getByText("Event rows unavailable: the events are busy")).toBeTruthy();
 		fireEvent.click(within(region).getByRole("button", { name: "5151" }));
 		await waitFor(() => expect(user).toHaveBeenCalledWith({ uid: "5151" }, expect.anything()));
+	});
+
+	it("shows a clicked send's request body and Roblox's refusal", async () => {
+		mount();
+		const form = await screen.findByRole("search", { name: "Find a player" });
+		fireEvent.change(within(form).getByLabelText("Player"), { target: { value: "4242" } });
+		fireEvent.click(within(form).getByRole("button", { name: "Find" }));
+		const sends = await screen.findByRole("table", { name: "Past notifications" });
+		fireEvent.click(within(sends).getByText("400 FAILED_PRECONDITION"));
+		const detail = await screen.findByRole("region", { name: "Notification detail" });
+		expect(within(detail).getByText("User is not subscribed")).toBeTruthy();
+		expect(within(detail).getByText("tmpl-2")).toBeTruthy();
+		expect(within(detail).getByText(/"string_value": "3"/)).toBeTruthy();
 	});
 
 	it("shows the opening session's join data next to an opened send", async () => {
