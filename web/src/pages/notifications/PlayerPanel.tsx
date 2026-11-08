@@ -157,7 +157,7 @@ function Consent({ view }: { view: NotifyUserView }) {
 	return (
 		<div className="space-y-2">
 			<h3 className="text-sm font-medium">Consent</h3>
-			<KeyValue label="Switched off">
+			<KeyValue label="Kinds turned off in game settings">
 				{view.prefs?.off.length ? (
 					<span className="inline-flex flex-wrap gap-1" aria-label="Kinds switched off">
 						{view.prefs.off.map((k) => (
@@ -165,12 +165,12 @@ function Consent({ view }: { view: NotifyUserView }) {
 								{k}
 							</Badge>
 						))}
-						<span className="text-muted-foreground">set {fmtAgo(view.prefs.updated)}</span>
+						<span className="text-muted-foreground">reported {fmtAgo(view.prefs.updated)}</span>
 					</span>
 				) : view.prefs ? (
-					<span>none (set {fmtAgo(view.prefs.updated)})</span>
+					<span>none, every kind on (reported {fmtAgo(view.prefs.updated)})</span>
 				) : (
-					<span className="text-muted-foreground">never set</span>
+					<span className="text-muted-foreground">never reported</span>
 				)}
 			</KeyValue>
 			{s ? (
