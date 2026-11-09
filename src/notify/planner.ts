@@ -14,7 +14,10 @@
  *   3. the best intent: lowest priority number, then the soonest `until`; a kind with `beats` outranks the listed kinds
  *      within its last `withinHours`;
  *   4. when: `asap` = now; `preferred_hour` = the user's usual hour (the mode of their last 20 session starts, else
- *      17:00 UTC) +-20 min of jitter, but no later than `until - 1 h` nor `at + maxWaitHours`.
+ *      17:00 UTC) +-20 min of jitter, but no later than `until - 1 h` nor `at + maxWaitHours`;
+ *   5. the held slot: when that send would fill the day cap before a higher-priority intent's window opens (2026-11-09:
+ *      a day 3 reward reminder at 18:41 UTC took the only slot and a 10-day streak's warning, open 21:00..23:45, expired
+ *      unsent), nothing is planned (skipped `held`) and the user is looked at again when that window opens.
  */
 import { newNid } from "./token.ts";
 import type { KindConfig, NotifyConfig } from "./config.ts";
@@ -36,7 +39,7 @@ export const IDLE_RECHECK_MS = 10 * 60_000;
 export const PREF_OFF_RECHECK_MS = 30 * DAY_MS;
 
 export type DayClock = "rolling24" | "utc_day";
-export type SkipWhy = "online" | "quiet" | "capped_day" | "capped_week" | "lapsed" | "muted" | "outranked" | "expired" | "dropped" | "repeat" | "pref_off";
+export type SkipWhy = "online" | "quiet" | "capped_day" | "capped_week" | "lapsed" | "muted" | "outranked" | "expired" | "dropped" | "repeat" | "pref_off" | "held";
 
 export interface PlannerUser {
 	/** In game: an `online` presence newer than `notify.presenceStaleHours`. */
@@ -232,10 +235,19 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 
 	// 4. When.
 	const intent = best.intent;
-	if (best.kind.send === "asap") {
-		out.plan = { intent, at: now, why: "asap" };
+	const plan = (at: number, why: "asap" | "hour" | "until") => {
+		// 5. The held slot.
+		const opens = heldFor(input, best.kind.priority, times, at, sentKey, sentKind);
+		if (opens !== null) {
+			out.skips = out.skips.filter((s) => s.why !== "outranked" || s.kind === k);
+			out.skips.push({ kind: k, why: "held" });
+			out.nextCheck = Math.max(opens, now + 1000);
+			return out;
+		}
+		out.plan = { intent, at, why };
 		return out;
-	}
+	};
+	if (best.kind.send === "asap") return plan(now, "asap");
 	const hour = preferredHour(user.hours);
 	let base = utcDayStart(now - JITTER_MS) + hour * HOUR_MS;
 	if (base < now - JITTER_MS) base += DAY_MS;
@@ -246,8 +258,34 @@ export function decide<I extends PlannerIntent>(input: DecideInput<I>): Decision
 		at = Math.max(now, deadline);
 		why = "until";
 	}
-	out.plan = { intent, at, why };
-	return out;
+	return plan(at, why);
+}
+
+/**
+ * Step 5: when a send at `at` would leave no room under the day cap for a pending higher-priority intent that opens after
+ * `now` and before the cap frees again, the soonest such opening (else null). Only intents that could really go then count:
+ * kind configured, switched on, not switched off by the player, not already sent (once_ever / per_key), and with a window
+ * longer than the cap would hold it.
+ */
+function heldFor<I extends PlannerIntent>(input: DecideInput<I>, priority: number, times: number[], at: number, sentKey: Set<string>, sentKind: Set<string>): number | null {
+	const { config, clock, now } = input;
+	let soonest: number | null = null;
+	for (const other of input.intents) {
+		if (other.at <= now || other.until <= other.at) continue;
+		const kind = config.kinds[other.kind];
+		if (!kind || kind.priority >= priority || !input.kindOn(other.kind) || input.off?.has(other.kind)) continue;
+		if ((kind.repeat === "once_ever" && sentKind.has(other.kind)) || (kind.repeat === "per_key" && sentKey.has(`${other.kind}\u0000${other.key}`))) continue;
+		if (kind.repeat === "daily") {
+			const dayStart = clock === "utc_day" ? utcDayStart(other.at) : other.at - DAY_MS;
+			if (input.recent.some((s) => s.kind === other.kind && s.at > dayStart)) continue;
+		}
+		const opens = Math.max(other.at, at);
+		const free = dayFreeAt([...times, at], config.dailyCap, clock, opens);
+		// Not blocked, or the cap frees while its window is still open: no need to hold.
+		if (free <= opens || free < other.until) continue;
+		if (soonest === null || other.at < soonest) soonest = other.at;
+	}
+	return soonest;
 }
 
 // The tick -------------------------------------------------------------------------------------------------------------

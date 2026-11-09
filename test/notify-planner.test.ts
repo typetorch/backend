@@ -219,3 +219,40 @@ describe("config validation", () => {
 		expect(ok.kinds.a).toMatchObject({ send: "preferred_hour", maxWaitHours: 0.5, category: "Gift letters" });
 	});
 });
+
+describe("the held slot (step 5)", () => {
+	// 2026-11-09: a day 3 reward reminder took the day's only slot at 18:41 UTC; the 10-day streak's warning (21:00..23:45) expired.
+	test("a lower kind is held when it would fill the day cap before a higher kind's window opens", () => {
+		const streak = intent("streak", "", { at: NOW + 9 * HOUR_MS, until: NOW + 11 * HOUR_MS + 45 * 60_000 });
+		const d = decide(input({ intents: [intent("daily"), streak], clock: "utc_day" }));
+		expect(d.plan).toBeUndefined();
+		expect(d.skips).toEqual([{ kind: "daily", why: "held" }]);
+		expect(d.nextCheck).toBe(streak.at);
+		// Once the window opens, the higher kind goes.
+		const later = decide(input({ intents: [intent("daily"), streak], clock: "utc_day", now: streak.at }));
+		expect(later.plan?.intent.kind).toBe("streak");
+	});
+
+	test("not held when the cap frees while the higher window is still open", () => {
+		const streak = intent("streak", "", { at: NOW + 2 * HOUR_MS, until: NOW + 3 * DAY_MS });
+		expect(decide(input({ intents: [intent("daily"), streak], clock: "utc_day" })).plan?.intent.kind).toBe("daily");
+	});
+
+	test("not held when the cap has room for both, or the higher one opens after the cap frees", () => {
+		const streak = intent("streak", "", { at: NOW + 9 * HOUR_MS, until: NOW + 11 * HOUR_MS });
+		expect(decide(input({ config: { ...CONFIG, dailyCap: 2 }, intents: [intent("daily"), streak], clock: "utc_day" })).plan?.intent.kind).toBe("daily");
+		const tomorrow = intent("streak", "", { at: NOW + 13 * HOUR_MS, until: NOW + 15 * HOUR_MS });
+		expect(decide(input({ intents: [intent("daily"), tomorrow], clock: "utc_day" })).plan?.intent.kind).toBe("daily");
+	});
+
+	test("not held for a higher kind that could not go anyway (switched off, sent today)", () => {
+		const streak = intent("streak", "", { at: NOW + 9 * HOUR_MS, until: NOW + 11 * HOUR_MS });
+		expect(decide(input({ intents: [intent("daily"), streak], clock: "utc_day", off: new Set(["streak"]) })).plan?.intent.kind).toBe("daily");
+		expect(decide(input({ intents: [intent("daily"), streak], clock: "utc_day", kindOn: (k) => k !== "streak" })).plan?.intent.kind).toBe("daily");
+	});
+
+	test("rolling24: a send now holds the slot for 24 h", () => {
+		const streak = intent("streak", "", { at: NOW + 20 * HOUR_MS, until: NOW + 22 * HOUR_MS });
+		expect(decide(input({ intents: [intent("daily"), streak] })).skips).toEqual([{ kind: "daily", why: "held" }]);
+	});
+});
