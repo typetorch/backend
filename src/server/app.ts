@@ -1893,10 +1893,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return new Response(answer, { status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 	}
 
+	/** A named API key (plans/31), even an admin one: never the owner list or the trust-link keys (the env admin token only). */
+	const isNamedKey = (principal: Principal): boolean => "user" in principal && principal.user.kind === "key";
+
 	/** PUT /v1/access/keys { keys } (the admin token only): the signing keys a blessing link may be signed with. */
 	async function putBlessKeys(req: Request, principal: Principal): Promise<Response> {
 		if (!central) return centralOff();
 		if (principal.via !== "bearer") return json(403, { error: "the signing keys are set with the admin token (the CLI), not from the explorer" });
+		if (isNamedKey(principal)) return json(403, { error: "the signing keys are set with the admin token (the CLI), not with a named API key" });
 		const raw = await readCapped(req, 8 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: { keys?: unknown };
@@ -1919,6 +1923,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	/** PUT /v1/access (the admin token only: the CLI sends the signed access list's owners). */
 	async function putAccess(req: Request, principal: Principal): Promise<Response> {
 		if (principal.via !== "bearer") return json(403, { error: "the owner list is set with the admin token (the CLI), not from the explorer" });
+		if (isNamedKey(principal)) return json(403, { error: "the owner list is set with the admin token (the CLI), not with a named API key" });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: unknown;

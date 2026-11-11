@@ -119,6 +119,18 @@ describe("named API keys", () => {
 		expect(checked).toBeGreaterThan(50);
 	});
 
+	test("an admin key may not replace the owner list or the trust-link keys (the env admin token only)", async () => {
+		const owners = await h.call("/v1/access", json("PUT", made.admin.key, { seq: 99, owners: [1] }));
+		expect(owners.status).toBe(403);
+		expect((await asJson(owners)).error).toContain("named API key");
+		const signing = await h.call("/v1/access/keys", json("PUT", made.admin.key, { keys: [] }));
+		expect([403, 404]).toContain(signing.status); // 404 when this harness runs without central
+		const read = await h.call("/v1/access", { headers: bearer(made.admin.key) });
+		expect(read.status).toBe(200);
+		const token = await h.call("/v1/access", json("PUT", ADMIN, { seq: 99, owners: [1] }));
+		expect(token.status).not.toBe(403);
+	});
+
 	test("revoke: the key stops (401); expired keys stop; ?all=1 lists revoked ones", async () => {
 		const r = await asJson(await h.call("/v1/admin/keys", json("POST", ADMIN, { name: "short-lived", role: "lookup", expiresDays: 1 })));
 		expect((await h.call("/v1/identity/resolve?uid=1", { headers: bearer(r.key) })).status).toBe(200);
