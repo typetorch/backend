@@ -528,6 +528,11 @@ export interface BenchmarksResult {
 
 export interface RealtimeWindow {
 	sessions: number;
+	players: number;
+	newPlayers: number;
+	running: number;
+	playtimeMinutes: number;
+	playtimePerPlayer: number | null;
 	avgSessionMinutes: number | null;
 	clientErrors: number;
 	errorsPerSession: number | null;

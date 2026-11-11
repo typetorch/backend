@@ -282,7 +282,7 @@ export const benchmarks = defineQuery<BenchmarkOptions, BenchmarksResult>({
 // realtime ---------------------------------------------------------------------------------------------------------
 
 export interface RealtimeOptions {
-	/** Window for the period-over-period numbers, hours (default 24). */
+	/** Window for the period-over-period numbers, hours (default 24; the explorer sends the filter bar's range, up to 90 days). */
 	hours: number;
 	/** Days of concurrent-user history (default 7). */
 	ccuDays: number;
@@ -290,6 +290,16 @@ export interface RealtimeOptions {
 
 export interface RealtimeWindow {
 	sessions: number;
+	/** Distinct players with a session that started in the window. */
+	players: number;
+	/** Of those, players whose first-ever session started in the window. */
+	newPlayers: number;
+	/** Sessions that started in the window and are still running (an event in the last 10 minutes). */
+	running: number;
+	/** Playtime of the sessions that started in the window, running ones so far, minutes. */
+	playtimeMinutes: number;
+	/** playtimeMinutes / players, or null without players. */
+	playtimePerPlayer: number | null;
 	/** Average length of the sessions that started in the window and are over, minutes. */
 	avgSessionMinutes: number | null;
 	/** tech/error rows sent by clients (each counts its `n`). */
@@ -320,10 +330,10 @@ export interface RealtimeResult {
 
 export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 	name: "realtime",
-	summary: "concurrent users per hour (peak and average) from fleet heartbeats; session time, client errors per session, client fps, server memory: last hours vs the hours before",
+	summary: "concurrent users per hour (peak and average) from fleet heartbeats; sessions, players, new players, playtime, session time, client errors per session, client fps, server memory: last hours vs the hours before",
 	defaultDays: 7,
 	options: (input = {}) => ({
-		hours: intOption(input.hours, "hours", 24, 1, 168),
+		hours: intOption(input.hours, "hours", 24, 1, 2160),
 		ccuDays: intOption(input.ccuDays, "ccuDays", 7, 1, 30),
 	}),
 	statements(ctx, f, o) {
@@ -343,7 +353,9 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 			sessions:
 				`WITH ev AS (${playerEvents(ctx, f, from - SESSION_SLACK_MS, now, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp")}), ${SESSIONS_CTE} ` +
 				`SELECT CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END AS cur, COUNT(*) AS sessions, ` +
-				`SUM(CASE WHEN t1 < ${ended} THEN t1 - t0 ELSE 0 END) AS ended_ms, SUM(CASE WHEN t1 < ${ended} THEN 1 ELSE 0 END) AS ended_n FROM s WHERE t0 >= ${int(from)} GROUP BY CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END ORDER BY cur ${lim(10)}`,
+				`SUM(CASE WHEN t1 < ${ended} THEN t1 - t0 ELSE 0 END) AS ended_ms, SUM(CASE WHEN t1 < ${ended} THEN 1 ELSE 0 END) AS ended_n, ` +
+				`SUM(t1 - t0) AS play_ms, SUM(CASE WHEN t1 >= ${ended} THEN 1 ELSE 0 END) AS running, COUNT(DISTINCT pid) AS players, ` +
+				`COUNT(DISTINCT CASE WHEN isnew = 1 THEN pid END) AS new_players FROM s WHERE t0 >= ${int(from)} GROUP BY CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END ORDER BY cur ${lim(10)}`,
 			tech:
 				`SELECT cur, AVG(CASE WHEN name = 'client' THEN fps END) AS fps, AVG(CASE WHEN name = 'server' THEN mem END) AS mem, ` +
 				`SUM(CASE WHEN name = 'error' AND src = 'client' THEN COALESCE(n, 1) ELSE 0 END) AS errors ` +
@@ -370,8 +382,15 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 			const errors = num(t.errors);
 			const fps = numOrNull(t.fps);
 			const mem = numOrNull(t.mem);
+			const players = num(s.players);
+			const playtime = round(num(s.play_ms) / 60_000, 1);
 			return {
 				sessions,
+				players,
+				newPlayers: num(s.new_players),
+				running: num(s.running),
+				playtimeMinutes: playtime,
+				playtimePerPlayer: players ? round(playtime / players, 2) : null,
 				avgSessionMinutes: num(s.ended_n) ? round(num(s.ended_ms) / num(s.ended_n) / 60_000, 2) : null,
 				clientErrors: errors,
 				errorsPerSession: sessions ? round(errors / sessions, 3) : null,
