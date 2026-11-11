@@ -8,6 +8,10 @@
  *   lookup - the lookup token (TYPETORCH_LOOKUP_TOKEN, optional) as a Bearer header: GET /v1/identity/resolve only (pid <->
  *           UserId), for scripts and LLM agents. It is not a Principal: every other route refuses it before any handler runs.
  *
+ * Named API keys (plans/31, server/keys.ts: `ttk_<id>_<secret>`) are Bearers with a role: `admin` keys act as the admin
+ * role, `game` keys as the API key, `analyst` keys as the read-only role (their scopes stop them before anything else),
+ * `lookup` / `support` keys like the lookup token. A key never opens an explorer session.
+ *
  * Explorer sessions are random 32-byte ids kept in memory (12 h idle / 7 days at most), bound to a hash of the admin
  * token they were made with, so changing the token ends them all. A session is made by pasting the admin token or by
  * signing in with Roblox as an owner (admin) or a viewer (web). The cookie is HttpOnly, SameSite=Strict (Lax for the short OAuth state cookie only)
@@ -16,6 +20,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { bearer, readCookie, tokenIn } from "./http.ts";
+import { KeyStore, type CallerKey, type KeyRole } from "./keys.ts";
 
 export const SESSION_COOKIE = "tt_session";
 export const CSRF_HEADER = "x-typetorch";
@@ -23,7 +28,9 @@ export const CSRF_HEADER = "x-typetorch";
 /** Who a session belongs to. */
 export type SessionUser =
 	| { kind: "token" }
-	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string; login?: "typetorch.dev" };
+	| { kind: "roblox"; userId: number; name: string; displayName?: string; avatar?: string; login?: "typetorch.dev" }
+	/** A named API key (plans/31): never a session, only a Bearer. */
+	| { kind: "key"; id: string; name: string; role: KeyRole };
 
 /** What a session (or a Bearer) may do: `admin` reads and manages, `web` only reads. */
 export type AccessRole = "admin" | "web";
@@ -133,6 +140,8 @@ export interface AuthOptions {
 	isOwner(userId: number): boolean;
 	/** Whether a Roblox user is (still) a viewer; a viewer's (web) session ends when this turns false. */
 	isViewer(userId: number): boolean;
+	/** Named API keys (plans/31); absent = env tokens only. */
+	keys?: KeyStore;
 }
 
 export class Auth {
@@ -147,13 +156,32 @@ export class Auth {
 		return tokenIn(bearer(req), [this.o.adminToken]);
 	}
 
+	/** The game key (or the previous one), or a named key with `ingest:write` (a game or admin key). */
 	hasGameKey(req: Request): boolean {
-		return tokenIn(bearer(req), this.o.apiKeys);
+		return tokenIn(bearer(req), this.o.apiKeys) || Boolean(this.key(req)?.scopes.includes("ingest:write"));
 	}
 
-	/** The request carries the lookup token as a Bearer header (never true while no lookup token is set). */
+	/**
+	 * The lookup token (never true while none is set), or a named lookup / support key: callers that are not principals
+	 * and reach only their scoped routes. (Analyst keys read as the web role; admin keys as the admin role.)
+	 */
 	hasLookupBearer(req: Request): boolean {
-		return this.o.lookupToken !== undefined && tokenIn(bearer(req), [this.o.lookupToken]);
+		if (this.o.lookupToken !== undefined && tokenIn(bearer(req), [this.o.lookupToken])) return true;
+		const key = this.key(req);
+		return key?.role === "lookup" || key?.role === "support";
+	}
+
+	/** A non-admin bearer that may resolve identities: the lookup token, or a named key with `identity:resolve`. */
+	mayResolve(req: Request): boolean {
+		if (this.hasLookupBearer(req)) return true;
+		const key = this.key(req);
+		return Boolean(key && key.role !== "admin" && key.scopes.includes("identity:resolve"));
+	}
+
+	/** The active named key behind the Bearer header, or undefined. */
+	key(req: Request): CallerKey | undefined {
+		const token = bearer(req);
+		return this.o.keys && KeyStore.looksLikeKey(token) ? this.o.keys.resolve(token) : undefined;
 	}
 
 	/** The role a Roblox user signs in with: owners are admins, viewers get the web role, anyone else stays out. */
@@ -193,6 +221,16 @@ export class Auth {
 	principal(req: Request): Principal | undefined {
 		if (bearer(req) !== undefined) {
 			if (this.hasAdminBearer(req)) return { role: "admin", via: "bearer", user: { kind: "token" } };
+			const key = this.key(req);
+			if (key) {
+				const user: SessionUser = { kind: "key", id: key.id, name: key.name, role: key.role };
+				if (key.role === "admin") return { role: "admin", via: "bearer", user };
+				if (key.role === "game") return { role: "game", via: "bearer" };
+				// An analyst key reads like the web role (its scopes keep it to the query routes); lookup / support keys
+				// are not principals, like the lookup token.
+				if (key.role === "analyst") return { role: "web", via: "bearer", user };
+				return undefined;
+			}
 			if (this.hasGameKey(req)) return { role: "game", via: "bearer" };
 			return undefined;
 		}

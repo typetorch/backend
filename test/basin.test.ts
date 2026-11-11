@@ -15,6 +15,8 @@ const TOKEN = "test-token-not-a-secret-123";
 
 const OPTIONS: Partial<Record<QueryName, object>> = {
 	timeline: { pid: "p0003" },
+	"player-events": { pids: ["p0003", "p0015"], names: ["join", "leave", "enter", "personal_best"] },
+	"player-summary": { pids: ["p0003", "p0015"], names: ["join", "leave", "enter", "ac_flag"] },
 	"notify-player": { pids: ["p0003"] },
 	"player-graph": { pid: "p0003", facet: "zone" },
 	// A payer (two purchases in the default range), so the spending statements return rows.

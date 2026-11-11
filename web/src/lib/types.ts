@@ -1755,7 +1755,7 @@ export interface SavedQueryInput {
 
 /** "dashboard" = saved on the Settings page; "env" = the environment; "default" = neither (the built-in default). */
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number" | "alertRules" | "kindSwitches";
+export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number" | "alertRules" | "kindSwitches" | "names";
 
 /** One threshold of a backend alert rule (or a general value: repeatMinutes, perHour). */
 export interface AlertParamDef {
@@ -1815,7 +1815,7 @@ interface SettingBase {
 	key: string;
 	/** The environment variable that gives the default. */
 	env: string;
-	group: "alerts" | "backendAlerts" | "access" | "limits" | "retention" | "notify";
+	group: "alerts" | "backendAlerts" | "access" | "limits" | "retention" | "notify" | "keys";
 	label: string;
 	help: string;
 	kind: SettingKind;

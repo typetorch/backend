@@ -75,7 +75,14 @@ export interface RuntimeValues {
 	"notify.kinds": Record<string, boolean>;
 	/** Hours an `online` presence counts without a refresh (the framework refreshes every 3 h). */
 	"notify.presenceStaleHours": number;
+	/** Requests per minute per named API key (plans/31; game keys keep the ingest limits). */
+	"keys.ratePerMinute": number;
+	/** Event names a `players:read` key may read per player (plans/31); `join` / `leave` = the session rows. */
+	"players.supportEvents": string[];
 }
+/** players.supportEvents' default: the anticheat rows and the session joins / leaves. */
+export const SUPPORT_EVENTS_DEFAULT = ["ac_flag", "ac_action", "ac_honeypot", "join", "leave"];
+export const EVENT_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
 export const NOTIFY_CLOCKS = ["rolling24", "utc_day"] as const;
 export type NotifyClock = (typeof NOTIFY_CLOCKS)[number];
 /** `notify.kinds.<kind>.enabled` in a PATCH body: one kind's switch inside `notify.kinds`. */
@@ -83,7 +90,7 @@ export const NOTIFY_KIND_KEY = /^notify\.kinds\.([a-z0-9_]{1,24})\.enabled$/;
 export const NOTIFY_KINDS_MAX = 64;
 export type RuntimeKey = keyof RuntimeValues;
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingGroup = "alerts" | "backendAlerts" | "access" | "limits" | "retention" | "notify";
+export type SettingGroup = "alerts" | "backendAlerts" | "access" | "limits" | "retention" | "notify" | "keys";
 
 interface BaseDef {
 	key: RuntimeKey;
@@ -103,7 +110,8 @@ export type SettingDef =
 	| (BaseDef & { kind: "switch" })
 	| (BaseDef & { kind: "number"; min: number; max: number; unit: string; zero?: string })
 	| (BaseDef & { kind: "alertRules" })
-	| (BaseDef & { kind: "kindSwitches"; maxEntries: number });
+	| (BaseDef & { kind: "kindSwitches"; maxEntries: number })
+	| (BaseDef & { kind: "names"; maxEntries: number });
 
 /** The editable settings, in the order the Settings page shows them. Bounds apply to values saved from the dashboard. */
 export const SETTINGS: readonly SettingDef[] = [
@@ -130,6 +138,8 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "notify.rate", env: "TYPETORCH_NOTIFY_RATE", group: "notify", kind: "number", min: 1, max: 4000, unit: "sends / s", label: "Send rate ceiling", help: "Our own ceiling on sends per second (Roblox allows 4000 a second per key and says so on every answer; the sender follows that too). A 429 halves the rate for a while." },
 	{ key: "notify.clock", env: "TYPETORCH_NOTIFY_CLOCK", group: "notify", kind: "choice", options: NOTIFY_CLOCKS, label: "Daily cap clock", help: "rolling24: the next send at least 24 h after the last; utc_day: one per UTC date." },
 	{ key: "notify.presenceStaleHours", env: "TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS", group: "notify", kind: "number", min: 1, max: 168, unit: "hours", label: "Presence goes stale", help: "A player counts as in game this long after the last online ping (game servers refresh it every 3 h), so a crashed server never keeps them 'online' for good." },
+	{ key: "keys.ratePerMinute", env: "TYPETORCH_KEYS_RATE_PER_MINUTE", group: "keys", kind: "number", min: 1, max: 100_000, unit: "requests / min", label: "Requests per key", help: "Requests a minute per named API key (ttk_ keys); over it they get 429. The game key keeps the ingest limits." },
+	{ key: "players.supportEvents", env: "TYPETORCH_PLAYERS_SUPPORT_EVENTS", group: "keys", kind: "names", maxEntries: 64, label: "Support events", help: "Event names a support key may read per player (GET /v1/players/by-uid/<uid>/events and /summary); join and leave are the session rows. Admin keys read any." },
 	{ key: "notify.kinds", env: "TYPETORCH_NOTIFY_KINDS_OFF", group: "notify", kind: "kindSwitches", maxEntries: NOTIFY_KINDS_MAX, label: "Kinds", help: "Per kind on / off (the Notifications page has the switches). A kind not listed is on." },
 ];
 
@@ -298,6 +308,20 @@ export function checkSetting(def: SettingDef, raw: unknown, base?: unknown): Run
 			} catch (error) {
 				throw new SettingsError((error as Error).message, 400, def.key);
 			}
+		case "names": {
+			const list = typeof raw === "string" ? (raw.length > 8192 ? null : raw.split(/[\s,]+/)) : Array.isArray(raw) ? raw : null;
+			if (!list) throw new SettingsError(`${def.key} is a list of event names (an array of strings, or one string separated by commas)`, 400, def.key);
+			const out: string[] = [];
+			for (const name of list) {
+				if (typeof name !== "string") throw new SettingsError(`${def.key} entries are event names`, 400, def.key);
+				const n = name.trim();
+				if (!n) continue;
+				if (!EVENT_NAME.test(n)) throw new SettingsError(`${def.key}: event names are 1-128 of A-Z a-z 0-9 _ . : -`, 400, def.key);
+				if (!out.includes(n)) out.push(n);
+			}
+			if (out.length > def.maxEntries) throw new SettingsError(`${def.key} holds at most ${def.maxEntries} names`, 400, def.key);
+			return out;
+		}
 		case "kindSwitches": {
 			if (!isRecord(raw)) throw new SettingsError(`${def.key} is an object of kind name -> true / false`, 400, def.key);
 			const entries = Object.entries(raw);
@@ -347,6 +371,8 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		"notify.clock": config.notifyClock,
 		"notify.kinds": Object.fromEntries(config.notifyKindsOff.map((k) => [k, false])),
 		"notify.presenceStaleHours": config.notifyPresenceStaleHours,
+		"keys.ratePerMinute": config.keysRatePerMinute,
+		"players.supportEvents": [...config.supportEvents],
 	};
 }
 
@@ -448,7 +474,7 @@ export class RuntimeSettings {
 				source: this.source(def.key),
 				...(def.kind === "choice" || def.kind === "levels" ? { options: [...def.options] } : {}),
 				...(def.kind === "number" ? { min: def.min, max: def.max, unit: def.unit, ...(def.zero ? { zero: def.zero } : {}) } : {}),
-				...(def.kind === "ips" || def.kind === "users" || def.kind === "kindSwitches" ? { maxEntries: def.maxEntries } : {}),
+				...(def.kind === "ips" || def.kind === "users" || def.kind === "kindSwitches" || def.kind === "names" ? { maxEntries: def.maxEntries } : {}),
 				...(def.kind === "alertRules" ? { rules: rulesMeta() } : {}),
 			};
 			if (def.kind === "secret") return { ...meta, set: this.get(def.key) !== "", fallbackSet: this.fallback[def.key] !== "" };

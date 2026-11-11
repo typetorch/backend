@@ -145,6 +145,7 @@ function safeName(raw: string): string {
 /** The actor behind a session user: the admin token, or a Roblox UserId with its name (and whether typetorch.dev signed it in). */
 export function actorOfUser(user: SessionUser): AuditActor {
 	if (user.kind === "token") return { kind: "token", label: "admin token" };
+	if (user.kind === "key") return { kind: "api-key", label: `key ${user.name} (${user.id})` };
 	const name = safeName(user.name);
 	const kind = user.login === "typetorch.dev" ? "typetorch.dev" : "roblox";
 	return { kind, label: `${kind === "roblox" ? "roblox" : "typetorch.dev"} user ${user.userId}${name ? ` (${name})` : ""}`, userId: user.userId };

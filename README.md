@@ -399,6 +399,46 @@ A web session shows **read-only** next to the name in the sidebar, hides the Set
 from a server's page. The backend enforces all of it regardless of what the page hides: `GET /v1/auth/check` answers
 `role: "web"` for these credentials.
 
+### Named API keys and roles
+
+Plans/31 (`plans/31-api-keys-rbac.md`; code `src/server/keys.ts`). `typetorch keys create --name <name> --role <role>
+[--expires 365d]` (`POST /v1/admin/keys { name, role, expiresDays? }`) makes a key `ttk_<id>_<secret>`: the id is public,
+the secret is shown once and never stored (the `api_keys` table in `fleet.sqlite` holds the SHA-256 of the whole key) or
+logged or audited. `GET /v1/admin/keys` lists them (and the env tokens as built-in `env:api`, `env:api-previous`,
+`env:admin`, `env:lookup`, which the API can't revoke: rotate them on Coolify); `DELETE /v1/admin/keys/<id>` revokes.
+Revoked and expired keys answer 401 like unknown ones; `last_used_at` is written at most once a minute.
+
+| Scope | Routes |
+|---|---|
+| `ingest:write` | `POST /v1/ingest`, `/v1/errors`, `/v1/identity`, `/v1/fleet/heartbeat\|report\|alert\|closing\|deploy\|mark\|bundle\|results`, `GET /v1/fleet/commands`, `POST /v1/notify/intents\|opened\|played` |
+| `identity:resolve` | `GET /v1/identity/resolve` |
+| `players:read` | `GET /v1/players/by-uid/<uid>/events`, `/summary` |
+| `analytics:query` | `POST /v1/query/<name>`, `GET /v1/queries` |
+| `analytics:sql` | `POST /v1/sql` |
+| `settings:write` | `PATCH /v1/admin/settings` |
+| `admin` | every other route |
+
+| Role | Scopes |
+|---|---|
+| `game` | ingest:write |
+| `lookup` | identity:resolve |
+| `support` | identity:resolve, players:read |
+| `analyst` | analytics:sql, analytics:query, identity:resolve |
+| `admin` | all |
+
+- A key is a Bearer only; it never opens an explorer session. Admin keys act like the admin token (the CLI-only routes
+  `PUT /v1/access` and `PUT /v1/access/keys` included); analyst keys read like the web role within their scopes.
+- Rate limit: runtime setting `keys.ratePerMinute` (default 120) per key, `429 { error: "rate_limited" }` + Retry-After;
+  game keys keep the ingest limits; the env tokens keep theirs.
+- `GET /v1/players/by-uid/<uid>/events?names=&since=&before=&limit=` (1..100, default 50; `since` / `before` unix ms,
+  default the last 30 days): `{ uid, known, pids, rows: [{ t, name, kind, pid, job, props }], more }`, every pid of the
+  UserId from `identities`, newest first, `props` an object. Names must be in the runtime setting `players.supportEvents`
+  (default `ac_flag,ac_action,ac_honeypot,join,leave`; `join` / `leave` are the `session` rows) unless the caller is an
+  admin: else `403 { error: "event_not_allowed", name }`. `GET .../summary?since=`: `{ uid, known, pids, since, byName,
+  byCategory, sessions, lastSeen }`. An unknown UserId: `known: false`. Named queries `player-events` / `player-summary`
+  (DuckDB and Basin). Every call writes a `players.read` audit row (key id and name, role, route template, status, IP, a
+  pid count; never the UserId). The admin allow list doesn't apply to these two routes (the key is the gate).
+
 ### The lookup token (for scripts and LLM agents)
 
 An agent that only needs to turn a pid from a query into a Roblox UserId (or back) should not hold the admin token, which
@@ -534,6 +574,8 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 cookie. **web** = the read-only role: a Roblox viewer's session cookie (no token); it gets every route marked `admin, web`
 below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / `PATCH` other than the two query routes.
 **lookup** = `TYPETORCH_LOOKUP_TOKEN` as a Bearer header: the routes marked `lookup` only, `403` everywhere else.
+**Named keys** (`ttk_<id>_<secret>`, [API keys](#named-api-keys-and-roles)): a Bearer with a role; each route needs one
+scope, and a key outside its role's scopes gets `403 { error: "forbidden", need }`.
 **open** = no credentials.
 
 | Route | Role | What |
@@ -553,6 +595,8 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
 | `GET /v1/roblox/analytics/acquisition?days=7` | admin, web | Roblox's own play-through rate, impressions and qualified plays ([Roblox acquisition numbers](#roblox-acquisition-numbers), Open Cloud) |
+| `GET /v1/players/by-uid/<uid>/events`, `GET /v1/players/by-uid/<uid>/summary` | admin, `players:read` key | one player's support rows / summary ([API keys](#named-api-keys-and-roles)); audited |
+| `GET /v1/admin/keys`, `POST /v1/admin/keys`, `DELETE /v1/admin/keys/<id>` | admin | [named API keys](#named-api-keys-and-roles): list (built-ins too, `?all=1` with revoked), create (the key once), revoke |
 | `GET /v1/identity/resolve` | admin, lookup | `?pid=a,b&uid=1,2` (<= 100): `{ byPid: [{ pid, uid \| null }], byUid: [{ uid, pids }] }`; the [lookup token](#the-lookup-token-for-scripts-and-llm-agents)'s only route |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
