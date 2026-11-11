@@ -2233,7 +2233,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const pids = (await identities.byUid(uid)).map((i) => i.pid).filter((p) => !warehouse?.isErased(p));
 			pidCount = pids.length;
 			if (!pids.length) {
-				return json(200, which === "events" ? { uid, known: false, pids: [], rows: [], more: false } : { uid, known: false, pids: [], since: from, byName: Object.fromEntries(names.map((n) => [n, 0])), byCategory: {}, sessions: 0, lastSeen: null });
+				return json(200, which === "events" ? { uid, known: false, pids: [], rows: [], more: false } : { uid, known: false, pids: [], since: from, byName: Object.fromEntries(names.map((n) => [n, 0])), byCategory: {}, sessions: 0, lastSeen: null, playtimeSecs: 0, robuxSpent: 0, purchases: 0 });
 			}
 			const w = analyticsOr();
 			if (w instanceof Response) return w;
@@ -2243,7 +2243,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const r = (await w.query("player-events", filters, options)) as { rows: unknown[]; more: boolean };
 				return json(200, { uid, known: true, pids, rows: r.rows, more: r.more });
 			}
-			const r = (await w.query("player-summary", filters, options)) as { byName: Record<string, number>; byCategory: Record<string, number>; sessions: number; lastSeen: number | null };
+			const r = (await w.query("player-summary", filters, options)) as { byName: Record<string, number>; byCategory: Record<string, number>; sessions: number; lastSeen: number | null; playtimeSecs: number; robuxSpent: number; purchases: number };
 			return json(200, { uid, known: true, pids, since: from, ...r });
 		})();
 		// The audit row: who, the route template, the status, a pid count. Never the UserId (the audit log is read more widely).

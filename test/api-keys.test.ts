@@ -198,6 +198,9 @@ describe("per-player support endpoints", () => {
 					row("pid-b", "s2", 20 * 60_000, "session", "join", { from: "share" }),
 					row("pid-b", "s2", 10 * 60_000, "custom", "ac_flag", { cat: "fly" }),
 					row("pid-b", "s2", 9 * 60_000, "custom", "secret_event", { x: 1 }),
+					row("pid-b", "s2", 15 * 60_000, "purchase", "product", { robux: 25, where: "donate_25" }),
+					row("pid-b", "s2", 14 * 60_000, "purchase", "product", { robux: 8, where: "donate_10" }),
+					row("pid-b", "s2", 19 * 60_000, "session", "device", { dev: "phone", input: "touch" }),
 					row("pid-b", "s2", 40 * DAY, "custom", "ac_flag", { cat: "old" }),
 					row("pid-z", "s9", 5 * 60_000, "custom", "ac_flag", { cat: "someone_else" }),
 				],
@@ -247,9 +250,17 @@ describe("per-player support endpoints", () => {
 		expect((await get(`/v1/players/by-uid/${UID}/events?names=secret_event`, ADMIN)).status).toBe(200);
 	});
 
+	test("the session's device row is readable once allowed (a session row like join / leave)", async () => {
+		expect((await get(`/v1/players/by-uid/${UID}/events?names=device`)).status).toBe(403);
+		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": ["ac_flag", "ac_action", "ac_honeypot", "join", "leave", "device"] }));
+		const r = await asJson(await get(`/v1/players/by-uid/${UID}/events?names=device`));
+		expect(r.rows).toEqual([{ t: expect.any(Number), name: "device", kind: "session", pid: "pid-b", job: "job-7", props: { dev: "phone", input: "touch" } }]);
+		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": null }));
+	});
+
 	test("an unknown UserId: known false, nothing else", async () => {
 		expect(await asJson(await get("/v1/players/by-uid/42/events"))).toEqual({ uid: 42, known: false, pids: [], rows: [], more: false });
-		expect(await asJson(await get("/v1/players/by-uid/42/summary"))).toMatchObject({ uid: 42, known: false, pids: [], sessions: 0, lastSeen: null });
+		expect(await asJson(await get("/v1/players/by-uid/42/summary"))).toMatchObject({ uid: 42, known: false, pids: [], sessions: 0, lastSeen: null, playtimeSecs: 0, robuxSpent: 0, purchases: 0 });
 	});
 
 	test("summary: counts per allow-listed name (0 when none), ac_flag by category, sessions, last seen", async () => {
@@ -257,6 +268,9 @@ describe("per-player support endpoints", () => {
 		expect(r).toMatchObject({ uid: UID, known: true, byName: { ac_flag: 3, ac_action: 1, ac_honeypot: 0, join: 2, leave: 1 }, byCategory: { speed: 2, fly: 1 }, sessions: 2 });
 		expect(r.lastSeen).toBe(h.now() - 9 * 60_000);
 		expect(r.since).toBe(h.now() - 30 * DAY);
+		// s1: 50 -> 30 min ago (20 min); s2: 20 -> 9 min ago (11 min); the 40-day-old s2 row is outside the 30 days.
+		expect(r.playtimeSecs).toBe(31 * 60);
+		expect(r).toMatchObject({ robuxSpent: 33, purchases: 2 });
 		const all = await asJson(await get(`/v1/players/by-uid/${UID}/summary?since=${h.now() - 60 * DAY}`));
 		expect(all.byCategory).toEqual({ speed: 2, fly: 1, old: 1 });
 	});
