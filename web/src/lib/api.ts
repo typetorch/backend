@@ -34,6 +34,8 @@ import type {
 	NotifyRecentView,
 	NotifyUserLookup,
 	NotifyUserView,
+	NotifyUsersParams,
+	NotifyUsersView,
 	Health,
 	Identity,
 	PlaceCardInfo,
@@ -267,6 +269,24 @@ export function createApi(options: ApiOptions = {}) {
 		notifyUser: (lookup: NotifyUserLookup, signal?: AbortSignal) => get<NotifyUserView>(`/v1/notify/user${qs(lookup)}`, signal),
 		notifyRecent: (options: { limit?: number; kind?: string } = {}, signal?: AbortSignal) =>
 			get<NotifyRecentView>(`/v1/notify/recent${qs({ ...(options.limit ? { limit: String(options.limit) } : {}), ...(options.kind ? { kind: options.kind } : {}) })}`, signal),
+		/** The opt-in list (owners): one page of a state (subscribed by default) and the counts of every state. */
+		notifyUsers: (params: NotifyUsersParams = {}, signal?: AbortSignal) => get<NotifyUsersView>(`/v1/notify/users${qs({ ...params })}`, signal),
+		/** The opt-in list of a state as CSV (at most 10 000 rows; `truncated` when there were more). */
+		async notifyUsersCsv(params: Omit<NotifyUsersParams, "limit" | "cursor"> = {}, signal?: AbortSignal): Promise<{ name: string; blob: Blob; truncated: boolean }> {
+			const path = `/v1/notify/users${qs({ ...params, format: "csv" })}`;
+			let response: Response;
+			try {
+				response = await doFetch(`${base}${path}`, { credentials: "same-origin", ...(signal ? { signal } : {}) });
+			} catch (error) {
+				throw new ApiError(0, `cannot reach the backend: ${(error as Error).message}`, path);
+			}
+			if (!response.ok) {
+				const body = (await response.json().catch(() => undefined)) as { error?: string } | undefined;
+				throw new ApiError(response.status, body?.error ?? `HTTP ${response.status}`, path, body);
+			}
+			const name = /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? "notify-users.csv";
+			return { name, blob: await response.blob(), truncated: response.headers.get("x-truncated") === "1" };
+		},
 		/** The backend alert rules' state on the last run (the rules themselves are the backendAlerts setting). */
 		alertRules: (signal?: AbortSignal) => get<AlertRulesStatus>("/v1/admin/alert-rules", signal),
 		/** The server's own metrics (the Backend stats page): rates, latency, memory, per route group over `window`. */

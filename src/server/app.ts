@@ -48,7 +48,7 @@
  *        with the API key)
  *   GET  /v1/access, PUT /v1/access { seq, owners } (admin token only): the owners who may sign in with Roblox
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
- *   GET|PUT /v1/notify/config, GET /v1/notify/status, PUT /v1/notify/keys, POST /v1/notify/test | send   (owners;
+ *   GET|PUT /v1/notify/config, GET /v1/notify/status | user | recent | users, PUT /v1/notify/keys, POST /v1/notify/test | send   (owners;
  *                                   experience notifications, plans/29: the pushed config, the queue, the signing keys, sends)
  *   GET|POST /v1/admin/keys, DELETE /v1/admin/keys/<id>   named API keys (plans/31, server/keys.ts; the secret only in the POST answer)
  *   GET  /v1/players/by-uid/<uid>/events | summary   one player's support rows (plans/31; a `players:read` key or an admin;
@@ -125,7 +125,8 @@ import { ipAllowed } from "./ipfilter.ts";
 import { backfillIdentities } from "./identities.ts";
 import { LiveHub } from "./live.ts";
 import { meterSqlite, parseStatsWindow, ServerMetrics, STATS_WINDOWS } from "./metrics.ts";
-import { INTENTS_BODY_MAX, NotifyService, SMALL_BODY_MAX, type Reply } from "../notify/routes.ts";
+import { INTENTS_BODY_MAX, NotifyService, SMALL_BODY_MAX, parseOptinCursor, type OptinUser, type Reply } from "../notify/routes.ts";
+import { OPTIN_STATES, type OptinCursor, type OptinState } from "../notify/store.ts";
 import { CONFIG_BODY_MAX } from "../notify/config.ts";
 import type { EventRow } from "../schema.ts";
 import { DOCS_CSP, SWAGGER_INIT, llmsTxt, openApiSpec, swaggerPage } from "./openapi.ts";
@@ -266,6 +267,14 @@ const PLAYER_NAME_WARM = 8;
 const NOTIFY_IP_PER_MINUTE = 6000;
 /** POST /v1/notify/test | send, PUT config / keys per minute (owners). */
 const NOTIFY_ADMIN_PER_MINUTE = 30;
+/** GET /v1/notify/users?format=csv per owner per minute, and the rows one export holds at most. */
+const NOTIFY_EXPORT_PER_MINUTE = 6;
+const NOTIFY_CSV_MAX = 10_000;
+/** A CSV cell: quoted when it needs it; a leading = + - @ is defused (a spreadsheet would run it as a formula). */
+function csvCell(text: string): string {
+	const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+	return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
 /** Backups: downloads and "back up now" per minute (each one copies the data folder). */
 const BACKUPS_PER_MINUTE = 2;
 /** How often the backup schedule is checked. */
@@ -587,6 +596,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// Plans/29: notification calls per address per minute (game servers share egress addresses), admin sends per minute.
 	const notifyLimiter = new RateLimiter(NOTIFY_IP_PER_MINUTE, clock);
 	const notifyAdminLimiter = new RateLimiter(NOTIFY_ADMIN_PER_MINUTE, clock);
+	const notifyExportLimiter = new RateLimiter(NOTIFY_EXPORT_PER_MINUTE, clock);
 	// Plans/31: requests per named key per minute (game keys keep the ingest limits).
 	const keyLimiter = new RateLimiter(() => runtime.get("keys.ratePerMinute"), clock);
 	const keepOpen = new WeakMap<Request, () => void>();
@@ -851,6 +861,73 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		});
 	}
 
+	/**
+	 * GET /v1/notify/users?state=subscribed|not_subscribed|unknown|muted&q=&limit=&cursor=&format=csv (owners): the opt-in
+	 * list. Roblox has no API for it: the backend learns a player's answer from Roblox's answer to a send (notify_users).
+	 * One keyset page (default 50, at most 200) plus the counts of every state; `q` is a UserId or a name in the profile
+	 * cache (no Roblox lookup). `format=csv` walks the pages up to NOTIFY_CSV_MAX rows (rate-limited per owner).
+	 */
+	async function notifyUsers(req: Request, who: string): Promise<Response> {
+		const p = new URL(req.url).searchParams;
+		const state = (p.get("state") ?? "subscribed") as OptinState;
+		if (!(OPTIN_STATES as readonly string[]).includes(state)) return json(400, { error: `state is one of ${OPTIN_STATES.join(", ")}` });
+		const csv = p.get("format") === "csv";
+		if (p.get("format") !== null && !csv) return json(400, { error: "format is csv (or leave it out for JSON)" });
+		const limitText = p.get("limit");
+		const limit = limitText === null ? 50 : Number(limitText);
+		if (!Number.isInteger(limit) || limit < 1 || limit > 200) return json(400, { error: "limit is 1..200" });
+		let after: OptinCursor | undefined;
+		const cursorText = p.get("cursor");
+		if (cursorText) {
+			after = parseOptinCursor(cursorText);
+			if (!after) return json(400, { error: "bad cursor" });
+		}
+		const q = (p.get("q") ?? "").trim();
+		let uids: number[] | undefined;
+		if (q) {
+			if (q.length > 64) return json(400, { error: "q is at most 64 characters" });
+			if (/^\d{1,19}$/.test(q)) {
+				const uid = parseUid(q);
+				uids = uid === undefined ? [] : [uid];
+			} else if (/^@?[A-Za-z0-9_ .-]{1,64}$/.test(q)) uids = robloxProfiles.findByName(q.replace(/^@/, ""), 50);
+			else return json(400, { error: "q is a UserId or a username / display name" });
+		}
+		const named = (u: OptinUser) => {
+			const profile = robloxProfiles.peek(u.userId)?.profile;
+			return { ...u, name: profile?.name ?? null, displayName: profile?.displayName ?? null };
+		};
+		if (!csv) {
+			const view = await notify.usersView(state, { limit, ...(after ? { after } : {}), ...(uids ? { uids } : {}) });
+			return json(200, { counts: view.counts, users: view.users.map(named), next: view.next });
+		}
+		if (!notifyExportLimiter.take(who)) return tooMany(notifyExportLimiter.retryAfter(who));
+		const lines = ["user_id,name,state,optin_at,last_seen,online,mute_until,sends,opened"];
+		const isoOr = (ms: number | null) => (ms ? new Date(ms).toISOString() : "");
+		let cursor = after;
+		let truncated = false;
+		for (;;) {
+			const view = await notify.usersView(state, { limit: 200, ...(cursor ? { after: cursor } : {}), ...(uids ? { uids } : {}) });
+			for (const u of view.users.map(named)) {
+				if (lines.length > NOTIFY_CSV_MAX) {
+					truncated = true;
+					break;
+				}
+				lines.push([u.userId, csvCell(u.name ?? ""), u.optin ?? "unknown", isoOr(u.optinAt), isoOr(u.lastSeen), u.online ? 1 : 0, isoOr(u.muteUntil), u.sends, u.opened].join(","));
+			}
+			if (truncated || !view.next) {
+				truncated ||= Boolean(view.next) && lines.length > NOTIFY_CSV_MAX;
+				break;
+			}
+			cursor = parseOptinCursor(view.next);
+		}
+		// Counts only: never a UserId (player data).
+		noteAudit(req, { action: "notify.users.export", details: { state, rows: lines.length - 1, truncated, search: Boolean(q) } });
+		return new Response(lines.join("\n") + "\n", {
+			status: 200,
+			headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="notify-${state}.csv"`, "cache-control": "no-store", "x-truncated": truncated ? "1" : "0" },
+		});
+	}
+
 	async function notifyUser(url: URL): Promise<Response> {
 		const uidText = url.searchParams.get("uid");
 		const pidText = url.searchParams.get("pid");
@@ -910,6 +987,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path === "/v1/notify/status") return method === "GET" ? answer(await notify.status()) : json(405, { error: "GET only" });
 		if (path === "/v1/notify/user") return method === "GET" ? notifyUser(new URL(req.url)) : json(405, { error: "GET only" });
 		if (path === "/v1/notify/recent") return method === "GET" ? notifyRecent(new URL(req.url)) : json(405, { error: "GET only" });
+		if (path === "/v1/notify/users") return method === "GET" ? notifyUsers(req, actorOf(admin).who) : json(405, { error: "GET only" });
 		if (path === "/v1/notify/config") {
 			if (method === "GET") return answer(await notify.getConfig());
 			if (method !== "PUT") return json(405, { error: "GET or PUT only" });

@@ -161,8 +161,9 @@ describe("notify queries", () => {
 		const r = await store.query("notify-optin", RANGE);
 		expect(r.totals).toEqual({ checks: 3, canPrompt: 1, errors: 1, shown: 1, closed: 1, shownRate: 0.3333, avgShownSecs: 12, subscribed: 1, notSubscribed: 1 });
 		expect(r.byWhere).toEqual([
-			{ where: "shop", checks: 2, canPrompt: 1, errors: 0, shown: 1, closed: 1, shownRate: 0.5, avgShownSecs: 12 },
-			{ where: "lobby", checks: 1, canPrompt: 0, errors: 1, shown: 0, closed: 0, shownRate: 0, avgShownSecs: null },
+			// alice was shown the prompt at shop and her send came back subscribed: the answer counts there
+			{ where: "shop", checks: 2, canPrompt: 1, errors: 0, shown: 1, closed: 1, shownRate: 0.5, avgShownSecs: 12, shownPlayers: 1, subscribed: 1, notSubscribed: 0, subscribedRate: 1 },
+			{ where: "lobby", checks: 1, canPrompt: 0, errors: 1, shown: 0, closed: 0, shownRate: 0, avgShownSecs: null, shownPlayers: 0, subscribed: 0, notSubscribed: 0, subscribedRate: 0 },
 		]);
 		expect(r.days.map((d) => [d.date, d.checks, d.shown, d.subscribed, d.notSubscribed])).toEqual([
 			["2026-10-03", 3, 1, 1, 0],

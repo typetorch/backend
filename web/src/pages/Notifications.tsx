@@ -1,640 +1,54 @@
 /**
  * The Notifications page (plans/29 "Explorer page"): experience notifications, from the `notify` rows and the backend's
- * live sender.
+ * live sender. A header (the live status chip with the queue in a popover, dry run, range, kind, Send a test), four KPI
+ * cards, and tabs (URL `?tab=`):
  *
- *   - Funnel per kind and day (the `notify-funnel` query): wants -> planned -> sent (dry runs and tests apart) -> opened ->
- *     played >= 1 min -> returned D1, with open and played rates, plus assisted returns (came back without opening).
- *   - Opt-in prompt (`notify-optin`): checks -> shown -> closed, and the answers the backend inferred from its sends.
- *   - Queue: live from GET /v1/notify/status (owners) and the sender's history (`notify-queue`): per hour, plans, skips.
- *   - Failures by HTTP status and code, and mutes.
- *   - Controls (owners): the runtime settings `notify.*` through PATCH /v1/admin/settings, a test send, the pushed config.
- *   - Player (owners): one player's consent, sends and intents from GET /v1/notify/user (`?player=`, `?by=`).
+ *   - Health: a status sentence, who can get notifications, opened and back-next-day per day, Needs attention.
+ *   - Funnel: prompt shown -> subscribed -> sent -> opened -> played 1 min+ -> back next day, insights, sends per day,
+ *     the opt-in prompt by spot (`notify-funnel`, `notify-optin`).
+ *   - Inbox (owners): the newest sends of everyone with filters and a side panel, and the Player panel (`?player=`).
+ *   - Subscribers (owners): the opt-in list (GET /v1/notify/users), CSV.
+ *   - Kinds: per kind, its switch, by kind and day.
+ *   - Queue & errors: the live queue, failures, planned and skipped by why, the history per hour (`notify-queue`).
+ *   - Settings (owners who can edit): the runtime settings `notify.*`, a test send, the kinds' config record.
  *
- * The read-only `web` role sees the analytics only: the status, config and controls are owner routes (403 for viewers).
- * Only the time range of the filter bar applies (backend rows have no device, artifact or place).
+ * The read-only `web` role sees the analytics only: the status, config, lists and controls are owner routes (403).
+ * Only the time range applies (backend rows have no device, artifact or place), so the page has its own range picker.
  */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, Plus, Send, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { CircleAlert, Send } from "lucide-react";
 import { useSearchParams } from "react-router";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
-import { EmptyState, JsonBlock, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
-import { DataTable, type DataColumn } from "@/components/data-table";
+import { ChangeChip } from "@/components/ChangeChip";
+import { Metric, QueryState } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
-import { describeRange } from "@/lib/filters";
-import { fmtAgo, fmtInt, fmtPct, fmtTime, plural } from "@/lib/format";
+import { change } from "@/lib/benchmarks";
+import { describeRange, isoDate, RANGE_LABELS, type RangePreset } from "@/lib/filters";
+import { fmtInt, fmtPct, fmtTime } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
-import type { NotifyRecentSend, NotifyFunnelCounts, NotifyFunnelResult, NotifyHalt, NotifyOptinResult, NotifyQueueFailure, NotifyQueueResult, NotifyStatus } from "@/lib/types";
-import { PlayerPanel, SEND_COLUMNS } from "./notifications/PlayerPanel";
+import type { Filters, NotifyHalt, NotifyStatus } from "@/lib/types";
+import { attentionItems, NOTIFY_TABS, type NotifyTab } from "./notifications/attention";
+import { FunnelTab } from "./notifications/FunnelTab";
+import { HealthTab, healthSentence, StatusDot } from "./notifications/HealthTab";
+import { InboxTab } from "./notifications/InboxTab";
+import { KindsTab } from "./notifications/KindsTab";
+import { QueueTab, RightNow } from "./notifications/QueueTab";
+import { NOTIFY_STATUS_KEY, SettingsTab } from "./notifications/SettingsTab";
+import { SubscribersTab, useOptinCounts } from "./notifications/SubscribersTab";
 
-export const NOTIFY_STATUS_KEY = ["notify-status"] as const;
-const PICKED = "data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+export { NOTIFY_STATUS_KEY, placeholdersOf, rowsToParams, type ParamRow } from "./notifications/SettingsTab";
+
 const ALL_KINDS = "__all";
-const tick = (d: string) => d.slice(5);
-const hourTick = (iso: string) => iso.slice(11, 16);
-
-// Funnel ------------------------------------------------------------------------------------------------------------------
-
-type KindRow = NotifyFunnelCounts & { kind: string };
-type DayRow = NotifyFunnelCounts & { date: string; kind: string };
-
-const rate = (id: string, header: string, get: (r: NotifyFunnelCounts) => number, title: string) =>
-	({ id, header, type: "number", align: "right", title, accessor: (r: NotifyFunnelCounts) => get(r), cell: (r: NotifyFunnelCounts) => fmtPct(get(r)), format: (v: unknown) => fmtPct(v as number) }) as const;
-const count = (id: keyof NotifyFunnelCounts, header: string, title?: string) =>
-	({ id, header, type: "number", align: "right", ...(title ? { title } : {}), accessor: (r: NotifyFunnelCounts) => r[id], cell: (r: NotifyFunnelCounts) => fmtInt(r[id]) }) as const;
-
-const STEP_COLUMNS: DataColumn<NotifyFunnelCounts>[] = [
-	count("wants", "Wants", "want rows from game servers"),
-	count("planned", "Planned"),
-	count("sent", "Sent", "real sends: not dry runs, not tests"),
-	count("dry", "Dry run", "planned and logged, never sent"),
-	count("opened", "Opened"),
-	rate("openRate", "Open rate", (r) => r.openRate, "opened / sent"),
-	count("played", "Played 1 min+"),
-	rate("playedRate", "Played rate", (r) => r.playedRate, "played at least a minute / opened"),
-	count("returnedD1", "Returned D1", "players sent to on a day who played the next day"),
-	count("assisted", "Assisted", "never opened it, came back within 24 h"),
-	count("tests", "Test sends", "real sends from Send a test: they reach Roblox but stay out of Sent and the rates"),
-	{ ...count("players", "Players"), defaultHidden: true },
-];
-
-const KIND_COLUMNS: DataColumn<KindRow>[] = [{ id: "kind", header: "Kind", accessor: (r) => r.kind, cell: (r) => <span className="font-mono">{r.kind || "(none)"}</span> }, ...(STEP_COLUMNS as DataColumn<KindRow>[])];
-const DAY_COLUMNS: DataColumn<DayRow>[] = [
-	{ id: "date", header: "Day", accessor: (r) => r.date, cell: (r) => <span className="tabular-nums">{r.date}</span> },
-	{ id: "kind", header: "Kind", accessor: (r) => r.kind, type: "enum", cell: (r) => <span className="font-mono">{r.kind || "(none)"}</span> },
-	...(STEP_COLUMNS as DataColumn<DayRow>[]),
-];
-
-const funnelChart: ChartConfig = { sent: { label: "Sent", color: "var(--chart-1)" }, opened: { label: "Opened", color: "var(--chart-2)" }, played: { label: "Played 1 min+", color: "var(--chart-3)" } };
-
-function FunnelSection({ data }: { data: NotifyFunnelResult }) {
-	const t = data.totals;
-	return (
-		<>
-			<div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-				<Metric label="Sent" value={fmtInt(t.sent)} sub={`${fmtInt(t.planned)} planned, ${fmtInt(t.wants)} wanted${t.tests ? `, +${fmtInt(t.tests)} test ${t.tests === 1 ? "send" : "sends"} apart` : ""}`} />
-				<Metric label="Open rate" value={t.sent ? fmtPct(t.openRate) : "–"} sub={`${fmtInt(t.opened)} opened`} />
-				<Metric label="Played 1 min+" value={t.opened ? fmtPct(t.playedRate) : "–"} sub={`${fmtInt(t.played)} of the opened`} />
-				<Metric label="Returned D1" value={fmtInt(t.returnedD1)} sub={t.players ? `${fmtPct(t.returnRate)} of players sent to` : "no sends"} />
-				<Metric label="Assisted returns" value={fmtInt(t.assisted)} sub="came back within 24 h without opening" />
-				<Metric label="Dry run / test sends" value={`${fmtInt(t.dry)} / ${fmtInt(t.tests)}`} sub="test sends reach Roblox; neither counts in Sent or the rates" tone="muted" />
-			</div>
-			<Section title="Funnel" description="Wants, planned, sent, opened, played at least a minute, back the next day. Sends per day (UTC) by the day of the send; rates per kind.">
-				<div className="space-y-5">
-					<ChartContainer config={funnelChart} className="aspect-auto h-48 w-full">
-						<BarChart data={data.daily} margin={{ top: 4, right: 4, bottom: 0, left: -4 }} barCategoryGap={2}>
-							<CartesianGrid vertical={false} />
-							<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={24} tickFormatter={tick} />
-							<YAxis tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-							<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(d) => String(d)} />} />
-							<ChartLegend content={<ChartLegendContent />} />
-							<Bar dataKey="sent" fill="var(--color-sent)" radius={[3, 3, 0, 0]} maxBarSize={18} isAnimationActive={false} />
-							<Bar dataKey="opened" fill="var(--color-opened)" radius={[3, 3, 0, 0]} maxBarSize={18} isAnimationActive={false} />
-							<Bar dataKey="played" fill="var(--color-played)" radius={[3, 3, 0, 0]} maxBarSize={18} isAnimationActive={false} />
-						</BarChart>
-					</ChartContainer>
-					<div className="min-w-0 space-y-1.5">
-						<h3 className="text-sm font-medium">By kind</h3>
-						<DataTable id="notify-kinds" label="Funnel by kind" columns={KIND_COLUMNS} data={data.kinds} rowId={(r) => r.kind} density="compact" maxHeight="22rem" />
-					</div>
-					<div className="min-w-0 space-y-1.5">
-						<h3 className="text-sm font-medium">By kind and day</h3>
-						<DataTable id="notify-days" label="Funnel by kind and day" columns={DAY_COLUMNS} data={data.days} rowId={(r) => `${r.date}|${r.kind}`} density="compact" maxHeight="24rem" />
-					</div>
-				</div>
-			</Section>
-		</>
-	);
-}
-
-// Opt-in ------------------------------------------------------------------------------------------------------------------
-
-/** A row of small numbers in one bordered strip (instead of a card per number): wraps to 3 / 2 columns on narrow cards. */
-function StatStrip({ items }: { items: { label: string; value: string; sub?: string }[] }) {
-	return (
-		<dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-3 2xl:grid-cols-5">
-			{items.map((item) => (
-				<div key={item.label} className="space-y-0.5 bg-card px-3 py-2.5">
-					<dt className="text-xs font-medium text-muted-foreground">{item.label}</dt>
-					<dd className="text-xl font-semibold tracking-tight tabular-nums">{item.value}</dd>
-					{item.sub ? <dd className="text-xs text-muted-foreground">{item.sub}</dd> : null}
-				</div>
-			))}
-		</dl>
-	);
-}
-
-type WhereRow = NotifyOptinResult["byWhere"][number];
-const WHERE_COLUMNS: DataColumn<WhereRow>[] = [
-	{ id: "where", header: "Where", accessor: (r) => r.where, cell: (r) => (r.where ? <span className="font-mono">{r.where}</span> : <span className="text-muted-foreground">(none)</span>) },
-	{ id: "checks", header: "Checks", type: "number", align: "right", accessor: (r) => r.checks, cell: (r) => fmtInt(r.checks) },
-	{ id: "canPrompt", header: "Can prompt", type: "number", align: "right", accessor: (r) => r.canPrompt, cell: (r) => fmtInt(r.canPrompt) },
-	{ id: "errors", header: "Errors", type: "number", align: "right", accessor: (r) => r.errors, cell: (r) => fmtInt(r.errors) },
-	{ id: "shown", header: "Shown", type: "number", align: "right", accessor: (r) => r.shown, cell: (r) => fmtInt(r.shown) },
-	{ id: "shownRate", header: "Shown rate", type: "number", align: "right", title: "shown / checks", accessor: (r) => r.shownRate, cell: (r) => fmtPct(r.shownRate) },
-	{ id: "closed", header: "Closed", type: "number", align: "right", accessor: (r) => r.closed, cell: (r) => fmtInt(r.closed) },
-	{ id: "avgShownSecs", header: "Up for", hint: "s", type: "number", align: "right", accessor: (r) => r.avgShownSecs, cell: (r) => (r.avgShownSecs === null ? "–" : String(r.avgShownSecs)) },
-];
-
-function OptinSection({ data }: { data: NotifyOptinResult }) {
-	const t = data.totals;
-	return (
-		<Section className="min-w-0" title="Opt-in prompt" description="The game's prompt: checked (can it show?), shown, closed. Roblox doesn't say what the player picked; the backend infers it from its sends.">
-			<div className="space-y-3">
-				<StatStrip
-					items={[
-						{ label: "Checks", value: fmtInt(t.checks), sub: `${fmtInt(t.canPrompt)} could prompt, ${fmtInt(t.errors)} errors` },
-						{ label: "Shown", value: fmtInt(t.shown), sub: t.checks ? `${fmtPct(t.shownRate)} of checks` : undefined },
-						{ label: "Closed", value: fmtInt(t.closed), sub: t.avgShownSecs === null ? undefined : `up ${t.avgShownSecs} s on average` },
-						{ label: "Subscribed", value: fmtInt(t.subscribed), sub: "from accepted sends" },
-						{ label: "Not subscribed", value: fmtInt(t.notSubscribed), sub: "from refused sends" },
-					]}
-				/>
-				{data.byWhere.length ? (
-					<DataTable id="notify-optin-where" label="Opt-in by where" columns={WHERE_COLUMNS} data={data.byWhere} rowId={(r) => r.where} density="compact" maxHeight="18rem" />
-				) : (
-					<EmptyState>No opt-in prompt rows in this range.</EmptyState>
-				)}
-			</div>
-		</Section>
-	);
-}
-
-// Queue and failures ------------------------------------------------------------------------------------------------------
-
-const queueChart: ChartConfig = {
-	planned: { label: "Planned", color: "var(--chart-4)" },
-	sent: { label: "Sent", color: "var(--chart-1)" },
-	dry: { label: "Dry run", color: "var(--chart-3)" },
-	failed: { label: "Failed", color: "var(--chart-5)" },
-	rateLimited: { label: "429", color: "var(--status-critical)" },
-};
-
-type WhyRow = { kind: string; why: string; n: number };
-const whyColumns = (what: string): DataColumn<WhyRow>[] => [
-	{ id: "kind", header: "Kind", accessor: (r) => r.kind, type: "enum", cell: (r) => <span className="font-mono">{r.kind || "(none)"}</span> },
-	{ id: "why", header: "Why", accessor: (r) => r.why, type: "enum", cell: (r) => <span className="font-mono">{r.why || "(none)"}</span> },
-	{ id: "n", header: what, type: "number", align: "right", accessor: (r) => r.n, cell: (r) => fmtInt(r.n) },
-];
-const PLANNED_COLUMNS = whyColumns("Planned");
-const SKIPPED_COLUMNS = whyColumns("Skipped");
-
-const FAILURE_COLUMNS: DataColumn<NotifyQueueFailure>[] = [
-	{ id: "kind", header: "Kind", accessor: (r) => r.kind, type: "enum", cell: (r) => <span className="font-mono">{r.kind || "(none)"}</span> },
-	{ id: "http", header: "HTTP", type: "number", align: "right", accessor: (r) => r.http, cell: (r) => (r.http === null ? "network" : String(r.http)) },
-	{ id: "code", header: "Code", accessor: (r) => r.code, cell: (r) => <span className="font-mono">{r.code || "–"}</span> },
-	{ id: "failures", header: "Failures", type: "number", align: "right", accessor: (r) => r.failures, cell: (r) => fmtInt(r.failures) },
-	{ id: "final", header: "Final", type: "number", align: "right", title: "ended the send (no retry)", accessor: (r) => r.final, cell: (r) => fmtInt(r.final) },
-	{ id: "sends", header: "Sends", type: "number", align: "right", accessor: (r) => r.sends, cell: (r) => fmtInt(r.sends) },
-	{ id: "lastAt", header: "Last", accessor: (r) => r.lastAt, cell: (r) => (r.lastAt ? <span title={fmtTime(r.lastAt)}>{fmtAgo(r.lastAt)}</span> : "–") },
-];
-
-function LiveQueue({ status }: { status: NotifyStatus }) {
-	return (
-		<div className="space-y-2">
-			<div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-				<Metric label="Pending" value={fmtInt(status.queue.pending)} sub={`${fmtInt(status.queue.due1h)} due in the next hour`} />
-				<Metric label="Sending" value={fmtInt(status.queue.sending)} />
-				<Metric
-					label="Rate"
-					value={`${status.bucket.rate}/s`}
-					sub={`${Math.floor(status.bucket.tokens)} tokens, ceiling ${status.rate}/s`}
-					hint={status.bucket.last429At ? `last 429 ${fmtAgo(status.bucket.last429At)}` : "no 429 yet"}
-				/>
-				<Metric label="Last 24 h" value={fmtInt(status.sends24h.sent)} sub={`sent; ${fmtInt(status.sends24h.failed)} failed, ${fmtInt(status.sends24h.dry)} dry`} />
-			</div>
-			{status.outbox !== undefined || status.rowsDropped || status.presenceStaleHours !== undefined ? (
-				<div className="flex flex-wrap gap-x-4 gap-y-1">
-					{status.outbox !== undefined ? <KeyValue label="Outbox">{fmtInt(status.outbox)} rows waiting</KeyValue> : null}
-					{status.rowsDropped ? <KeyValue label="Rows dropped">{fmtInt(status.rowsDropped)}</KeyValue> : null}
-					{status.presenceStaleHours !== undefined ? <KeyValue label="Presence stale after">{fmtInt(status.presenceStaleHours)} h</KeyValue> : null}
-				</div>
-			) : null}
-		</div>
-	);
-}
-
-function QueueSection({ data, status }: { data: NotifyQueueResult; status: NotifyStatus | undefined }) {
-	const t = data.totals;
-	return (
-		<Section
-			title="Queue"
-			description={status ? "Live from the backend's sender, then its history in this range (per hour, UTC)." : "The sender's history in this range (per hour, UTC). The live queue is for owners."}
-		>
-			<div className="space-y-3">
-				{status ? <LiveQueue status={status} /> : null}
-				<div className="flex flex-wrap gap-x-4 gap-y-1">
-					<KeyValue label="Planned">{fmtInt(t.planned)}</KeyValue>
-					<KeyValue label="Sent">{fmtInt(t.sent)}</KeyValue>
-					<KeyValue label="Dry run">{fmtInt(t.dry)}</KeyValue>
-					<KeyValue label="Failed">{fmtInt(t.failed)}</KeyValue>
-					<KeyValue label="429s">{fmtInt(t.rateLimited)}</KeyValue>
-					<KeyValue label="Skipped">{fmtInt(t.skipped)}</KeyValue>
-					{t.last429At ? <KeyValue label="Last 429">{fmtTime(t.last429At)}</KeyValue> : null}
-				</div>
-				<ChartContainer config={queueChart} className="aspect-auto h-52 w-full">
-					<BarChart data={data.hours} margin={{ top: 4, right: 4, bottom: 0, left: -4 }} barCategoryGap={1}>
-						<CartesianGrid vertical={false} />
-						<XAxis dataKey="hour" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} tickFormatter={hourTick} />
-						<YAxis tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-						<ChartTooltip cursor={{ fillOpacity: 0.4 }} content={<ChartTooltipContent labelFormatter={(d) => fmtTime(String(d))} />} />
-						<ChartLegend content={<ChartLegendContent />} />
-						<Bar dataKey="planned" fill="var(--color-planned)" maxBarSize={12} isAnimationActive={false} />
-						<Bar dataKey="sent" stackId="out" fill="var(--color-sent)" maxBarSize={12} isAnimationActive={false} />
-						<Bar dataKey="dry" stackId="out" fill="var(--color-dry)" maxBarSize={12} isAnimationActive={false} />
-						<Bar dataKey="failed" fill="var(--color-failed)" maxBarSize={12} isAnimationActive={false} />
-						<Bar dataKey="rateLimited" fill="var(--color-rateLimited)" maxBarSize={12} isAnimationActive={false} />
-					</BarChart>
-				</ChartContainer>
-				<div className="grid gap-3 lg:grid-cols-2">
-					<div className="min-w-0 space-y-1">
-						<h3 className="text-sm font-medium">Planned, by why</h3>
-						{data.planned.length ? (
-							<DataTable id="notify-planned" label="Planned by kind and why" columns={PLANNED_COLUMNS} data={data.planned.map((r) => ({ kind: r.kind, why: r.why, n: r.planned }))} rowId={(r) => `${r.kind}|${r.why}`} density="compact" maxHeight="16rem" />
-						) : (
-							<EmptyState>Nothing planned in this range.</EmptyState>
-						)}
-					</div>
-					<div className="min-w-0 space-y-1">
-						<h3 className="text-sm font-medium">Skipped, by why</h3>
-						{data.skipped.length ? (
-							<DataTable id="notify-skipped" label="Skipped by kind and why" columns={SKIPPED_COLUMNS} data={data.skipped.map((r) => ({ kind: r.kind, why: r.why, n: r.skipped }))} rowId={(r) => `${r.kind}|${r.why}`} density="compact" maxHeight="16rem" />
-						) : (
-							<EmptyState>Nothing skipped in this range.</EmptyState>
-						)}
-					</div>
-				</div>
-			</div>
-		</Section>
-	);
-}
-
-function FailuresSection({ data, status }: { data: NotifyQueueResult; status: NotifyStatus | undefined }) {
-	return (
-		<Section
-			className="min-w-0"
-			title="Failures"
-			description="Sends Roblox refused, by HTTP status and code. A player who isn't opted in is muted for 7 days."
-			actions={status ? <Badge variant="outline">{plural(status.mutes, "muted player")}</Badge> : undefined}
-		>
-			{data.failures.length ? (
-				<DataTable id="notify-failures" label="Failures by http and code" columns={FAILURE_COLUMNS} data={data.failures} rowId={(r) => `${r.kind}|${r.http}|${r.code}`} density="compact" maxHeight="18rem" />
-			) : (
-				<EmptyState>No failed sends in this range.</EmptyState>
-			)}
-		</Section>
-	);
-}
-
-// Recent sends (owners) ----------------------------------------------------------------------------------------------------
-
-const RECENT_LIMIT = 100;
-
-function RecentSection({ kind }: { kind: string }) {
-	const [, setParams] = useSearchParams();
-	const q = useQuery({ queryKey: ["notify-recent", kind], queryFn: ({ signal }) => api.notifyRecent({ limit: RECENT_LIMIT, ...(kind ? { kind } : {}) }, signal), refetchInterval: 15_000, retry: false });
-	// A player's name opens the Player panel below (same page, by UserId) and scrolls to it.
-	const openPlayer = (uid: number) => {
-		setParams((current) => {
-			const copy = new URLSearchParams(current);
-			copy.set("player", String(uid));
-			copy.set("by", "uid");
-			return copy;
-		});
-		requestAnimationFrame(() => document.getElementById("notify-player-panel")?.scrollIntoView?.({ behavior: "smooth", block: "start" }));
-	};
-	const columns: DataColumn<NotifyRecentSend>[] = [
-		{
-			id: "player",
-			header: "Player",
-			accessor: (r) => r.name ?? String(r.userId),
-			cell: (r) => (
-				<button type="button" className="text-left underline-offset-2 hover:underline" onClick={() => openPlayer(r.userId)} title={`UserId ${r.userId}`}>
-					{r.name ? <span>@{r.name}</span> : <span className="font-mono text-xs">{r.userId}</span>}
-				</button>
-			),
-		},
-		...(SEND_COLUMNS as unknown as DataColumn<NotifyRecentSend>[]),
-	];
-	return (
-		<Section
-			title="Recent notifications"
-			description={`The newest ${RECENT_LIMIT} sends of everyone${kind ? ` (kind ${kind})` : ""}, live (every 15 s): planned, sent, failed, opened and played. Pick a player to open them below.`}
-			actions={q.data ? <Badge variant="outline">{plural(q.data.sends.length, "send")}</Badge> : undefined}
-		>
-			<QueryState query={q} loadingRows={4} isEmpty={(d) => d.sends.length === 0} empty="Nothing planned or sent yet.">
-				{(d) => <DataTable id="notify-recent" label="Recent notifications" columns={columns} data={d.sends} rowId={(r) => r.nid} density="compact" maxHeight="28rem" />}
-			</QueryState>
-		</Section>
-	);
-}
-
-// Controls (owners) ---------------------------------------------------------------------------------------------------------
-
-function OnOff({ label, value, disabled, onChange, on = "On", off = "Off" }: { label: string; value: boolean; disabled?: boolean; onChange(next: boolean): void; on?: string; off?: string }) {
-	return (
-		<ToggleGroup type="single" variant="outline" size="sm" spacing={0} value={value ? "on" : "off"} disabled={disabled} onValueChange={(v) => v && onChange(v === "on")} aria-label={label}>
-			<ToggleGroupItem value="on" className={PICKED}>
-				{on}
-			</ToggleGroupItem>
-			<ToggleGroupItem value="off" className={PICKED}>
-				{off}
-			</ToggleGroupItem>
-		</ToggleGroup>
-	);
-}
-
-/** A test param row: `fixed` = a placeholder of the kind's text (its name can't be edited or removed). */
-export interface ParamRow {
-	id: number;
-	name: string;
-	value: string;
-	fixed: boolean;
-}
-
-/** The `{placeholders}` of a kind's text, in order, each once (the backend's PARAM_NAME rule). */
-export function placeholdersOf(text: string | undefined): string[] {
-	const out: string[] = [];
-	for (const m of (text ?? "").matchAll(/\{([A-Za-z0-9_-]{1,32})\}/g)) if (!out.includes(m[1])) out.push(m[1]);
-	return out;
-}
-
-/** The rows as params: blank custom rows skipped; a value without a name or a name twice throws. */
-export function rowsToParams(rows: ParamRow[]): Record<string, string> | undefined {
-	const out: Record<string, string> = {};
-	for (const row of rows) {
-		const name = row.name.trim();
-		if (!name) {
-			if (row.value.trim()) throw new Error("A param has a value but no name.");
-			continue;
-		}
-		if (name in out) throw new Error(`"${name}" is there twice.`);
-		out[name] = row.value;
-	}
-	return Object.keys(out).length ? out : undefined;
-}
-
-let nextRowId = 1;
-function rowsFor(text: string | undefined, keep: ParamRow[] = []): ParamRow[] {
-	const fixed = placeholdersOf(text).map((name) => ({ id: nextRowId++, name, value: keep.find((r) => r.name === name)?.value ?? "", fixed: true }));
-	const custom = keep.filter((r) => !r.fixed && !fixed.some((f) => f.name === r.name.trim()));
-	return [...fixed, ...custom];
-}
-
-function TestSend({ kinds }: { kinds: { kind: string; text?: string }[] }) {
-	const [userId, setUserId] = useState("");
-	const [kind, setKind] = useState("");
-	const picked = kind || kinds[0]?.kind || "";
-	const textOf = (k: string) => kinds.find((x) => x.kind === k)?.text;
-	const [rows, setRows] = useState<ParamRow[]>(() => rowsFor(textOf(picked)));
-	const [rowsKind, setRowsKind] = useState(picked);
-	// the kinds arrive after the first render, or the kind changed: re-seed the placeholder rows, keeping typed values and custom rows
-	if (rowsKind !== picked) {
-		setRowsKind(picked);
-		setRows(rowsFor(textOf(picked), rows));
-	}
-	const [data, setData] = useState("");
-	const [problem, setProblem] = useState<string | null>(null);
-	const send = useMutation({ mutationFn: (input: Parameters<typeof api.notifyTest>[0]) => api.notifyTest(input) });
-	const edit = (id: number, patch: Partial<ParamRow>) => setRows((all) => all.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-	const submit = (e: FormEvent) => {
-		e.preventDefault();
-		setProblem(null);
-		const id = Number(userId.trim());
-		if (!Number.isSafeInteger(id) || id <= 0) return setProblem("UserId must be a positive whole number.");
-		if (!picked) return setProblem("Pick a kind.");
-		let p: Record<string, string> | undefined;
-		try {
-			p = rowsToParams(rows);
-		} catch (error) {
-			return setProblem((error as Error).message);
-		}
-		send.mutate({ userId: id, kind: picked, ...(p ? { params: p } : {}), ...(data.trim() ? { data: data.trim() } : {}) });
-	};
-	return (
-		<form className="space-y-3" onSubmit={submit} aria-label="Send a test">
-			<div className="grid gap-3 sm:grid-cols-2">
-				<div className="space-y-1">
-					<Label htmlFor="notify-test-user">UserId</Label>
-					<Input id="notify-test-user" inputMode="numeric" className="h-8 tabular-nums" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="123456789" />
-				</div>
-				<div className="space-y-1">
-					<Label htmlFor="notify-test-kind">Kind</Label>
-					<Select value={picked} onValueChange={setKind}>
-						<SelectTrigger id="notify-test-kind" size="sm" className="w-full" aria-label="Test kind">
-							<SelectValue placeholder="No kinds pushed" />
-						</SelectTrigger>
-						<SelectContent>
-							{kinds.map((k) => (
-								<SelectItem key={k.kind} value={k.kind}>
-									{k.kind}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</div>
-				<fieldset className="space-y-1.5 sm:col-span-2" aria-label="Params">
-					<legend className="text-sm font-medium leading-none">Params</legend>
-					{textOf(picked) ? <p className="font-mono text-xs text-muted-foreground">{`Text: ${textOf(picked)}`}</p> : null}
-					{rows.map((row, index) => (
-						<div key={row.id} className="flex items-center gap-2">
-							<Input
-								aria-label={`Param ${index + 1} name`}
-								className="h-8 w-1/3 font-mono text-xs"
-								spellCheck={false}
-								readOnly={row.fixed}
-								value={row.name}
-								placeholder="name"
-								onChange={(e) => edit(row.id, { name: e.target.value })}
-							/>
-							<Input aria-label={`${row.name || `Param ${index + 1}`} value`} className="h-8 flex-1 font-mono text-xs" spellCheck={false} value={row.value} placeholder="value" onChange={(e) => edit(row.id, { value: e.target.value })} />
-							{row.fixed ? (
-								<span className="w-8" aria-hidden />
-							) : (
-								<Button type="button" variant="ghost" size="icon" className="size-8" aria-label={`Remove ${row.name || `param ${index + 1}`}`} onClick={() => setRows((all) => all.filter((r) => r.id !== row.id))}>
-									<X />
-								</Button>
-							)}
-						</div>
-					))}
-					<Button type="button" variant="outline" size="sm" onClick={() => setRows((all) => [...all, { id: nextRowId++, name: "", value: "", fixed: false }])}>
-						<Plus />
-						Add param
-					</Button>
-				</fieldset>
-				<div className="space-y-1">
-					<Label htmlFor="notify-test-data">Launch data</Label>
-					<Input id="notify-test-data" className="h-8 font-mono text-xs" maxLength={64} value={data} onChange={(e) => setData(e.target.value)} placeholder="optional, up to 64 bytes" />
-				</div>
-			</div>
-			<div className="flex flex-wrap items-center gap-3">
-				<Button type="submit" size="sm" disabled={send.isPending || !kinds.length}>
-					<Send />
-					Send a test
-				</Button>
-				
-			</div>
-			{problem ? <p className="text-sm text-destructive">{problem}</p> : null}
-			{send.isError ? <p className="text-sm text-destructive">{send.error.message}</p> : null}
-			{send.data ? (
-				<p role="status" className="text-sm">
-					Test <span className="font-mono">{send.data.nid}</span>: {send.data.status}
-				</p>
-			) : null}
-		</form>
-	);
-}
-
-function ConfigView() {
-	const [open, setOpen] = useState(false);
-	const q = useQuery({ queryKey: ["notify-config"], queryFn: ({ signal }) => api.notifyConfig(signal), enabled: open });
-	return (
-		<div className="space-y-2">
-			<Button type="button" variant="outline" size="sm" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-				{open ? "Hide the pushed config" : "Show the pushed config"}
-			</Button>
-			{open ? (
-				<QueryState query={q} loadingRows={2}>
-					{(view) =>
-						view.config ? (
-							<div className="space-y-1">
-								<p className="text-xs text-muted-foreground">
-									Pushed {view.updatedAt ? fmtAgo(view.updatedAt) : "at an unknown time"}
-									{view.by ? ` by ${view.by}` : ""}. Change it with <code className="font-mono">typetorch notify push</code>.
-								</p>
-								<JsonBlock value={view.config} />
-							</div>
-						) : (
-							<EmptyState>No config pushed yet: run <code className="font-mono">typetorch notify push</code>.</EmptyState>
-						)
-					}
-				</QueryState>
-			) : null}
-		</div>
-	);
-}
-
-function Controls({ status }: { status: NotifyStatus }) {
-	const client = useQueryClient();
-	const [rate, setRate] = useState(String(status.rate));
-	const [notice, setNotice] = useState<string | null>(null);
-	const save = useMutation({
-		mutationFn: (changes: Record<string, unknown>) => api.saveSettings(changes),
-		onSuccess: () => setNotice("Saved; in effect now."),
-		onSettled: () => void client.invalidateQueries({ queryKey: NOTIFY_STATUS_KEY }),
-	});
-	const set = (key: string, value: unknown) => {
-		setNotice(null);
-		save.mutate({ [key]: value });
-	};
-	const rateNumber = Number(rate);
-	const rateOk = Number.isFinite(rateNumber) && rateNumber >= 1 && rateNumber <= 4000;
-	const busy = save.isPending;
-	return (
-		<Section className="min-w-0" title="Controls" description="Runtime settings (audited, no redeploy). Dry run plans and logs every send without posting it to Roblox.">
-			<div className="space-y-4">
-				<div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-					<div className="space-y-1">
-						<Label>Sending</Label>
-						<OnOff label="Sending" value={status.enabled} disabled={busy} onChange={(v) => set("notify.enabled", v)} on="On" off="Paused" />
-					</div>
-					<div className="space-y-1">
-						<Label>Dry run</Label>
-						<OnOff label="Dry run" value={status.dryRun} disabled={busy} onChange={(v) => set("notify.dryRun", v)} />
-					</div>
-					<div className="space-y-1">
-						<Label>Day clock</Label>
-						<ToggleGroup type="single" variant="outline" size="sm" spacing={0} value={status.clock} disabled={busy} onValueChange={(v) => v && set("notify.clock", v)} aria-label="Day clock">
-							<ToggleGroupItem value="rolling24" className={PICKED}>
-								Rolling 24 h
-							</ToggleGroupItem>
-							<ToggleGroupItem value="utc_day" className={PICKED}>
-								UTC day
-							</ToggleGroupItem>
-						</ToggleGroup>
-					</div>
-					<form
-						className="space-y-1"
-						onSubmit={(e) => {
-							e.preventDefault();
-							if (rateOk) set("notify.rate", Math.round(rateNumber));
-						}}
-					>
-						<Label htmlFor="notify-rate">Rate ceiling (sends / s)</Label>
-						<div className="flex gap-2">
-							<Input id="notify-rate" inputMode="numeric" className="h-8 w-24 tabular-nums" aria-invalid={rateOk ? undefined : true} value={rate} onChange={(e) => setRate(e.target.value)} />
-							<Button type="submit" size="sm" variant="outline" disabled={busy || !rateOk || Math.round(rateNumber) === status.rate}>
-								Save
-							</Button>
-						</div>
-					</form>
-				</div>
-				<div className="flex flex-wrap gap-2 text-xs">
-					<Badge variant={status.configured.universe && status.configured.apiKey ? "outline" : "destructive"}>
-						{status.configured.universe && status.configured.apiKey ? "Open Cloud configured" : `Missing ${[!status.configured.universe && "universe", !status.configured.apiKey && "API key"].filter(Boolean).join(" and ")}`}
-					</Badge>
-					<Badge variant={status.keys.current ? "outline" : "destructive"}>{status.keys.current ? `Signing key set${status.keys.previous ? " (+ previous)" : ""}` : "No signing key"}</Badge>
-					<Badge variant={status.config ? "outline" : "destructive"}>{status.config ? "Config pushed" : "No config pushed"}</Badge>
-				</div>
-				{save.isError ? <p className="text-sm text-destructive">{save.error.message}</p> : null}
-				{notice ? (
-					<p role="status" className="text-sm text-muted-foreground">
-						{notice}
-					</p>
-				) : null}
-				<div className="space-y-1">
-					<h3 className="text-sm font-medium">Kinds</h3>
-					{status.kinds.length ? (
-						<div className="overflow-x-auto rounded-lg border">
-							<table className="w-full min-w-[28rem] text-sm">
-								<thead className="text-xs text-muted-foreground">
-									<tr className="border-b">
-										<th className="px-3 py-2 text-left font-medium">Kind</th>
-										<th className="px-3 py-2 text-left font-medium">Template</th>
-										<th className="px-3 py-2 text-right font-medium">Pending</th>
-										<th className="px-3 py-2 text-left font-medium">Sending</th>
-									</tr>
-								</thead>
-								<tbody>
-									{status.kinds.map((k) => (
-										<tr key={k.kind} className="border-b last:border-0">
-											<td className="px-3 py-2 font-mono">
-												{k.kind}
-												{k.halted ? (
-													<Badge variant="destructive" className="ml-2">
-														stopped
-													</Badge>
-												) : null}
-												{k.text ? <p className="mt-0.5 font-sans text-xs whitespace-normal break-words text-muted-foreground">{k.text}</p> : null}
-											</td>
-											<td className="px-3 py-2">{k.template ? "set" : <span className="text-muted-foreground">none (never sent)</span>}</td>
-											<td className="px-3 py-2 text-right tabular-nums">{fmtInt(k.pending)}</td>
-											<td className="px-3 py-2">
-												<OnOff label={`Kind ${k.kind}`} value={k.enabled} disabled={busy} onChange={(v) => set(`notify.kinds.${k.kind}.enabled`, v)} />
-											</td>
-										</tr>
-									))}
-								</tbody>
-							</table>
-						</div>
-					) : (
-						<EmptyState>No kinds yet: push the game's notifications config with typetorch notify push.</EmptyState>
-					)}
-				</div>
-				<ConfigView />
-			</div>
-		</Section>
-	);
-}
+const DAY_MS = 86_400_000;
+const OWNER_TABS: readonly NotifyTab[] = ["inbox", "subscribers", "settings"];
+const TAB_LABELS: Record<NotifyTab, string> = { health: "Health", funnel: "Funnel", inbox: "Inbox", subscribers: "Subscribers", kinds: "Kinds", queue: "Queue & errors", settings: "Settings" };
 
 function HaltedBanner({ status }: { status: NotifyStatus }) {
 	const all = status.haltedAll ?? status.halted.find((h) => !h.kind) ?? null;
@@ -677,9 +91,7 @@ function HaltedBanner({ status }: { status: NotifyStatus }) {
 					<CircleAlert />
 					<AlertTitle>Kind {h.kind} stopped</AlertTitle>
 					<AlertDescription>
-						<p>
-							Kind {h.kind} stopped: its template (message id) does not exist on Roblox. Fix the template, push the config, then turn the kind back on.
-						</p>
+						<p>Kind {h.kind} stopped: its template (message id) does not exist on Roblox. Fix the template, push the config, then turn the kind back on.</p>
 						<p className="text-xs">Since {fmtTime(h.at)}. Its pending sends wait until then.</p>
 					</AlertDescription>
 				</Alert>
@@ -693,7 +105,7 @@ function KindPicker({ kinds, value, onChange }: { kinds: string[]; value: string
 	if (!items.length) return null;
 	return (
 		<Select value={value || ALL_KINDS} onValueChange={(v) => onChange(v === ALL_KINDS ? "" : v)}>
-			<SelectTrigger size="sm" className="w-44" aria-label="Kind">
+			<SelectTrigger size="sm" className="w-40" aria-label="Kind">
 				<SelectValue />
 			</SelectTrigger>
 			<SelectContent>
@@ -708,70 +120,204 @@ function KindPicker({ kinds, value, onChange }: { kinds: string[]; value: string
 	);
 }
 
+/** The range alone (the shell's filter bar is off here: only the range applies to notify rows). */
+function RangePicker() {
+	const { state, set } = useFilters();
+	const today = isoDate(Date.now());
+	return (
+		<>
+			<Select
+				value={state.range}
+				onValueChange={(v) => {
+					const next = v as RangePreset;
+					if (next === "custom") set({ range: "custom", from: state.from ?? isoDate(Date.now() - 29 * DAY_MS), to: state.to ?? today });
+					else set({ range: next });
+				}}
+			>
+				<SelectTrigger size="sm" className="w-36" aria-label="Date range">
+					<SelectValue />
+				</SelectTrigger>
+				<SelectContent>
+					{(Object.keys(RANGE_LABELS) as RangePreset[]).map((r) => (
+						<SelectItem key={r} value={r}>
+							{RANGE_LABELS[r]}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+			{state.range === "custom" ? (
+				<span className="flex items-center gap-1">
+					<Input type="date" aria-label="From (UTC)" className="h-8 w-36" value={state.from ?? ""} max={state.to ?? today} onChange={(e) => set({ from: e.target.value || undefined })} />
+					<span className="text-xs text-muted-foreground">to</span>
+					<Input type="date" aria-label="To (UTC, inclusive)" className="h-8 w-36" value={state.to ?? ""} min={state.from} onChange={(e) => set({ to: e.target.value || undefined })} />
+				</span>
+			) : null}
+		</>
+	);
+}
+
+/** "Sending · 5/s" (or Paused / Stopped), opening the live queue in a popover. */
+function StatusChip({ status, onQueue }: { status: NotifyStatus; onQueue(): void }) {
+	const level = healthSentence(status, undefined).level;
+	const text = status.haltedAll ? "Stopped" : !status.enabled ? "Paused" : `Sending · ${status.bucket.rate}/s`;
+	return (
+		<Popover>
+			<PopoverTrigger asChild>
+				<Button type="button" variant="outline" size="sm" aria-label={`${text}: right now`}>
+					<StatusDot level={level} />
+					{text}
+				</Button>
+			</PopoverTrigger>
+			<PopoverContent align="end" className="w-80">
+				<div className="text-sm font-medium">Right now</div>
+				<RightNow status={status} />
+				<Button type="button" variant="ghost" size="sm" className="self-start" onClick={onQueue}>
+					Queue & errors
+				</Button>
+			</PopoverContent>
+		</Popover>
+	);
+}
+
+/** The same span right before the range, for the Sent card's change (day presets only). */
+function priorRange(range: RangePreset, now = Date.now()): Filters | null {
+	if (range === "custom" || range === "1h" || range === "6h") return null;
+	const days = Number.parseInt(range, 10);
+	if (!Number.isFinite(days)) return null;
+	return { from: isoDate(now - (2 * days - 1) * DAY_MS), to: isoDate(now - days * DAY_MS) };
+}
+
 export default function Notifications() {
 	const { state } = useFilters();
+	const [params, setParams] = useSearchParams();
 	const readOnly = isReadOnly(useAuth());
 	const [kind, setKind] = useParam("kind");
 	const options = kind ? { kind } : {};
 	const funnel = useAnalytics("notify-funnel", options);
+	const prior = priorRange(state.range);
+	const before = useAnalytics("notify-funnel", options, { enabled: prior !== null, ...(prior ? { filters: prior } : {}) });
 	const optin = useAnalytics("notify-optin");
 	const queue = useAnalytics("notify-queue", options);
 	const status = useQuery({ queryKey: NOTIFY_STATUS_KEY, queryFn: ({ signal }) => api.notifyStatus(signal), enabled: !readOnly, refetchInterval: 15_000, retry: false });
 	const live = status.data;
 	// A viewer (or an owner whose browser isn't trusted yet) gets 403: the analytics still show.
 	const forbidden = status.error instanceof ApiError && (status.error.status === 403 || status.error.status === 401);
+	const owner = !readOnly && !forbidden;
+	const counts = useOptinCounts(owner);
 	const kinds = [...new Set([...(live?.kinds.map((k) => k.kind) ?? []), ...(funnel.data?.kinds.map((k) => k.kind).filter(Boolean) ?? [])])].sort();
+
+	const rawTab = params.get("tab") as NotifyTab | null;
+	const fallback: NotifyTab = params.get("player") && owner ? "inbox" : "health";
+	const visible = NOTIFY_TABS.filter((t) => owner || !OWNER_TABS.includes(t));
+	const tab: NotifyTab = rawTab && visible.includes(rawTab) && (rawTab !== "settings" || owner) ? rawTab : fallback;
+	const goTab = (next: NotifyTab) =>
+		setParams((current) => {
+			const copy = new URLSearchParams(current);
+			if (next === "health") copy.delete("tab");
+			else copy.set("tab", next);
+			return copy;
+		});
+
+	const items = attentionItems({ status: live, queue: queue.data, optin: optin.data });
+	const queueIssues = items.filter((i) => i.tab === "queue").length;
+	const t = funnel.data?.totals;
+	const today = funnel.data?.daily.find((d) => d.date === isoDate(Date.now()))?.sent ?? 0;
+	const optinCounts = owner ? counts.data : undefined;
+
 	return (
-		<div className="mx-auto w-full max-w-[1480px] space-y-6">
-			<PageHeader
-				title="Notifications"
-				description={`Experience notifications, ${describeRange(state)}: what was sent, opened and played, the opt-in prompt and the sender.`}
-				actions={<KindPicker kinds={kinds} value={kind} onChange={setKind} />}
-			/>
-			{live ? <HaltedBanner status={live} /> : null}
-			{live && (!live.enabled || live.dryRun) ? (
-				<Alert>
-					<CircleAlert />
-					<AlertTitle>{!live.enabled ? "Sending is paused" : "Dry run"}</AlertTitle>
-					<AlertDescription>{!live.enabled ? "Nothing is planned or sent until it is turned back on." : "Sends are planned and logged, never posted to Roblox."}</AlertDescription>
-				</Alert>
-			) : null}
-			<QueryState query={funnel} loadingRows={6} isEmpty={(d) => d.kinds.length === 0} empty="No notification rows in this range. The game asks for notifications with TypeTorch.notifications().want(...).">
-				{(data) => <FunnelSection data={data} />}
-			</QueryState>
-			<div className="grid items-start gap-4 xl:grid-cols-2">
-				<QueryState query={optin} loadingRows={3}>
-					{(data) => <OptinSection data={data} />}
-				</QueryState>
-				<QueryState query={queue} loadingRows={3}>
-					{(data) => <FailuresSection data={data} status={live} />}
-				</QueryState>
-			</div>
-			<QueryState query={queue} loadingRows={4}>
-				{(data) => <QueueSection data={data} status={live} />}
-			</QueryState>
-			{readOnly || forbidden ? null : <RecentSection kind={kind} />}
-			{readOnly || forbidden ? (
-				<p className="text-sm text-muted-foreground">The live queue and the controls are for owners.</p>
-			) : (
-				<div className="grid items-start gap-4 xl:grid-cols-2">
-					{status.isError ? (
-						<Section title="Controls">
-							<QueryState query={status}>{() => null}</QueryState>
-						</Section>
-					) : live ? (
-						<Controls status={live} />
-					) : null}
-					<div className="min-w-0 space-y-4">
-						<PlayerPanel />
-						{live ? (
-							<Section title="Send a test" description="Goes out now, outside the caps, marked test (counted under Test sends, not Sent). In dry run it is only logged.">
-								<TestSend kinds={live.kinds.map((k) => ({ kind: k.kind, text: k.text }))} />
-							</Section>
-						) : null}
-					</div>
+		<div className="mx-auto w-full max-w-[1480px] space-y-5">
+			<div className="flex flex-wrap items-end justify-between gap-3">
+				<div className="min-w-0">
+					<h1 className="text-xl font-semibold tracking-tight">Notifications</h1>
+					<p className="text-sm text-muted-foreground">Experience notifications, {describeRange(state)}: what was sent, opened and played, who can get them and the sender.</p>
 				</div>
-			)}
+				<div className="flex flex-wrap items-center gap-2">
+					{live ? <StatusChip status={live} onQueue={() => goTab("queue")} /> : null}
+					{live ? <Badge variant={live.dryRun ? "secondary" : "outline"}>{live.dryRun ? "Dry run on" : "Dry run off"}</Badge> : null}
+					<RangePicker />
+					<KindPicker kinds={kinds} value={kind} onChange={setKind} />
+					{owner && live ? (
+						<Button type="button" size="sm" onClick={() => goTab("settings")}>
+							<Send />
+							Send a test
+						</Button>
+					) : null}
+				</div>
+			</div>
+			{live ? <HaltedBanner status={live} /> : null}
+			<div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+				<Metric
+					label="Subscribers (known)"
+					value={optinCounts ? fmtInt(optinCounts.subscribed) : optin.data ? fmtInt(optin.data.totals.subscribed) : "–"}
+					sub={optinCounts ? `+${fmtInt(optinCounts.newThisWeek)} this week` : "learned from sends in this range"}
+				/>
+				<Metric
+					label="Sent"
+					value={t ? fmtInt(t.sent) : "–"}
+					delta={t && before.data && prior ? <ChangeChip change={change(t.sent, before.data.totals.sent)} against={`the ${Number.parseInt(state.range, 10)} days before`} /> : undefined}
+					sub={`${fmtInt(today)} today${t?.tests ? `, +${fmtInt(t.tests)} test` : ""}`}
+				/>
+				<Metric label="Opened" value={t?.sent ? fmtPct(t.openRate) : "–"} sub={t ? `${fmtInt(t.opened)} opens, ${t.opened ? fmtPct(t.playedRate, 0) : "–"} played 1 min+` : undefined} />
+				<Metric label="Came back next day" value={t?.players ? fmtPct(t.returnRate) : "–"} sub={t ? `+${fmtInt(t.assisted)} assisted (back without opening)` : undefined} />
+			</div>
+			<Tabs value={tab} onValueChange={(v) => goTab(v as NotifyTab)}>
+				<div className="-mx-1 overflow-x-auto px-1 pb-1">
+					<TabsList aria-label="Notifications sections">
+						{visible.map((id) => (
+							<TabsTrigger key={id} value={id} className="flex-none px-2.5">
+								{TAB_LABELS[id]}
+								{id === "queue" && queueIssues ? (
+									<Badge variant="secondary" className="h-4 px-1.5 text-[10px]" aria-label={`${queueIssues} open issues`}>
+										{queueIssues}
+									</Badge>
+								) : null}
+							</TabsTrigger>
+						))}
+					</TabsList>
+				</div>
+				<TabsContent value="health" className="mt-2 space-y-4">
+					<HealthTab
+						status={live}
+						funnel={funnel.data}
+						counts={optinCounts ?? (optin.data ? { subscribed: optin.data.totals.subscribed, notSubscribed: optin.data.totals.notSubscribed, unknown: 0 } : undefined)}
+						{...(optinCounts ? {} : { countsNote: "Answers learned in this range; the full list is for owners." })}
+						items={items}
+						goTab={goTab}
+						ownerOnly={owner}
+					/>
+					{owner ? null : <p className="text-sm text-muted-foreground">The live queue and the controls are for owners.</p>}
+				</TabsContent>
+				<TabsContent value="funnel" className="mt-2">
+					<QueryState query={funnel} loadingRows={6} isEmpty={(d) => d.kinds.length === 0} empty="No notification rows in this range. The game asks for notifications with TypeTorch.notifications().want(...).">
+						{(data) => <FunnelTab funnel={data} optin={optin.data} />}
+					</QueryState>
+				</TabsContent>
+				{owner ? (
+					<TabsContent value="inbox" className="mt-2">
+						<InboxTab kind={kind} status={live} />
+					</TabsContent>
+				) : null}
+				{owner ? (
+					<TabsContent value="subscribers" className="mt-2">
+						<SubscribersTab />
+					</TabsContent>
+				) : null}
+				<TabsContent value="kinds" className="mt-2">
+					<QueryState query={funnel} loadingRows={6}>
+						{(data) => <KindsTab funnel={data} queue={queue.data} status={live} canEdit={owner && Boolean(live)} />}
+					</QueryState>
+				</TabsContent>
+				<TabsContent value="queue" className="mt-2">
+					<QueryState query={queue} loadingRows={4}>
+						{(data) => <QueueTab data={data} status={live} />}
+					</QueryState>
+				</TabsContent>
+				{owner ? (
+					<TabsContent value="settings" className="mt-2">
+						{status.isError ? <QueryState query={status}>{() => null}</QueryState> : live ? <SettingsTab status={live} /> : <QueryState query={status} loadingRows={4}>{() => null}</QueryState>}
+					</TabsContent>
+				) : null}
+			</Tabs>
 		</div>
 	);
 }

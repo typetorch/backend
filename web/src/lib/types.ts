@@ -652,7 +652,11 @@ export interface NotifyOptinResult {
 	from: string;
 	to: string;
 	totals: NotifyOptinCounts & { subscribed: number; notSubscribed: number };
-	byWhere: (NotifyOptinCounts & { where: string })[];
+	/**
+	 * Per spot. `shownPlayers`: players whose last prompt in the range was shown here; `subscribed` / `notSubscribed`: of
+	 * those, their latest inferred answer in the range; `subscribedRate` = subscribed / shownPlayers. Absent on older servers.
+	 */
+	byWhere: (NotifyOptinCounts & { where: string; shownPlayers?: number; subscribed?: number; notSubscribed?: number; subscribedRate?: number })[];
 	days: (NotifyOptinCounts & { date: string; subscribed: number; notSubscribed: number })[];
 }
 
@@ -812,6 +816,41 @@ export interface NotifyRecentSend extends NotifyUserSend {
 	userId: number;
 	name: string | null;
 	displayName: string | null;
+	/** The player's opt-in as the backend learned it (null = unknown); absent on older servers. */
+	optin?: "subscribed" | "not_subscribed" | null;
+}
+
+/** GET /v1/notify/users: the opt-in list (learned from Roblox's answer to a send). Times unix ms. */
+export type NotifyOptinState = "subscribed" | "not_subscribed" | "unknown" | "muted";
+export interface NotifyOptinTotals {
+	subscribed: number;
+	notSubscribed: number;
+	unknown: number;
+	muted: number;
+	newThisWeek: number;
+}
+export interface NotifyOptinUser {
+	userId: number;
+	name: string | null;
+	displayName: string | null;
+	optin: "subscribed" | "not_subscribed" | null;
+	optinAt: number | null;
+	lastSeen: number | null;
+	online: boolean;
+	muteUntil: number | null;
+	sends: number;
+	opened: number;
+}
+export interface NotifyUsersView {
+	counts: NotifyOptinTotals;
+	users: NotifyOptinUser[];
+	next: string | null;
+}
+export interface NotifyUsersParams {
+	state?: NotifyOptinState;
+	q?: string;
+	limit?: number;
+	cursor?: string;
 }
 export interface NotifyRecentView {
 	sends: NotifyRecentSend[];

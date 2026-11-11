@@ -250,6 +250,82 @@ describe("notify routes", () => {
 		expect((await h.call("/v1/notify/recent", { headers: bearer(API) })).status).toBe(401);
 	});
 
+	test("the opt-in list: counts, keyset pages per state, search, CSV, owners only", async () => {
+		const now = h.now();
+		const db = h.app.notify.db;
+		// 5 subscribed (one this week), 2 not subscribed (muted), 3 unknown
+		for (let i = 0; i < 5; i++) await db.run("INSERT OR REPLACE INTO notify_users (user_id, optin, optin_at, last_seen, created) VALUES (?, 'subscribed', ?, ?, ?)", [9000 + i, now - (i === 0 ? 1 : 10) * 86_400_000 - i, now, now]);
+		for (let i = 0; i < 2; i++) await db.run("INSERT OR REPLACE INTO notify_users (user_id, optin, optin_at, mute_until, created) VALUES (?, 'not_subscribed', ?, ?, ?)", [9100 + i, now - 1000, now + 86_400_000 + i, now]);
+		for (let i = 0; i < 3; i++) await db.run("INSERT OR REPLACE INTO notify_users (user_id, created) VALUES (?, ?)", [9200 + i, now]);
+		await db.run("INSERT INTO notify_sends (nid, user_id, kind, key, planned_at, sent_at, status, opened_at, test, created, updated) VALUES ('optinlist1', 9000, 'gift', 'a', ?, ?, 'sent', ?, 0, ?, ?)", [now, now, now, now, now]);
+		await db.run("INSERT INTO notify_sends (nid, user_id, kind, key, planned_at, sent_at, status, test, created, updated) VALUES ('optinlist2', 9000, 'gift', 'b', ?, ?, 'sent', 1, ?, ?)", [now, now, now, now]);
+		const get = (qs: string, token = ADMIN) => h.call(`/v1/notify/users${qs}`, { headers: bearer(token) });
+
+		const first = await asJson(await get("?state=subscribed&limit=2"));
+		expect(first.counts.subscribed).toBeGreaterThanOrEqual(5);
+		expect(first.counts.newThisWeek).toBeGreaterThanOrEqual(1);
+		expect(first.counts.muted).toBeGreaterThanOrEqual(2);
+		expect(first.users).toHaveLength(2);
+		expect(first.users[0]).toMatchObject({ userId: 9000, optin: "subscribed", sends: 1, opened: 1, name: null, muteUntil: null });
+		expect(typeof first.next).toBe("string");
+		// walk every page: each player once, newest optin_at first
+		const seen: number[] = first.users.map((u: { userId: number }) => u.userId);
+		let next = first.next as string | null;
+		while (next) {
+			const page = await asJson(await get(`?state=subscribed&limit=2&cursor=${encodeURIComponent(next)}`));
+			seen.push(...page.users.map((u: { userId: number }) => u.userId));
+			next = page.next;
+		}
+		const mine = seen.filter((u) => u >= 9000 && u < 9100);
+		expect(mine).toEqual([9000, 9001, 9002, 9003, 9004]);
+		expect(new Set(seen).size).toBe(seen.length);
+
+		const muted = await asJson(await get("?state=muted"));
+		expect(muted.users.filter((u: { userId: number }) => u.userId >= 9100 && u.userId < 9200).map((u: { userId: number }) => u.userId)).toEqual([9101, 9100]);
+		expect(muted.users[0].muteUntil).toBeGreaterThan(now);
+		const unknown = await asJson(await get("?state=unknown&limit=200"));
+		expect(unknown.users.map((u: { userId: number }) => u.userId)).toEqual(expect.arrayContaining([9200, 9201, 9202]));
+		expect(unknown.users.every((u: { optin: unknown }) => u.optin === null)).toBe(true);
+		expect((await asJson(await get("?state=not_subscribed&q=9101"))).users.map((u: { userId: number }) => u.userId)).toEqual([9101]);
+		expect((await asJson(await get("?state=subscribed&q=9101"))).users).toEqual([]);
+		expect((await asJson(await get("?q=nobody_cached"))).users).toEqual([]);
+
+		for (const bad of ["?state=all", "?limit=0", "?limit=201", "?cursor=x", "?format=xml", "?q=%3Cscript%3E"]) expect((await get(bad)).status).toBe(400);
+		expect((await get("", API)).status).toBe(401);
+		expect((await get("")).status).toBe(200);
+		expect((await h.call("/v1/notify/users", { method: "POST", headers: bearer(ADMIN) })).status).toBe(405);
+
+		const csv = await get("?state=subscribed&format=csv");
+		expect(csv.status).toBe(200);
+		expect(csv.headers.get("content-type")).toContain("text/csv");
+		expect(csv.headers.get("content-disposition")).toContain("notify-subscribed.csv");
+		const lines = (await csv.text()).trim().split("\n");
+		expect(lines[0]).toBe("user_id,name,state,optin_at,last_seen,online,mute_until,sends,opened");
+		expect(lines.some((l) => l.startsWith("9000,,subscribed,"))).toBe(true);
+		const audit = await asJson(await h.call("/v1/admin/audit?action=notify.users.export", { headers: bearer(ADMIN) }));
+		expect(JSON.stringify(audit)).toContain("notify.users.export");
+		expect(JSON.stringify(audit)).not.toContain("9000");
+
+		// The pages walk an index (no sort of the whole table)
+		for (const sql of [
+			"SELECT * FROM notify_users WHERE optin = 'subscribed' AND (optin_at < 5 OR (optin_at = 5 AND user_id < 3)) ORDER BY optin_at DESC, user_id DESC LIMIT 10",
+			"SELECT * FROM notify_users WHERE optin IS NULL AND optin_at IS NULL AND user_id < 3 ORDER BY optin_at DESC, user_id DESC LIMIT 10",
+			"SELECT * FROM notify_users WHERE mute_until > 5 ORDER BY mute_until DESC, user_id DESC LIMIT 10",
+		]) {
+			const plan = JSON.stringify(await db.all(`EXPLAIN QUERY PLAN ${sql}`, []));
+			expect(plan).not.toContain("TEMP B-TREE");
+		}
+		await db.run("DELETE FROM notify_users WHERE user_id >= 9000 AND user_id < 9300");
+		await db.run("DELETE FROM notify_sends WHERE nid IN ('optinlist1', 'optinlist2')");
+	});
+
+	test("the recent table carries each player's opt-in state and the send's params", async () => {
+		await h.app.notify.db.run("UPDATE notify_users SET optin = 'subscribed', optin_at = ? WHERE user_id = 7", [h.now()]);
+		const v = await asJson(await h.call("/v1/notify/recent?limit=50", { headers: bearer(ADMIN) }));
+		const row = v.sends.find((x: { userId: number }) => x.userId === 7);
+		expect(row).toMatchObject({ optin: "subscribed", params: null });
+	});
+
 	test("until must be after at; presence `at` in ms", async () => {
 		const now = Math.floor(h.now() / 1000);
 		const r = await asJson(await intents([{ op: "want", u: 1, k: "streak", key: "eq", at: now, until: now, rev: rev++ }, { op: "presence", u: 9, online: true, at: h.now() }]));

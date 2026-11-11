@@ -230,7 +230,7 @@ function Opens({ view }: { view: NotifyUserView }) {
 
 /** The player as one @username link (the Players page, the hover card), like every other player link; the name is
  * looked up when the notify view doesn't know it. A player with no pid yet: the UserId alone. */
-function Who({ view }: { view: NotifyUserView }) {
+export function Who({ view }: { view: NotifyUserView }) {
 	const pid = view.pids[0];
 	const missing = !view.name && pid !== undefined;
 	const q = useQuery({ queryKey: ["player-profile", pid], queryFn: ({ signal }) => api.playerProfile(pid as string, signal), enabled: missing, retry: false, staleTime: 5 * 60_000 });
@@ -241,7 +241,7 @@ function Who({ view }: { view: NotifyUserView }) {
 }
 
 /** One send's debugging detail: Roblox's refusal, the request it posts, the params / data it was planned with. */
-function SendDetail({ send }: { send: NotifyUserSend }) {
+export function SendDetail({ send }: { send: NotifyUserSend }) {
 	return (
 		<div className="space-y-2 rounded-lg border p-3" role="region" aria-label="Notification detail">
 			<div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">

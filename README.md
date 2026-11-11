@@ -627,6 +627,8 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
 | `GET` / `PUT /v1/notify/config`, `GET /v1/notify/status`, `PUT /v1/notify/keys`, `POST /v1/notify/test`, `POST /v1/notify/send` | admin | [experience notifications](#experience-notifications): the pushed config, the queue and switches (never a key), the signing keys, a test send (bypasses the caps), a one-off send |
 | `GET /v1/notify/user?uid=\|pid=\|name=` | admin | one player's notifications: consent (prompt checks / shown / closed, inferred state and when, mute), every send with its open and play, the intents |
+| `GET /v1/notify/recent?limit=&kind=` | admin | the newest sends of everyone (1..500, default 100), with the cached name, the player's opt-in state and the send's params |
+| `GET /v1/notify/users?state=&q=&limit=&cursor=&format=csv` | admin | the opt-in list: `state` subscribed (default) \| not_subscribed \| unknown \| muted, one keyset page (1..200, default 50, `next` cursor) and the counts of every state (+ subscribed this week, cached 15 s); `q` a UserId or a cached name; `format=csv` the whole state, at most 10 000 rows (`x-truncated: 1` past that), 6 a minute, audited as `notify.users.export` (counts only) |
 | `POST /v1/erasure` | Roblox signature, or admin | Right to Erasure |
 | `GET /v1/auth/check` | open (rate limited) | `{ ok, role: "game" \| "admin" \| "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }` (`untrustedOwner`: only when blessing is required (`TYPETORCH_CENTRAL_LOGIN_UNBLESSED=web`), on an owner's read-only typetorch.dev session from a browser that was never blessed, so the explorer offers "Trust this browser"; trusting this browser upgrades that session to admin in place); the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials (`dashboard`: the typetorch.dev issuer's origin, only while that login is on) |
 | `POST /v1/auth/login`, `POST /v1/auth/logout` | open / session | explorer session |
@@ -1170,7 +1172,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `monetization` | Robux from `purchase` rows: robux, purchases, payers and ARPDAU per UTC day, revenue by product (`products`, at most `top` (25, at most 100), with kind, share and payers), totals (payer conversion, ARPPU, ARPU, ARPDAU over player-days, repeat purchase rate) and the first purchase of new players (median / average minutes from their first row, conversion, by session number: 1, 2, 3, 4-5, 6-10, 11+). `robuxKey` / `productKey` name the props. Server-sent distinct player rows only, like `players` | 30 days |
 | `monetization-players` | who bought one product (`kind` + `product`) or anything: purchases, Robux paid, revenue, distinct products, first and last purchase per player, biggest spenders first (`limit`, at most 200) | 30 days |
 | `notify-funnel` | [notification](#experience-notifications) funnel per kind and UTC day of the send: wants, planned, sent (real), dry, tests, opened (distinct nids with an `open` row), played >= 1 min, returned D1 (a session the day after the send), assisted (back within 24 h without opening); open / played / return rates. `kind` for one. Only the time range filters (backend rows have no device or build) | 14 days |
-| `notify-optin` | the opt-in prompt: checks (and could prompt), shown, closed (average seconds up), errors, inferred subscribed / not subscribed (from the send results); by `where` and per day | 30 days |
+| `notify-optin` | the opt-in prompt: checks (and could prompt), shown, closed (average seconds up), errors, inferred subscribed / not subscribed (from the send results); by `where` (with `shownPlayers` / `subscribed` / `subscribedRate`: each player counted at the spot of their last prompt shown in the range, with their latest inferred answer) and per day | 30 days |
 | `notify-player` | one player's notify rows (`pids`, at most 20): prompt checks / shown / closed (where, secs, err), inferred consent, opens, plays; newest first (`limit` 500); `opens`: the join rows that came from a send (props carry its `nid`) with their raw join data `jd` (plans/30). Behind `GET /v1/notify/user` | 400 days |
 | `notify-queue` | notification sends per hour (planned, sent, dry, failed, 429s, skipped), planned by why, skipped by kind and why, failures by kind, HTTP status and code (final or retried). The live queue is `GET /v1/notify/status` | 1 day |
 | `monetization-purchases` | the latest purchases, newest first: player, session, product, kind, Robux paid, revenue and `where` (`limit`, 50, at most 200) | 30 days |
@@ -1817,12 +1819,16 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
   `TYPETORCH_NOTIFY_RATE`, `TYPETORCH_NOTIFY_CLOCK`, `TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS`, `TYPETORCH_NOTIFY_KINDS_OFF`
   (comma separated).
 - **Per player** (owners): `GET /v1/notify/user?uid=|pid=|name=` (a name only once it is in the profile cache) and the
-  Notifications page's Player panel (`/notifications?player=<UserId, pid or name>`): consent with dates (each prompt
+  Notifications page's Player panel (its Inbox tab, `/notifications?player=<UserId, pid or name>`): consent with dates (each prompt
   check / shown / closed with where, secs and err; the inferred subscribed / not subscribed and when; the mute), every
   send (planned and sent time, status or error code, opened when, played seconds) and the intents. Native rows behind it:
   `optin_check` / `optin_shown` / `optin_closed`, `open`, `open_bad`, `played` (framework), `optin_inferred`, `planned`,
   `skipped`, `sent`, `failed` (backend), plus `opened_at` / `played_secs` on the send from `POST /v1/notify/opened` /
   `played`.
+- **Opt-in list** (owners): Roblox has no API listing opted-in players; the backend learns each answer from Roblox's reply
+  to a send (`notify_users.optin` / `optin_at`, `mute_until` for the 7-day mute). `GET /v1/notify/users` pages through a
+  state by index (`notify_users_optin`, `notify_users_mute`), with each player's real sends and opens (notify_sends keeps
+  120 days); the Notifications page's Subscribers tab shows it and exports the CSV.
 - **Coolify**: real sends need `OPENCLOUD_NOTIFY_KEY` (or `OPENCLOUD_API_KEY`) with the user-notifications scope on the
   universe, and `TYPETORCH_UNIVERSE_ID`; then turn dry run off.
 - **Erasure**: the Right to Erasure path deletes the user's rows in all three tables and their queued sends.
