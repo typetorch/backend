@@ -433,9 +433,9 @@ Revoked and expired keys answer 401 like unknown ones; `last_used_at` is written
 - `GET /v1/players/by-uid/<uid>/events?names=&since=&before=&limit=` (1..100, default 50; `since` / `before` unix ms,
   default the last 30 days): `{ uid, known, pids, rows: [{ t, name, kind, pid, job, props }], more }`, every pid of the
   UserId from `identities`, newest first, `props` an object. Names must be in the runtime setting `players.supportEvents`
-  (default `ac_flag,ac_action,ac_honeypot,join,leave`; `join` / `leave` are the `session` rows) unless the caller is an
+  (default `ac_flag,ac_action,ac_honeypot,join,leave`; `join` / `leave` / `device` are the `session` rows) unless the caller is an
   admin: else `403 { error: "event_not_allowed", name }`. `GET .../summary?since=`: `{ uid, known, pids, since, byName,
-  byCategory, sessions, lastSeen }`. An unknown UserId: `known: false`. Named queries `player-events` / `player-summary`
+  byCategory, sessions, lastSeen, playtimeSecs, robuxSpent, purchases }`. An unknown UserId: `known: false`. Named queries `player-events` / `player-summary`
   (DuckDB and Basin). Every call writes a `players.read` audit row (key id and name, role, route template, status, IP, a
   pid count; never the UserId). The admin allow list doesn't apply to these two routes (the key is the gate).
 

@@ -1,7 +1,7 @@
 /**
  * Per-player support reads (plans/31, behind GET /v1/players/by-uid/{uid}/events and /summary): one player's rows of
  * the named events, for every pid of their UserId (the route resolves the pids from `identities`; the query never takes
- * a free-form filter). `join` / `leave` are the `session` kind's rows; other names match any kind but `session` and
+ * a free-form filter). `join` / `leave` / `device` are the `session` kind's rows; other names match any kind but `session` and
  * `fleet`. Only the time range applies: `from` / `to` in the filters (the route sends `since` / `before`).
  *
  *   player-events   newest first, `limit` (1..100, default 50) rows of { t, name, kind, pid, job, props } (+1 to say `more`)
@@ -14,7 +14,7 @@ import type { NormalizedFilters } from "../sql/filters.ts";
 export const PID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const NAME_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** The session kind's row names the support list may name. */
-export const SESSION_NAMES = ["join", "leave"];
+export const SESSION_NAMES = ["join", "leave", "device"];
 export const PIDS_MAX = 50;
 export const NAMES_MAX = 64;
 
@@ -44,6 +44,12 @@ export interface PlayerSummaryResult {
 	byCategory: Record<string, number>;
 	sessions: number;
 	lastSeen: number | null;
+	/** Playtime in the range: each session's first to last row (the player's rows of any kind but fleet), summed, seconds. */
+	playtimeSecs: number;
+	/** Robux the player spent in the range: `purchase` kind rows' `robux` (the framework's native purchase rows). */
+	robuxSpent: number;
+	/** How many `purchase` rows that is. */
+	purchases: number;
 }
 
 function options(input: Partial<PlayerSupportOptions> = {}): PlayerSupportOptions {
@@ -101,7 +107,7 @@ export const playerEvents = defineQuery<PlayerSupportOptions, PlayerEventsResult
 
 export const playerSummary = defineQuery<PlayerSupportOptions, PlayerSummaryResult>({
 	name: "player-summary",
-	summary: "one player's counts per named event, ac_flag rows by props.cat, distinct sessions and last seen (pids from identities)",
+	summary: "one player's counts per named event, ac_flag rows by props.cat, distinct sessions, playtime, Robux spent and last seen (pids from identities)",
 	defaultDays: 30,
 	options,
 	statements(ctx, f, o) {
@@ -115,6 +121,13 @@ export const playerSummary = defineQuery<PlayerSupportOptions, PlayerSummaryResu
 			byCategory:
 				`SELECT COALESCE(${d.jsonText("props", "cat")}, '') AS cat, COUNT(*) AS n FROM (${distinct}) r WHERE name = 'ac_flag' GROUP BY COALESCE(${d.jsonText("props", "cat")}, '') ` +
 				`ORDER BY n DESC, cat ${d.limit(200)}`,
+			playtime:
+				`SELECT SUM(t1 - t0) AS ms FROM (SELECT e.sid AS sid, MIN(e.t) AS t0, MAX(e.t) AS t1 FROM ${table} e WHERE ${range} AND ${who} AND e.kind <> 'fleet' ` +
+				`AND e.sid IS NOT NULL AND e.sid <> '' GROUP BY e.sid) x ${d.limit(1)}`,
+			// DISTINCT: a resent copy of a purchase row is an exact duplicate.
+			robux:
+				`SELECT SUM(COALESCE(${d.jsonNumber("props", "robux")}, 0)) AS robux, COUNT(*) AS n FROM (SELECT DISTINCT e.t AS t, e.pid AS pid, e.name AS name, e.props AS props FROM ${table} e ` +
+				`WHERE ${range} AND ${who} AND e.kind = 'purchase') r ${d.limit(1)}`,
 			totals: `SELECT COUNT(DISTINCT CASE WHEN e.sid IS NOT NULL AND e.sid <> '' THEN e.sid END) AS sessions, MAX(e.t) AS last FROM ${table} e WHERE ${range} AND ${who} AND e.kind <> 'fleet' ${d.limit(1)}`,
 		};
 	},
@@ -124,6 +137,15 @@ export const playerSummary = defineQuery<PlayerSupportOptions, PlayerSummaryResu
 		const byCategory: Record<string, number> = {};
 		for (const r of rows.byCategory ?? []) byCategory[str(r.cat) || "(none)"] = num(r.n);
 		const t = rows.totals?.[0] ?? {};
-		return { byName, byCategory, sessions: num(t.sessions), lastSeen: t.last === null || t.last === undefined ? null : num(t.last) };
+		const p = rows.robux?.[0] ?? {};
+		return {
+			byName,
+			byCategory,
+			sessions: num(t.sessions),
+			lastSeen: t.last === null || t.last === undefined ? null : num(t.last),
+			playtimeSecs: Math.round(num(rows.playtime?.[0]?.ms) / 1000),
+			robuxSpent: Math.round(num(p.robux)),
+			purchases: num(p.n),
+		};
 	},
 });
