@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api, ApiError } from "@/lib/api";
 import type { BenchmarkPeriod, BenchmarksResult, Filters, RealtimeResult, TrendsResult, TrendValues } from "@/lib/types";
-import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, retentionSub, TRENDS } from "./Roblox";
+import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, realtimeHours, retentionSub, TRENDS, windowLabel } from "./Roblox";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -55,8 +55,8 @@ const benchmarks: BenchmarksResult = {
 
 const realtime: RealtimeResult = {
 	hours: 24,
-	current: { sessions: 30, avgSessionMinutes: 11, clientErrors: 2, errorsPerSession: 0.07, clientFps: 55, serverMemoryMb: 800 },
-	previous: { sessions: 25, avgSessionMinutes: 10, clientErrors: 1, errorsPerSession: 0.04, clientFps: 50, serverMemoryMb: 700 },
+	current: { sessions: 30, players: 22, newPlayers: 5, running: 3, playtimeMinutes: 330, playtimePerPlayer: 15, avgSessionMinutes: 11, clientErrors: 2, errorsPerSession: 0.07, clientFps: 55, serverMemoryMb: 800 },
+	previous: { sessions: 25, players: 20, newPlayers: 4, running: 0, playtimeMinutes: 250, playtimePerPlayer: 12.5, avgSessionMinutes: 10, clientErrors: 1, errorsPerSession: 0.04, clientFps: 50, serverMemoryMb: 700 },
 	ccu: { now: 9, series: [{ hour: "2026-10-09T10:00:00.000Z", avg: 4, peak: 7 }], currentAvg: 4.3, previousAvg: 3, currentPeak: 7, previousPeak: 5 },
 };
 
@@ -73,7 +73,7 @@ const trends: TrendsResult = {
 	],
 };
 
-function mount() {
+function mount(path = "/roblox") {
 	const calls: { name: string; filters: Filters; options: Record<string, unknown> }[] = [];
 	vi.spyOn(api, "query").mockImplementation((async (name: string, filters: Filters = {}, options: Record<string, unknown> = {}) => {
 		calls.push({ name, filters, options });
@@ -87,7 +87,7 @@ function mount() {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	render(
 		<QueryClientProvider client={client}>
-			<MemoryRouter initialEntries={["/roblox"]}>
+			<MemoryRouter initialEntries={[path]}>
 				<TooltipProvider>
 					<Roblox />
 				</TooltipProvider>
@@ -98,6 +98,24 @@ function mount() {
 }
 
 describe("Roblox page", () => {
+	it("Realtime follows the filter bar's range: last 1 hour sends hours 1 and shows playtime stats", async () => {
+		const calls = mount("/roblox?range=1h");
+		expect(await screen.findByText("Last 1 hour vs the 1 hour before. Follows the filter bar's date range.")).toBeTruthy();
+		expect(calls.find((c) => c.name === "realtime")?.options.hours).toBe(1);
+		expect(await screen.findByText("5 h 30 min")).toBeTruthy(); // 330 min of playtime
+		for (const label of ["Players", "New players", "Playtime", "Playtime per player"]) expect(screen.getByText(label)).toBeTruthy();
+		expect(screen.getByText("30 sessions in the last 1 hour, 3 still running.")).toBeTruthy();
+	}, 60_000);
+
+	it("realtimeHours and windowLabel", () => {
+		expect(realtimeHours({ range: "6h" })).toBe(6);
+		expect(realtimeHours({ range: "7d" })).toBe(168);
+		expect(realtimeHours({ range: "custom", from: "2026-10-01", to: "2026-10-03" })).toBe(72);
+		expect(windowLabel(1)).toBe("1 hour");
+		expect(windowLabel(24)).toBe("24 hours");
+		expect(windowLabel(720)).toBe("30 days");
+	});
+
 	it("shows Creator Hub's KPIs with session time first, and marks the ones that can't match", async () => {
 		mount();
 		expect(await screen.findByText("280 Robux revenue (400 spent)")).toBeTruthy();

@@ -22,7 +22,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { barMax, change, estimatePercentile, loadBenchmarks, saveBenchmarks, type Benchmark, type BenchmarkKey, type Benchmarks } from "@/lib/benchmarks";
-import { isoDate } from "@/lib/filters";
+import { isoDate, type FilterState } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum, fmtPct } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import type { BenchmarkPeriod, Filters, RealtimeResult, Retention, TrendValues } from "@/lib/types";
@@ -376,6 +376,34 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 
 // Realtime -----------------------------------------------------------------------------------------------------------
 
+const RANGE_HOURS: Partial<Record<FilterState["range"], number>> = { "1h": 1, "6h": 6, "1d": 24, "7d": 168, "30d": 720, "90d": 2160 };
+
+/** The Realtime window: the filter bar's range in hours (a custom range: its length in days), 1 h to 90 days. */
+export function realtimeHours(state: FilterState): number {
+	const preset = RANGE_HOURS[state.range];
+	if (preset) return preset;
+	if (state.range === "custom" && state.from && state.to) {
+		const days = Math.round((Date.parse(state.to) - Date.parse(state.from)) / 86_400_000) + 1;
+		if (Number.isFinite(days) && days > 0) return Math.min(2160, days * 24);
+	}
+	return 24;
+}
+
+/** "1 hour", "6 hours", "24 hours", "7 days". */
+export function windowLabel(hours: number): string {
+	if (hours === 1) return "1 hour";
+	if (hours < 48 || hours % 24 !== 0) return `${hours} hours`;
+	return `${hours / 24} days`;
+}
+
+/** Hours and minutes for a playtime total ("3 h 20 min", "45 min"). */
+function fmtPlaytime(minutes: number): string {
+	if (minutes < 60) return fmtMinutes(minutes);
+	const h = Math.floor(minutes / 60);
+	const m = Math.round(minutes % 60);
+	return m ? `${fmtInt(h)} h ${m} min` : `${fmtInt(h)} h`;
+}
+
 function Sparkline({ series }: { series: RealtimeResult["ccu"]["series"] }) {
 	const config: ChartConfig = {
 		peak: { label: "Peak concurrent users", color: "var(--chart-1)" },
@@ -408,10 +436,14 @@ function RealtimeRow({ label, info, value, current, previous, lowerIsBetter = fa
 }
 
 function Realtime({ filters }: { filters: Filters }) {
-	const q = useAnalytics("realtime", { hours: 24, ccuDays: 7 }, { filters });
+	const { state } = useFilters();
+	const hours = realtimeHours(state);
+	const span = windowLabel(hours);
+	const short = hours < 48 || hours % 24 !== 0 ? `${hours} h` : `${hours / 24} d`;
+	const q = useAnalytics("realtime", { hours, ccuDays: Math.min(30, Math.max(7, Math.ceil((hours * 2) / 24))) }, { filters });
 	const live = useQuery({ queryKey: ["fleet", "servers", filters.branch ?? ""], queryFn: ({ signal }) => api.fleetServers(typeof filters.branch === "string" ? filters.branch : undefined, signal), refetchInterval: 30_000 });
 	return (
-		<Section title="Realtime" description="Last 24 hours vs the 24 before.">
+		<Section title="Realtime" description={`Last ${span} vs the ${span} before. Follows the filter bar's date range.`}>
 			<QueryState query={q} loadingRows={5}>
 				{(r) => {
 					const now = live.data?.players ?? r.ccu.now;
@@ -427,27 +459,55 @@ function Realtime({ filters }: { filters: Filters }) {
 									</InfoTip>
 									<DiffersBadge differs={{ label: "Estimate", why: "From heartbeats about once a minute per server: a player who stays under a minute, or a server that stops sending, can be missed. Creator Hub counts every connection." }} />
 								</div>
-								<ChangeChip change={change(r.ccu.currentPeak, r.ccu.previousPeak)} against="the 24 h before (peak)" />
+								<ChangeChip change={change(r.ccu.currentPeak, r.ccu.previousPeak)} against={`the ${short} before (peak)`} />
 							</div>
 							<div className="text-3xl font-semibold tabular-nums">{fmtInt(now)}</div>
 							{hasCcu ? <Sparkline series={r.ccu.series} /> : <p className="py-3 text-xs text-muted-foreground">No heartbeats with players in 7 days.</p>}
 							<RealtimeRow
 								label="Peak concurrent users"
-								info="The highest minute of the last 24 h (Creator Hub's peak concurrent players), from the servers' heartbeats."
+								info={`The highest minute of the last ${short} (Creator Hub's peak concurrent players), from the servers' heartbeats.`}
 								value={fmtInt(r.ccu.currentPeak)}
 								current={r.ccu.currentPeak}
 								previous={r.ccu.previousPeak}
 							/>
 							<RealtimeRow
 								label="Average concurrent users"
-								info="The mean of the last 24 h's per-minute player counts (Creator Hub's average concurrent players); minutes without a heartbeat count as 0."
+								info={`The mean of the last ${short}'s per-minute player counts (Creator Hub's average concurrent players); minutes without a heartbeat count as 0.`}
 								value={fmtNum(r.ccu.currentAvg, 1)}
 								current={r.ccu.currentAvg}
 								previous={r.ccu.previousAvg}
 							/>
 							<RealtimeRow
+								label="Players"
+								info="Distinct players who started a session in the window (Studio play tests left out)."
+								value={fmtInt(r.current.players)}
+								current={r.current.players}
+								previous={r.previous.players}
+							/>
+							<RealtimeRow
+								label="New players"
+								info="Of those, players whose first-ever session started in the window (the SDK marks a player's first join)."
+								value={fmtInt(r.current.newPlayers)}
+								current={r.current.newPlayers}
+								previous={r.previous.newPlayers}
+							/>
+							<RealtimeRow
+								label="Playtime"
+								info="Total playtime of the sessions that started in the window (first to last event); sessions still running count so far."
+								value={fmtPlaytime(r.current.playtimeMinutes)}
+								current={r.current.playtimeMinutes}
+								previous={r.previous.playtimeMinutes}
+							/>
+							<RealtimeRow
+								label="Playtime per player"
+								info="Playtime divided by players, for the window."
+								value={r.current.playtimePerPlayer === null ? "n/a" : fmtMinutes(r.current.playtimePerPlayer)}
+								current={r.current.playtimePerPlayer}
+								previous={r.previous.playtimePerPlayer}
+							/>
+							<RealtimeRow
 								label="Session time"
-								info="Average length of the sessions that started in the window and are over (first to last event; Studio play tests left out)."
+								info="Average length of the sessions that started in the window and are over (no event for 10 minutes; first to last event; Studio play tests left out). Running sessions count in Playtime."
 								value={r.current.avgSessionMinutes === null ? "n/a" : fmtMinutes(r.current.avgSessionMinutes)}
 								current={r.current.avgSessionMinutes}
 								previous={r.previous.avgSessionMinutes}
@@ -475,7 +535,7 @@ function Realtime({ filters }: { filters: Filters }) {
 								previous={r.previous.serverMemoryMb}
 								lowerIsBetter
 							/>
-							<p className="pt-1 text-[11px] text-muted-foreground">{fmtInt(r.current.sessions)} sessions in the last 24 h.</p>
+							<p className="pt-1 text-[11px] text-muted-foreground">{fmtInt(r.current.sessions)} sessions in the last {span}, {fmtInt(r.current.running)} still running.</p>
 						</div>
 					);
 				}}
@@ -656,7 +716,7 @@ export default function Roblox() {
 		<>
 			<PageHeader
 				title="Roblox overview"
-				description={`Creator Hub's overview, from your own events and computed the way Creator Hub defines it: the last ${days} full UTC days against the ${days} days before. The filter bar's branch, artifact, device, players and variant apply; its date range doesn't.`}
+				description={`Creator Hub's overview, from your own events and computed the way Creator Hub defines it: the last ${days} full UTC days against the ${days} days before. The filter bar's branch, artifact, device, players and variant apply; its date range sets the Realtime window only.`}
 				actions={
 					<>
 						<ToggleGroup type="single" variant="outline" size="sm" value={String(days)} onValueChange={(v) => v && setPeriod(v)} aria-label="Period">

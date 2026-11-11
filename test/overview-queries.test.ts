@@ -160,6 +160,13 @@ describe("realtime", () => {
 		const ended = cur.filter((s) => s.t1 < ENDED);
 		expect(r.current.sessions).toBe(cur.length);
 		expect(r.current.avgSessionMinutes).toBeCloseTo(ended.reduce((sum, s) => sum + s.t1 - s.t0, 0) / ended.length / 60_000, 2);
+		const pids = new Set(cur.map((s) => s.pid));
+		expect(r.current.players).toBe(pids.size);
+		expect(r.current.newPlayers).toBe(new Set(cur.filter((s) => s.isnew).map((s) => s.pid)).size);
+		expect(r.current.running).toBe(cur.filter((s) => s.t1 >= ENDED).length);
+		const play = cur.reduce((sum, s) => sum + s.t1 - s.t0, 0) / 60_000;
+		expect(r.current.playtimeMinutes).toBeCloseTo(play, 1);
+		expect(r.current.playtimePerPlayer).toBeCloseTo(play / pids.size, 1);
 		expect(r.current.clientErrors).toBe(4); // n = 3, and one row without n; the server error doesn't count
 		expect(r.current.errorsPerSession).toBeCloseTo(4 / cur.length, 3);
 		expect(r.previous.clientErrors).toBe(0);
@@ -167,6 +174,15 @@ describe("realtime", () => {
 		expect(r.previous.clientFps).toBe(30);
 		expect(r.current.serverMemoryMb).toBe(400);
 		expect(r.previous.serverMemoryMb).toBe(300);
+	});
+
+	test("the window follows the hours asked (the filter bar's range), up to 90 days", async () => {
+		const h1 = await store.query("realtime", {}, { hours: 1 });
+		expect(h1.hours).toBe(1);
+		const cur = sessions(players(NOW - 2 * HOUR, NOW)).filter((s) => s.t0 >= NOW - HOUR);
+		expect(h1.current.sessions).toBe(cur.length);
+		expect((await store.query("realtime", {}, { hours: 2160 })).hours).toBe(2160);
+		await expect(store.query("realtime", {}, { hours: 2161 })).rejects.toThrow();
 	});
 
 	test("concurrent users from heartbeats: per minute, summed over servers, hourly averages and peaks", async () => {
