@@ -45,7 +45,7 @@ describe("named API keys", () => {
 		const rows = db.query("SELECT * FROM api_keys").all();
 		db.close();
 		const text = JSON.stringify(rows);
-		for (const { key } of Object.values(made)) expect(text).not.toContain(key.split("_")[2]);
+		for (const { key } of Object.values(made)) expect(text).not.toContain(key.slice("ttk_".length + 10 + 1)); // the whole secret (base64url may hold "_")
 		const support = rows.find((r) => r.id === made.support.id);
 		expect(support?.hash).toBe(new Bun.CryptoHasher("sha256").update(made.support.key).digest("hex"));
 		const list = await asJson(await h.call("/v1/admin/keys", { headers: bearer(ADMIN) }));
