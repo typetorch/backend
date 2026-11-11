@@ -226,6 +226,15 @@ const ROUTES: Route[] = [
 	{ method: "get", path: "/v1/admin/keys", tag: "admin", roles: ["admin"], summary: "Named API keys (plans/31): id, name, role, scopes, dates; built-in env tokens too; never a secret or hash", params: [q("all", "1 = include revoked keys")] },
 	{ method: "post", path: "/v1/admin/keys", tag: "admin", roles: ["admin"], summary: "Create a named API key: `201 { id, key, name, role, scopes, createdAt, expiresAt }` (the key only here, once)", body: obj({ name: str(), role: str("game | lookup | support | analyst | admin"), expiresDays: int("1..3650") }, ["name", "role"]) },
 	{ method: "delete", path: "/v1/admin/keys/{id}", tag: "admin", roles: ["admin"], summary: "Revoke a named API key (built-in ids answer 400)", params: [p("id", "the key id")] },
+	{
+		method: "get",
+		path: "/v1/notify/users",
+		tag: "notify",
+		roles: ["admin"],
+		summary:
+			"The opt-in list (learned from Roblox's answer to a send): `{ counts: { subscribed, notSubscribed, unknown, muted, newThisWeek }, users: [{ userId, name, displayName, optin, optinAt, lastSeen, online, muteUntil, sends, opened }], next }`, or text/csv with format=csv (at most 10 000 rows)",
+		params: [q("state", "subscribed (default) | not_subscribed | unknown | muted"), q("q", "a UserId or a cached username / display name"), q("limit", "1..200, default 50"), q("cursor", "the last page's next"), q("format", "csv")],
+	},
 	{ method: "put", path: "/v1/notify/keys", tag: "notify", roles: ["admin"], summary: "The launch-data signing keys `{ current, previous?, since }` (never returned or logged)", body: obj({ current: str(), previous: str(), since: int("unix seconds") }, ["current", "since"]) },
 	{ method: "post", path: "/v1/notify/test", tag: "notify", roles: ["admin"], summary: "One send of a kind now, bypassing the caps (marked test): `{ nid, status }`", body: obj({ userId: int(), kind: str(), params: obj(), data: str() }, ["userId", "kind"]) },
 	{ method: "post", path: "/v1/notify/send", tag: "notify", roles: ["admin"], summary: "A one-off send (kind custom; respects the mute and the day cap): `{ nid, status }` or `{ skipped }`", body: obj({ userId: int(), template: str(), params: obj(), data: str() }, ["userId", "template"]) },

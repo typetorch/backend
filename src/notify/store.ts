@@ -32,6 +32,8 @@ CREATE INDEX IF NOT EXISTS notify_intents_user ON notify_intents (user_id, statu
 CREATE TABLE IF NOT EXISTS notify_users (user_id INTEGER PRIMARY KEY, online INTEGER NOT NULL DEFAULT 0, presence_at INTEGER NOT NULL DEFAULT 0, left_at INTEGER, last_seen INTEGER, hours TEXT NOT NULL DEFAULT '[]', sent_at INTEGER, unopened INTEGER NOT NULL DEFAULT 0, backoff_at INTEGER, mute_until INTEGER, capped_until INTEGER, optin TEXT, optin_at INTEGER, next_check INTEGER NOT NULL DEFAULT 0, busy TEXT, created INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS notify_users_check ON notify_users (next_check);
 CREATE INDEX IF NOT EXISTS notify_users_seen ON notify_users (last_seen);
+CREATE INDEX IF NOT EXISTS notify_users_optin ON notify_users (optin, optin_at);
+CREATE INDEX IF NOT EXISTS notify_users_mute ON notify_users (mute_until);
 CREATE TABLE IF NOT EXISTS notify_sends (nid TEXT PRIMARY KEY, user_id INTEGER NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0, template TEXT, category TEXT, params TEXT, data TEXT, planned_at INTEGER NOT NULL, sent_at INTEGER, status TEXT NOT NULL, http INTEGER, code TEXT, roblox_id TEXT, try INTEGER NOT NULL DEFAULT 0, opened_at INTEGER, played_secs INTEGER, test INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS notify_sends_user ON notify_sends (user_id, created);
 CREATE INDEX IF NOT EXISTS notify_sends_status ON notify_sends (status, updated);
@@ -147,6 +149,23 @@ export interface ApplyResult {
 	stale: number;
 	/** Planned sends cancelled by a drop or a newer want (their zset members are removed already). */
 	cancelled: { nid: string; userId: number; kind: string; dropped: boolean }[];
+}
+
+/** The opt-in list's filters: the inferred answer (null = unknown), or muted (a refused send mutes for 7 days). */
+export const OPTIN_STATES = ["subscribed", "not_subscribed", "unknown", "muted"] as const;
+export type OptinState = (typeof OPTIN_STATES)[number];
+export interface OptinCursor {
+	/** optin_at or mute_until of the last row (0 for unknown). */
+	at: number;
+	uid: number;
+}
+export interface OptinCounts {
+	subscribed: number;
+	notSubscribed: number;
+	unknown: number;
+	muted: number;
+	/** Subscribed (learned) in the last 7 days. */
+	newThisWeek: number;
 }
 
 const num = (v: unknown): number => Number(v ?? 0);
@@ -557,6 +576,85 @@ export class NotifyStore {
 
 	async userIntents(userId: number, limit: number): Promise<IntentRow[]> {
 		return this.db.all<IntentRow>("SELECT * FROM notify_intents WHERE user_id = ? ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, updated DESC LIMIT ?", [userId, limit]);
+	}
+
+	// The opt-in list (GET /v1/notify/users) ---------------------------------------------------------------------------
+
+	/** How many players are in each opt-in state (index-only counts; the route caches them). */
+	async optinCounts(now: number): Promise<OptinCounts> {
+		const rows = await this.db.all<{ optin: string | null; n: number }>("SELECT optin, COUNT(*) AS n FROM notify_users GROUP BY optin", []);
+		const by = new Map(rows.map((r) => [r.optin, num(r.n)]));
+		const newThisWeek = num((await this.db.first<{ n: number }>("SELECT COUNT(*) AS n FROM notify_users WHERE optin = 'subscribed' AND optin_at >= ?", [now - 7 * 86_400_000]))?.n);
+		const muted = num((await this.db.first<{ n: number }>("SELECT COUNT(*) AS n FROM notify_users WHERE mute_until > ?", [now]))?.n);
+		return { subscribed: by.get("subscribed") ?? 0, notSubscribed: by.get("not_subscribed") ?? 0, unknown: by.get(null) ?? 0, muted, newThisWeek };
+	}
+
+	/**
+	 * One page of players in an opt-in state, newest first, by keyset: subscribed / not_subscribed by (optin_at, user_id),
+	 * unknown by user_id, muted by (mute_until, user_id). Each walks an index, so a page costs O(limit). `uids` narrows to
+	 * those players (a search).
+	 */
+	async optinPage(state: OptinState, o: { now: number; limit: number; after?: OptinCursor; uids?: number[] }): Promise<UserRow[]> {
+		const where: string[] = [];
+		const args: (string | number)[] = [];
+		let order: string;
+		if (state === "muted") {
+			where.push("mute_until > ?");
+			args.push(o.now);
+			if (o.after) {
+				where.push("(mute_until < ? OR (mute_until = ? AND user_id < ?))");
+				args.push(o.after.at, o.after.at, o.after.uid);
+			}
+			order = "mute_until DESC, user_id DESC";
+		} else if (state === "unknown") {
+			where.push("optin IS NULL AND optin_at IS NULL");
+			if (o.after) {
+				where.push("user_id < ?");
+				args.push(o.after.uid);
+			}
+			order = "optin_at DESC, user_id DESC";
+		} else {
+			where.push("optin = ?");
+			args.push(state);
+			if (o.after) {
+				where.push("(optin_at < ? OR (optin_at = ? AND user_id < ?))");
+				args.push(o.after.at, o.after.at, o.after.uid);
+			}
+			order = "optin_at DESC, user_id DESC";
+		}
+		if (o.uids) {
+			if (!o.uids.length) return [];
+			where.push(`user_id IN (${o.uids.map(() => "?").join(", ")})`);
+			args.push(...o.uids);
+		}
+		args.push(o.limit);
+		return this.db.all<UserRow>(`SELECT * FROM notify_users WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT ?`, args);
+	}
+
+	/** Real sends (not tests) and opens per player, for a page of players (notify_sends keeps 120 days). */
+	async sendTotals(uids: number[]): Promise<Map<number, { sends: number; opened: number }>> {
+		const out = new Map<number, { sends: number; opened: number }>();
+		for (let i = 0; i < uids.length; i += 500) {
+			const chunk = uids.slice(i, i + 500);
+			const rows = await this.db.all<{ user_id: number; sends: number; opened: number }>(
+				`SELECT user_id, SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sends, SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opened FROM notify_sends WHERE test = 0 AND user_id IN (${chunk.map(() => "?").join(", ")}) GROUP BY user_id`,
+				chunk,
+			);
+			for (const r of rows) out.set(num(r.user_id), { sends: num(r.sends), opened: num(r.opened) });
+		}
+		return out;
+	}
+
+	/** The opt-in state of a few players (the recent table's Subscribers filter). */
+	async optinOf(uids: number[]): Promise<Map<number, string | null>> {
+		const out = new Map<number, string | null>();
+		const unique = [...new Set(uids)];
+		for (let i = 0; i < unique.length; i += 500) {
+			const chunk = unique.slice(i, i + 500);
+			const rows = await this.db.all<{ user_id: number; optin: string | null }>(`SELECT user_id, optin FROM notify_users WHERE user_id IN (${chunk.map(() => "?").join(", ")})`, chunk);
+			for (const r of rows) out.set(num(r.user_id), r.optin);
+		}
+		return out;
 	}
 
 	/** Right to erasure: every row of the user in the three tables (and their queued sends). */

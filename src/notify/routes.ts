@@ -6,7 +6,8 @@
  *                                            items: want | drop | presence | prefs (the player's switched-off kinds)
  *              POST /v1/notify/opened   { nid, u }       -> { state: first | repeat | unknown }
  *              POST /v1/notify/played   { nid, u, secs } -> { ok }
- *   admin      GET|PUT /v1/notify/config, GET /v1/notify/status, PUT /v1/notify/keys, POST /v1/notify/test, POST /v1/notify/send
+ *   admin      GET|PUT /v1/notify/config, GET /v1/notify/status, PUT /v1/notify/keys, POST /v1/notify/test, POST /v1/notify/send,
+ *              GET /v1/notify/user, GET /v1/notify/recent, GET /v1/notify/users (the opt-in list)
  */
 import { dirname, join } from "node:path";
 import { openSqlite, type FleetDb } from "../fleet/db.ts";
@@ -14,7 +15,7 @@ import { Durable } from "../store/durable.ts";
 import { CUSTOM_KIND, ConfigError, PARAM_NAME, TEMPLATE, placeholders, validateConfig, type KindConfig, type NotifyConfig } from "./config.ts";
 import { DAY_MS, HOUR_MS, Planner, dayFreeAt, type DayClock } from "./planner.ts";
 import { MUTE_MS, requestBody, Sender } from "./sender.ts";
-import { DUE_SET, NotifyStore, PENDING_MAX, PREFS_OFF_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OutRow, type SendRow } from "./store.ts";
+import { DUE_SET, NotifyStore, PENDING_MAX, PREFS_OFF_MAX, SECONDS_BELOW, isOnline, type IntentOp, type OptinCounts, type OptinCursor, type OptinState, type OutRow, type SendRow } from "./store.ts";
 import { DATA_MAX_BYTES, KIND_PATTERN, NID_PATTERN, NotifyKeyStore, newNid, parseKeys, tokenLength, type NotifyKeys } from "./token.ts";
 
 export const INTENTS_BODY_MAX = 256 * 1024;
@@ -496,14 +497,83 @@ export class NotifyService {
 		};
 	}
 
-	/** GET /v1/notify/recent (owners): the newest sends of everyone, newest first; app.ts adds the names. */
-	async recentView(limit: number, kind?: string): Promise<{ sends: (ReturnType<typeof sendView> & { userId: number })[] }> {
+	/**
+	 * GET /v1/notify/recent (owners): the newest sends of everyone, newest first, with the player's opt-in state and the
+	 * send's params (the Inbox renders the text from them); app.ts adds the names.
+	 */
+	async recentView(limit: number, kind?: string): Promise<{ sends: (ReturnType<typeof sendView> & { userId: number; optin: string | null; params: unknown })[] }> {
 		const rows = await this.store.latestSends(limit, kind);
-		return { sends: rows.map((x) => ({ ...sendView(x), userId: Number(x.user_id) })) };
+		const optin = await this.store.optinOf(rows.map((x) => Number(x.user_id)));
+		return { sends: rows.map((x) => ({ ...sendView(x), userId: Number(x.user_id), optin: optin.get(Number(x.user_id)) ?? null, params: parseParams(x.params) })) };
+	}
+
+	private countsCache: { at: number; counts: OptinCounts } | undefined;
+
+	/**
+	 * GET /v1/notify/users (owners): the players the backend learned an opt-in answer for (Roblox has no list: a send's
+	 * answer says subscribed or not), one keyset page of a state, newest first, plus the counts of every state (cached
+	 * 15 s). app.ts adds the names and the CSV.
+	 */
+	async usersView(state: OptinState, o: { limit: number; after?: OptinCursor; uids?: number[] }): Promise<{ counts: OptinCounts; users: OptinUser[]; next: string | null }> {
+		const now = this.clock();
+		if (!this.countsCache || now - this.countsCache.at > 15_000 || now < this.countsCache.at) this.countsCache = { at: now, counts: await this.store.optinCounts(now) };
+		const rows = await this.store.optinPage(state, { now, limit: o.limit + 1, ...(o.after ? { after: o.after } : {}), ...(o.uids ? { uids: o.uids } : {}) });
+		const page = rows.slice(0, o.limit);
+		const totals = await this.store.sendTotals(page.map((u) => Number(u.user_id)));
+		const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+		const users = page.map((u): OptinUser => {
+			const userId = Number(u.user_id);
+			const t = totals.get(userId);
+			return {
+				userId,
+				optin: u.optin === "subscribed" || u.optin === "not_subscribed" ? u.optin : null,
+				optinAt: n(u.optin_at),
+				lastSeen: n(u.last_seen),
+				online: isOnline(u, now, this.presenceStaleMs()),
+				muteUntil: u.mute_until && Number(u.mute_until) > now ? Number(u.mute_until) : null,
+				sends: t?.sends ?? 0,
+				opened: t?.opened ?? 0,
+			};
+		});
+		const last = page[page.length - 1];
+		const at = (u: NonNullable<typeof last>) => (state === "muted" ? Number(u.mute_until) : state === "unknown" ? 0 : Number(u.optin_at ?? 0));
+		return { counts: this.countsCache.counts, users, next: rows.length > o.limit && last ? `${at(last)}.${Number(last.user_id)}` : null };
 	}
 
 	/** For tests and the status line: the mute that S1 sets. */
 	static readonly MUTE_MS = MUTE_MS;
+}
+
+/** One row of the opt-in list. Times unix ms. */
+export interface OptinUser {
+	userId: number;
+	optin: "subscribed" | "not_subscribed" | null;
+	optinAt: number | null;
+	lastSeen: number | null;
+	online: boolean;
+	/** Set while muted (a refused send mutes the player for 7 days). */
+	muteUntil: number | null;
+	/** Real sends (not tests) and opens in notify.db (kept 120 days). */
+	sends: number;
+	opened: number;
+}
+
+/** A cursor from GET /v1/notify/users (`<at>.<uid>`), or undefined when malformed. */
+export function parseOptinCursor(text: string): OptinCursor | undefined {
+	const m = /^(\d{1,16})\.(\d{1,19})$/.exec(text);
+	if (!m) return undefined;
+	const at = Number(m[1]);
+	const uid = Number(m[2]);
+	return Number.isSafeInteger(at) && Number.isSafeInteger(uid) ? { at, uid } : undefined;
+}
+
+function parseParams(text: string | null): unknown {
+	if (!text) return null;
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		return null;
+	}
 }
 
 /**
