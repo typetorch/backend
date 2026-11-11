@@ -174,6 +174,10 @@ export interface ServerConfig {
 	notifyClock: "rolling24" | "utc_day";
 	/** TYPETORCH_NOTIFY_KINDS_OFF: kinds switched off by default (comma separated). */
 	notifyKindsOff: string[];
+	/** TYPETORCH_KEYS_RATE_PER_MINUTE (default 120): requests a minute per named API key (plans/31). */
+	keysRatePerMinute: number;
+	/** TYPETORCH_PLAYERS_SUPPORT_EVENTS: the event names support keys read per player (comma separated). */
+	supportEvents: string[];
 	/** TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS (default 6): an online presence older than this no longer counts. */
 	notifyPresenceStaleHours: number;
 	/** TYPETORCH_NOTIFY_KEY: the launch-data signing key (current only), over <data>/notify-keys.json. Never logged. */
@@ -539,6 +543,10 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		notifyRate: num(env, "TYPETORCH_NOTIFY_RATE", 50, 1, 4000),
 		notifyClock: env.TYPETORCH_NOTIFY_CLOCK === "utc_day" ? "utc_day" : "rolling24",
 		notifyPresenceStaleHours: num(env, "TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS", 6, 1, 168),
+		keysRatePerMinute: num(env, "TYPETORCH_KEYS_RATE_PER_MINUTE", 120, 1, 100_000),
+		supportEvents: env.TYPETORCH_PLAYERS_SUPPORT_EVENTS
+			? [...new Set(env.TYPETORCH_PLAYERS_SUPPORT_EVENTS.split(",").map((n) => n.trim()).filter((n) => /^[A-Za-z0-9_.:-]{1,128}$/.test(n)))].slice(0, 64)
+			: ["ac_flag", "ac_action", "ac_honeypot", "join", "leave"],
 		notifyKindsOff: (env.TYPETORCH_NOTIFY_KINDS_OFF ?? "").split(",").map((k) => k.trim()).filter((k) => /^[a-z0-9_]{1,24}$/.test(k)).slice(0, 64),
 		alertWebhookLevels: levels,
 		fleetNewJobsPerMinute: num(env, "TYPETORCH_NEW_JOBS_PER_MINUTE", FLEET_NEW_JOBS_PER_MINUTE, 1, 1_000_000),

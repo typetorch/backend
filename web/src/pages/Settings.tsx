@@ -31,6 +31,7 @@ const GROUPS: { id: RuntimeSetting["group"]; title: string; description: string 
 	{ id: "access", title: "Access", description: "Who may reach the explorer, and how owners sign in." },
 	{ id: "limits", title: "Rate limits", description: "Per minute. Game servers past a limit get 429 and retry." },
 	{ id: "retention", title: "Retention and error budgets", description: "How long data is kept, and how much error data is stored." },
+	{ id: "keys", title: "API keys", description: "Named API keys (typetorch keys): the requests a minute per key, and the events a support key may read per player." },
 	{ id: "notify", title: "Notifications", description: "Experience notifications: pause, dry run, the send rate ceiling and the day clock. The Notifications page has the per-kind switches." },
 ];
 
@@ -85,7 +86,7 @@ export function buildChanges(settings: RuntimeSetting[], draft: Draft, newSecret
 			const result = alertRulesChange(setting.rules, value as AlertRulesDraft);
 			if ("problem" in result) problems[key] = `a valid value (${result.problem})`;
 			else changes[key] = result.value;
-		} else if (setting.kind === "ips" || setting.kind === "users") changes[key] = splitList(String(value));
+		} else if (setting.kind === "ips" || setting.kind === "users" || setting.kind === "names") changes[key] = splitList(String(value));
 		else changes[key] = value;
 	}
 	const secret = newSecret.trim();
@@ -351,14 +352,15 @@ function SettingsForm({ data }: { data: SettingsView }) {
 					/>
 				);
 			case "ips":
-			case "users": {
+			case "users":
+			case "names": {
 				const text = Array.isArray(shown) ? (shown as (string | number)[]).join("\n") : String(shown ?? "");
 				return (
 					<Textarea
 						id={id}
 						className="max-w-md font-mono text-xs"
 						rows={3}
-						placeholder={setting.kind === "users" ? "One Roblox UserId per line (empty: no viewers)" : "Empty: any address"}
+						placeholder={setting.kind === "users" ? "One Roblox UserId per line (empty: no viewers)" : setting.kind === "names" ? "One event name per line" : "Empty: any address"}
 						spellCheck={false}
 						value={text}
 						disabled={disabled}

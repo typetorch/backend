@@ -16,6 +16,7 @@ import { notifyQueue } from "./notify-queue.ts";
 import { monetization, monetizationPlayers, monetizationPurchases } from "./monetization.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
+import { playerEvents, playerSummary } from "./player-support.ts";
 import { perfClient, perfCompare, perfServer } from "./perf.ts";
 
 export const QUERIES = {
@@ -29,6 +30,8 @@ export const QUERIES = {
 	timeline,
 	"player-graph": playerGraph,
 	"player-stats": playerStats,
+	"player-events": playerEvents,
+	"player-summary": playerSummary,
 	flow,
 	experiment,
 	"experiment-players": experimentPlayers,

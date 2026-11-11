@@ -50,6 +50,12 @@
  *   POST /v1/erasure                Roblox Right to Erasure webhook (signed), or { pid | pids } with the admin token
  *   GET|PUT /v1/notify/config, GET /v1/notify/status, PUT /v1/notify/keys, POST /v1/notify/test | send   (owners;
  *                                   experience notifications, plans/29: the pushed config, the queue, the signing keys, sends)
+ *   GET|POST /v1/admin/keys, DELETE /v1/admin/keys/<id>   named API keys (plans/31, server/keys.ts; the secret only in the POST answer)
+ *   GET  /v1/players/by-uid/<uid>/events | summary   one player's support rows (plans/31; a `players:read` key or an admin;
+ *                                   pids from identities, the event names in `players.supportEvents` unless admin; audited)
+ *
+ *   named API keys (`ttk_<id>_<secret>`, plans/31): a Bearer with a role (game, lookup, support, analyst, admin); each
+ *   route needs one scope (keys.ts scopeOf); outside it 403 { error: "forbidden", need }; `keys.ratePerMinute` per key.
  *   GET  /v1/admin/settings         runtime settings (server/runtime-settings.ts): values, sources, bounds, audit; secrets as set/not set
  *   PATCH /v1/admin/settings        { key: value | null } (null = back to the environment), applied at once; lockout guards
  *   POST /v1/admin/settings/test-alert   one test alert through the current webhook (3 a minute)
@@ -106,6 +112,8 @@ import { validateSettings } from "../settings.ts";
 import { BatchShapeError, validateBatch } from "../validate.ts";
 import { PACKAGE } from "../version.ts";
 import { AccessError, AccessStore } from "./access.ts";
+import { KeyError, KeyStore, scopeOf, type CallerKey } from "./keys.ts";
+import { NAMES_MAX } from "../queries/player-support.ts";
 import { ANONYMOUS, AUDIT_PAGE_MAX, AuditLog, actorOfUser, routeAction, settingChanges, type AuditActor, type AuditOutcome, type AuditRole, type AuditVia } from "./audit.ts";
 import { BackupError, Backups } from "./backup.ts";
 import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
@@ -337,12 +345,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		maxKinds: () => runtime.get("errorMaxKinds"),
 		rowsPerDay: () => runtime.get("errorRowsPerDay"),
 	});
+	/** Named API keys made by this process (plans/31): redacted from the audit whatever a handler puts there (bounded). */
+	const madeKeys: string[] = [];
 	// The audit log (server/audit.ts): every secret in play is redacted from it, whatever a handler puts in the details.
 	const audit = await AuditLog.open(sqlite, {
 		clock,
 		log,
 		keepDays: () => runtime.get("auditKeepDays"),
-		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl")],
+		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys],
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	// Plans/29: experience notifications, in notify.db next to the fleet file. Backend rows go to the events like a game's.
@@ -467,7 +477,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// Auth -------------------------------------------------------------------------------------------------------------
 	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
+	// Named API keys (plans/31) in the fleet SQLite file; the secrets made here go on the audit's redaction list.
+	const keys = await KeyStore.open(sqlite, clock);
 	const auth = new Auth({
+		keys,
 		adminToken: config.adminToken,
 		apiKeys: config.apiKeys,
 		...(config.lookupToken ? { lookupToken: config.lookupToken } : {}),
@@ -574,6 +587,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// Plans/29: notification calls per address per minute (game servers share egress addresses), admin sends per minute.
 	const notifyLimiter = new RateLimiter(NOTIFY_IP_PER_MINUTE, clock);
 	const notifyAdminLimiter = new RateLimiter(NOTIFY_ADMIN_PER_MINUTE, clock);
+	// Plans/31: requests per named key per minute (game keys keep the ingest limits).
+	const keyLimiter = new RateLimiter(() => runtime.get("keys.ratePerMinute"), clock);
 	const keepOpen = new WeakMap<Request, () => void>();
 	const backupLimiter = new RateLimiter(BACKUPS_PER_MINUTE, clock);
 	// Backups (server/backup.ts): SQLite by VACUUM INTO on a worker, DuckDB between the warehouse's jobs.
@@ -957,12 +972,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!adminIpOk(ip)) return notFound();
 		const blocked = blockedResponse(ip);
 		if (blocked) return blocked;
-		let caller = "lookup token";
-		if (!auth.hasLookupBearer(req)) {
+		let caller = auth.key(req) ? `key ${auth.key(req)?.name}` : "lookup token";
+		if (!auth.mayResolve(req)) {
 			const gate = adminGate(req, ip);
 			if ("response" in gate) return gate.response;
 			const user = gate.principal.user;
-			caller = user.kind === "roblox" ? `owner ${user.userId}` : "admin token";
+			caller = user.kind === "roblox" ? `owner ${user.userId}` : user.kind === "key" ? `key ${user.name}` : "admin token";
 		}
 		if (req.method !== "GET") return json(405, { error: "GET only" });
 		if (!resolveLimiter.take(ip)) return tooMany(resolveLimiter.retryAfter(ip));
@@ -1583,6 +1598,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const blocked = blockedResponse(ip);
 		if (blocked) return blocked;
 		if (!checkLimiter.take(ip)) return tooMany(checkLimiter.retryAfter(ip));
+		const key = auth.key(req);
+		if (key && (key.role === "lookup" || key.role === "support")) {
+			return json(200, { ok: true, role: key.role, via: "bearer", key: { id: key.id, name: key.name }, scopes: [...key.scopes], service: "typetorch-backend", version: PACKAGE.version });
+		}
 		if (auth.hasLookupBearer(req)) return json(200, { ok: true, role: "lookup", via: "bearer", routes: ["GET /v1/identity/resolve"], service: "typetorch-backend", version: PACKAGE.version });
 		const principal = auth.principal(req);
 		if (principal && (principal.role === "game" || adminIpOk(ip))) {
@@ -1590,7 +1609,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			// `parts`: what this server runs, so `typetorch fleet setup` / `settings set analytics` can refuse a game key for a
 			// part that is off (a game key writes to every part that runs; the admin token reads them).
 			const parts = { analytics: config.parts.has("analytics"), fleet: config.parts.has("fleet") };
-			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), service: "typetorch-backend", version: PACKAGE.version, parts, ...dashboard(), ...untrustedOwner(principal) });
+			const named = auth.key(req);
+			return json(200, {
+				ok: true,
+				role: principal.role,
+				via: principal.via,
+				...(user ? { user } : {}),
+				...(named ? { key: { id: named.id, name: named.name, role: named.role }, scopes: [...named.scopes] } : {}),
+				service: "typetorch-backend",
+				version: PACKAGE.version,
+				parts,
+				...dashboard(),
+				...untrustedOwner(principal),
+			});
 		}
 		if (bearer(req) !== undefined) failedAuth(ip, "token check", "bearer");
 		return json(401, { error: "sign in required", login: loginOptions() });
@@ -1862,10 +1893,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return new Response(answer, { status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 	}
 
+	/** A named API key (plans/31), even an admin one: never the owner list or the trust-link keys (the env admin token only). */
+	const isNamedKey = (principal: Principal): boolean => "user" in principal && principal.user.kind === "key";
+
 	/** PUT /v1/access/keys { keys } (the admin token only): the signing keys a blessing link may be signed with. */
 	async function putBlessKeys(req: Request, principal: Principal): Promise<Response> {
 		if (!central) return centralOff();
 		if (principal.via !== "bearer") return json(403, { error: "the signing keys are set with the admin token (the CLI), not from the explorer" });
+		if (isNamedKey(principal)) return json(403, { error: "the signing keys are set with the admin token (the CLI), not with a named API key" });
 		const raw = await readCapped(req, 8 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: { keys?: unknown };
@@ -1888,6 +1923,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	/** PUT /v1/access (the admin token only: the CLI sends the signed access list's owners). */
 	async function putAccess(req: Request, principal: Principal): Promise<Response> {
 		if (principal.via !== "bearer") return json(403, { error: "the owner list is set with the admin token (the CLI), not from the explorer" });
+		if (isNamedKey(principal)) return json(403, { error: "the owner list is set with the admin token (the CLI), not with a named API key" });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: unknown;
@@ -1921,6 +1957,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	/** Who is changing settings, for the audit list and the log: never a token; a Roblox name made safe. */
 	function actorOf(principal: Principal & { role: "admin" }): SettingsActor {
+		if (principal.user.kind === "key") return { who: `key ${principal.user.name} (${principal.user.id})`, via: "bearer" };
 		if (principal.via === "bearer") return { who: "admin token", via: "bearer" };
 		if (principal.user.kind === "roblox") {
 			// The username (Roblox allows letters, digits and _); the "Roblox user <id>" stand-in adds nothing.
@@ -2016,6 +2053,134 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		runtime.recordTest(actor, result.ok ? `sent (HTTP ${result.status})` : `failed: ${result.error}`);
 		noteAudit(req, { action: "settings.test-alert", details: { result: result.ok ? `sent (HTTP ${result.status})` : `failed: ${result.error}` } });
 		return json(result.ok ? 200 : 502, result);
+	}
+
+	// Named API keys (plans/31) ------------------------------------------------------------------------------------------
+
+	/** GET|POST /v1/admin/keys, DELETE /v1/admin/keys/<id> (admin). The secret is in the POST answer only, never audited. */
+	async function keysRoute(req: Request, path: string, url: URL, admin: Principal & { role: "admin" }): Promise<Response> {
+		const method = req.method;
+		const builtIns = { api: config.apiKeys.length > 0, apiPrevious: config.apiKeys.length > 1, lookup: Boolean(config.lookupToken) };
+		if (path === "/v1/admin/keys") {
+			if (method === "GET") return json(200, { keys: keys.list(url.searchParams.get("all") === "1", builtIns) });
+			if (method !== "POST") return json(405, { error: "GET or POST only" });
+			if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { name, role, expiresDays? }" });
+			const raw = await readCapped(req, 4096);
+			if (!raw) return json(413, { error: "body too large" });
+			let body: unknown;
+			try {
+				body = JSON.parse(Buffer.from(raw).toString("utf8"));
+			} catch {
+				return json(400, { error: "body is not JSON" });
+			}
+			try {
+				const made = await keys.create(body, actorOf(admin).who);
+				madeKeys.push(made.key);
+				if (madeKeys.length > 200) madeKeys.shift();
+				noteAudit(req, { action: "keys.create", details: { id: made.info.id, name: made.info.name, role: made.info.role, expiresAt: made.info.expiresAt } });
+				log(`api key ${made.info.id} (${made.info.name}, role ${made.info.role}) created by ${actorOf(admin).who}`);
+				const { id, name, role, scopes, createdAt, expiresAt } = made.info;
+				return json(201, { id, key: made.key, name, role, scopes, createdAt, expiresAt }, { "cache-control": "no-store" });
+			} catch (error) {
+				if (error instanceof KeyError) {
+					noteAudit(req, { action: "keys.create", outcome: "failed", details: { error: error.message } });
+					return json(error.status, { error: error.message });
+				}
+				throw error;
+			}
+		}
+		const id = decodeURIComponent(path.slice("/v1/admin/keys/".length));
+		if (method !== "DELETE") return json(405, { error: "DELETE only" });
+		if (!/^([0-9a-z]{10}|env:[a-z-]{1,20})$/.test(id)) return json(400, { error: "bad key id" });
+		try {
+			const done = await keys.revoke(id);
+			noteAudit(req, { action: "keys.revoke", details: { id } });
+			log(`api key ${id} revoked by ${actorOf(admin).who}`);
+			return json(200, { ok: true, ...done });
+		} catch (error) {
+			if (error instanceof KeyError) {
+				noteAudit(req, { action: "keys.revoke", outcome: "refused", details: { id, error: error.message } });
+				return json(error.status, { error: error.message });
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * GET /v1/players/by-uid/<uid>/events | summary (plans/31): a key with `players:read` (support, admin) or an admin
+	 * session / token. The UserId comes from the path, its pids from `identities` (erased ones left out); the event names
+	 * must be in `players.supportEvents` unless the caller is an admin. Every call is audited (who, the route template,
+	 * the status, a pid count), never the UserId.
+	 */
+	async function playerSupport(req: Request, url: URL, uidText: string, which: "events" | "summary", ip: string): Promise<Response> {
+		let caller: { key?: CallerKey; admin: boolean; principal?: Principal } | undefined;
+		const key = auth.key(req);
+		if (key) caller = { key, admin: key.role === "admin" };
+		else {
+			const gate = adminGate(req, ip);
+			if ("response" in gate) return gate.response;
+			caller = { admin: true, principal: gate.principal };
+		}
+		let pidCount = 0;
+		const response = await (async (): Promise<Response> => {
+			const uid = parseUid(uidText);
+			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
+			const now = clock();
+			const num = (name: string): number | undefined | null => {
+				const v = url.searchParams.get(name);
+				if (v === null || v === "") return undefined;
+				return /^\d{1,16}$/.test(v) ? Number(v) : null;
+			};
+			const since = num("since");
+			const before = which === "events" ? num("before") : undefined;
+			if (since === null || before === null) return json(400, { error: "since / before are unix ms" });
+			const from = since ?? now - 30 * DAY_MS;
+			const to = before ?? now + 1;
+			if (from >= to) return json(400, { error: "since must be before before" });
+			const allowed = runtime.get("players.supportEvents");
+			let names = allowed;
+			if (which === "events") {
+				const limitText = url.searchParams.get("limit");
+				if (limitText !== null && (!/^\d{1,4}$/.test(limitText) || Number(limitText) < 1 || Number(limitText) > 100)) return json(400, { error: "limit is 1 to 100" });
+				const given = url.searchParams.get("names");
+				if (given !== null && given !== "") {
+					names = [...new Set(given.split(",").map((n) => n.trim()).filter(Boolean))];
+					if (names.length > NAMES_MAX || names.some((n) => !/^[A-Za-z0-9_.:-]{1,128}$/.test(n))) return json(400, { error: "names is a comma list of event names" });
+					if (!caller.admin) {
+						const bad = names.find((n) => !allowed.includes(n));
+						if (bad) return json(403, { error: "event_not_allowed", name: bad });
+					}
+				}
+			}
+			const pids = (await identities.byUid(uid)).map((i) => i.pid).filter((p) => !warehouse?.isErased(p));
+			pidCount = pids.length;
+			if (!pids.length) {
+				return json(200, which === "events" ? { uid, known: false, pids: [], rows: [], more: false } : { uid, known: false, pids: [], since: from, byName: Object.fromEntries(names.map((n) => [n, 0])), byCategory: {}, sessions: 0, lastSeen: null });
+			}
+			const w = analyticsOr();
+			if (w instanceof Response) return w;
+			const filters = { from, to };
+			const options = { pids: pids.slice(0, 50), names, ...(which === "events" ? { limit: Number(url.searchParams.get("limit") ?? 50) } : {}) };
+			if (which === "events") {
+				const r = (await w.query("player-events", filters, options)) as { rows: unknown[]; more: boolean };
+				return json(200, { uid, known: true, pids, rows: r.rows, more: r.more });
+			}
+			const r = (await w.query("player-summary", filters, options)) as { byName: Record<string, number>; byCategory: Record<string, number>; sessions: number; lastSeen: number | null };
+			return json(200, { uid, known: true, pids, since: from, ...r });
+		})();
+		// The audit row: who, the route template, the status, a pid count. Never the UserId (the audit log is read more widely).
+		const actor = caller.key ? { kind: "api-key" as const, label: `key ${caller.key.name} (${caller.key.id})` } : caller.principal && "user" in caller.principal ? actorOfUser(caller.principal.user) : ANONYMOUS;
+		await audit.record({
+			actor,
+			role: caller.admin ? "admin" : "none",
+			via: caller.principal?.via ?? "bearer",
+			ip,
+			action: "players.read",
+			outcome: response.status < 400 ? "ok" : response.status === 403 || response.status === 429 ? "refused" : "failed",
+			status: response.status,
+			details: { route: `/v1/players/by-uid/:uid/${which}`, ...(caller.key ? { key: caller.key.id, keyName: caller.key.name, keyRole: caller.key.role } : {}), pids: pidCount },
+		});
+		return response;
 	}
 
 	// The audit log and backups (owners only) ----------------------------------------------------------------------------
@@ -2205,9 +2370,34 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return text(llmsTxt(o), "text/markdown; charset=utf-8");
 	}
 
+	/**
+	 * Plans/31: a named key (`ttk_...`) is checked before any route: unknown / revoked / expired = 401 (counted like a
+	 * wrong token), the route's scope (keys.ts scopeOf) = 403 { error: "forbidden", need }, `keys.ratePerMinute` per key =
+	 * 429. The env tokens are not named keys and keep their own checks.
+	 */
+	function keyGate(req: Request, path: string, ip: string): Response | undefined {
+		const token = bearer(req);
+		if (!KeyStore.looksLikeKey(token)) return undefined;
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		const key = keys.resolve(token);
+		if (!key) {
+			failedAuth(ip, "api key", "bearer");
+			return json(401, { error: "unknown, revoked or expired key" });
+		}
+		const need = scopeOf(req.method, path);
+		if (!key.scopes.includes(need)) return json(403, { error: "forbidden", need });
+		if (key.role !== "game" && !keyLimiter.take(key.id)) return json(429, { error: "rate_limited" }, { "retry-after": String(keyLimiter.retryAfter(key.id)) });
+		return undefined;
+	}
+
 	async function route(req: Request, url: URL, path: string, ip: string): Promise<Response> {
 		const method = req.method;
 		if (method === "OPTIONS") return json(405, { error: "no CORS here: use the same origin or a Bearer token" });
+		if (path !== "/healthz" && path !== "/v1/auth/check") {
+			const refused = keyGate(req, path, ip);
+			if (refused) return refused;
+		}
 		if (path === "/healthz" && method === "GET") return health(req, ip);
 		// The machine-readable docs (openapi.ts), for the allow list's addresses like the explorer.
 		if (path === "/openapi.json" || path === "/docs" || path === "/docs/swagger-init.js" || path === "/llms.txt") {
@@ -2297,6 +2487,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		// pid <-> UserId for the admin role and the lookup token (which reaches nothing else; readGate refuses it).
 		if (path === "/v1/identity/resolve") return resolveIdentity(req, url, ip);
 
+		// Plans/31: one player's support rows (a players:read key, or an admin).
+		const byUid = /^\/v1\/players\/by-uid\/([^/]+)\/(events|summary)$/.exec(path);
+		if (byUid) return method === "GET" ? playerSupport(req, url, byUid[1] as string, byUid[2] as "events" | "summary", ip) : json(405, { error: "GET only" });
+
 		// Everything else under /v1 reads (every signed-in role) or manages (admin only; `manage` answers 403 to the web role).
 		if (path.startsWith("/v1/")) {
 			const gate = readGate(req, ip);
@@ -2352,6 +2546,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				});
 			}
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
+			if (path === "/v1/admin/keys" || path.startsWith("/v1/admin/keys/")) {
+				const admin = manage();
+				return admin instanceof Response ? admin : keysRoute(req, path, url, admin);
+			}
 			if (path === "/v1/admin/settings") {
 				if (method !== "GET" && method !== "PATCH") return json(405, { error: "GET or PATCH only" });
 				const admin = manage();

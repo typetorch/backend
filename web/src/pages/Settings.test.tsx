@@ -201,6 +201,18 @@ describe("settings helpers", () => {
 		expect(numberProblem({ min: 1, max: 10 }, "0")).toBe("from 1 to 10");
 	});
 
+	it("the support events list (plans/31) is edited as names, one per line, and saved as a list", async () => {
+		const names: RuntimeSetting = { key: "players.supportEvents", env: "TYPETORCH_PLAYERS_SUPPORT_EVENTS", group: "keys", kind: "names", label: "Support events", help: "Event names a support key may read.", source: "default", maxEntries: 64, value: ["ac_flag", "join"], fallback: ["ac_flag", "join"], fallbackSource: "default" };
+		const save = vi.spyOn(api, "saveSettings").mockResolvedValue({ ...view, changed: ["players.supportEvents"] });
+		mount({ ...view, settings: [...settings, names] });
+		const field = within(await findRow("players.supportEvents")).getByRole("textbox") as HTMLTextAreaElement;
+		expect(field.value).toBe("ac_flag\njoin");
+		expect(screen.getByText("API keys")).toBeTruthy();
+		fireEvent.change(field, { target: { value: "ac_flag\nac_action, leave" } });
+		fireEvent.click(saveButton());
+		await waitFor(() => expect(save).toHaveBeenCalledWith({ "players.supportEvents": ["ac_flag", "ac_action", "leave"] }));
+	});
+
 	it("splitList and buildChanges", () => {
 		expect(splitList(" 10.0.0.0/8,\n203.0.113.7  2001:db8::/32 ")).toEqual(["10.0.0.0/8", "203.0.113.7", "2001:db8::/32"]);
 		expect(splitList("")).toEqual([]);

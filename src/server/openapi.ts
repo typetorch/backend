@@ -11,7 +11,7 @@ import { PACKAGE } from "../version.ts";
 import { NAME_MAX as SAVED_QUERY_NAME_MAX, PINNED_MAX, SAVED_QUERIES_MAX, SAVED_QUERY_CHARTS, WRITES_PER_MINUTE as SAVED_QUERY_WRITES } from "./saved-queries.ts";
 
 /** Who may call a route: the roles of README "Routes and roles". */
-type Role = "game" | "admin" | "web" | "lookup" | "open" | "adminToken";
+type Role = "game" | "admin" | "web" | "lookup" | "open" | "adminToken" | "support";
 
 type Schema = Record<string, unknown>;
 
@@ -223,6 +223,9 @@ const ROUTES: Route[] = [
 		summary: "The newest sends of everyone, newest first (default 100, at most 500), with the cached username / display name",
 		params: [q("limit", "1..500, default 100"), q("kind", "only this kind")],
 	},
+	{ method: "get", path: "/v1/admin/keys", tag: "admin", roles: ["admin"], summary: "Named API keys (plans/31): id, name, role, scopes, dates; built-in env tokens too; never a secret or hash", params: [q("all", "1 = include revoked keys")] },
+	{ method: "post", path: "/v1/admin/keys", tag: "admin", roles: ["admin"], summary: "Create a named API key: `201 { id, key, name, role, scopes, createdAt, expiresAt }` (the key only here, once)", body: obj({ name: str(), role: str("game | lookup | support | analyst | admin"), expiresDays: int("1..3650") }, ["name", "role"]) },
+	{ method: "delete", path: "/v1/admin/keys/{id}", tag: "admin", roles: ["admin"], summary: "Revoke a named API key (built-in ids answer 400)", params: [p("id", "the key id")] },
 	{ method: "put", path: "/v1/notify/keys", tag: "notify", roles: ["admin"], summary: "The launch-data signing keys `{ current, previous?, since }` (never returned or logged)", body: obj({ current: str(), previous: str(), since: int("unix seconds") }, ["current", "since"]) },
 	{ method: "post", path: "/v1/notify/test", tag: "notify", roles: ["admin"], summary: "One send of a kind now, bypassing the caps (marked test): `{ nid, status }`", body: obj({ userId: int(), kind: str(), params: obj(), data: str() }, ["userId", "kind"]) },
 	{ method: "post", path: "/v1/notify/send", tag: "notify", roles: ["admin"], summary: "A one-off send (kind custom; respects the mute and the day cap): `{ nid, status }` or `{ skipped }`", body: obj({ userId: int(), template: str(), params: obj(), data: str() }, ["userId", "template"]) },
@@ -339,6 +342,23 @@ const ROUTES: Route[] = [
 		summary: "pid <-> UserId in bulk (the lookup token's only route)",
 		description: "At most 100 ids. `{ byPid: [{ pid, uid | null }], byUid: [{ uid, pids }] }`. Ids only. 60 a minute per address.",
 		params: [q("pid", "comma-separated pids (or repeat)"), q("uid", "comma-separated UserIds (or repeat)")],
+	},
+	{
+		method: "get",
+		path: "/v1/players/by-uid/{uid}/events",
+		tag: "players",
+		roles: ["admin", "support"],
+		summary: "One player's support rows (players:read): the allow-listed event names, newest first",
+		description: "`{ uid, known, pids, rows: [{ t, name, kind, pid, job, props }], more }`; pids from identities; names outside `players.supportEvents` answer 403 `{ error: event_not_allowed, name }` unless admin. Audited (never the UserId).",
+		params: [p("uid", "a Roblox UserId"), q("names", "comma list of event names (default: the allow-list)"), q("since", "unix ms (default: 30 days ago)", int()), q("before", "unix ms (default: now)", int()), q("limit", "1 to 100 (50)", int())],
+	},
+	{
+		method: "get",
+		path: "/v1/players/by-uid/{uid}/summary",
+		tag: "players",
+		roles: ["admin", "support"],
+		summary: "One player's support summary (players:read): counts per allow-listed name, ac_flag by category, sessions, last seen",
+		params: [p("uid", "a Roblox UserId"), q("since", "unix ms (default: 30 days ago)", int())],
 	},
 	{ method: "get", path: "/v1/identity/{pid}/profile", tag: "players", roles: ["admin", "web"], summary: "A pid's UserId, Roblox names and headshot", params: [p("pid", "a pid")] },
 	{
@@ -517,6 +537,7 @@ const ROLE_TEXT: Record<Role, string> = {
 	web: "web (read-only viewer session)",
 	lookup: "lookup token",
 	adminToken: "the admin token only (not a session)",
+	support: "a named key with players:read (support or admin role)",
 };
 
 function security(roles: Role[]): Record<string, string[]>[] {
@@ -526,6 +547,7 @@ function security(roles: Role[]): Record<string, string[]>[] {
 	if (roles.includes("admin") || roles.includes("adminToken")) out.push({ adminToken: [] });
 	if (roles.includes("admin") || roles.includes("web")) out.push({ session: [] });
 	if (roles.includes("lookup")) out.push({ lookupToken: [] });
+	if (roles.includes("support")) out.push({ namedKey: [] });
 	return out;
 }
 
@@ -585,6 +607,7 @@ export function openApiSpec(o: DocsOptions = {}): Schema {
 				apiKey: { type: "http", scheme: "bearer", description: "The game API key (TYPETORCH_API_KEY, or the previous key): writes only." },
 				adminToken: { type: "http", scheme: "bearer", description: "The admin token (TYPETORCH_ADMIN_TOKEN): reads and manages everything." },
 				lookupToken: { type: "http", scheme: "bearer", description: "TYPETORCH_LOOKUP_TOKEN: GET /v1/identity/resolve only (for scripts and LLM agents)." },
+				namedKey: { type: "http", scheme: "bearer", description: "A named API key `ttk_<id>_<secret>` (plans/31; POST /v1/admin/keys): a role (game, lookup, support, analyst, admin) and its scopes; a route outside them answers 403 { error: forbidden, need }." },
 				session: { type: "apiKey", in: "cookie", name: "tt_session", description: "An explorer session (admin for owners, web for viewers). A mutation from a cookie needs a same-origin request." },
 			},
 			schemas: SCHEMAS,
