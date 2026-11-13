@@ -60,7 +60,7 @@ export interface NotifyOptions {
 	switches: NotifySwitches;
 	/** S1b: turn a kind off for good (app.ts: the runtime setting, audited as the system) and alert. */
 	stopKind(kind: string, why: "bad_template"): void;
-	/** A 401 / 403 from Roblox: turn notifications off (app.ts: `notify.enabled = false` as the system, audited). */
+	/** A 401 (or 3 403s in a row) from Roblox: turn notifications off (app.ts: `notify.enabled = false` as the system, audited). */
 	stopAll(why: "auth"): void;
 	/** UserId -> the pid for backend rows ("" when unknown); erased players are never named. */
 	pidOf(userId: number): Promise<string>;
@@ -94,7 +94,7 @@ export class NotifyService {
 	private halted = new Map<string, Halt>();
 	/** Game-supplied templates (allowTemplate) Roblox said don't exist. */
 	private haltedTemplates = new Map<string, number>();
-	/** Every send stopped: the key was refused (401 / 403). */
+	/** Every send stopped: the key was refused (401, or 3 403s in a row). */
 	private haltedAll: { why: "auth"; at: number } | undefined;
 	private flushing: Promise<number> | undefined;
 	private readonly clock: () => number;
@@ -197,12 +197,12 @@ export class NotifyService {
 		this.log("alert: a game-supplied notification template (message id) does not exist on Roblox: intents using it wait (a config push clears it)");
 	}
 
-	/** 401 / 403: the API key is refused. Every send stops until an owner turns notifications back on (or pushes a config). */
+	/** 401, or 3 403s in a row: the API key is refused. Every send stops until an owner turns notifications back on (or pushes a config). */
 	async haltAll(why: "auth"): Promise<void> {
 		if (this.haltedAll) return;
 		this.haltedAll = { why, at: this.clock() };
 		await this.durable.setJson(HALTED_ALL_KEY, this.haltedAll);
-		this.log("alert: notifications stopped: Roblox refused the Open Cloud key (401 / 403): check OPENCLOUD_NOTIFY_KEY's scope (user-notifications) and universe, then turn notifications back on");
+		this.log("alert: notifications stopped: Roblox refused the Open Cloud key (401, or 3 403s in a row): check OPENCLOUD_NOTIFY_KEY's scope (user-notifications) and universe, then turn notifications back on");
 		try {
 			this.o.stopAll(why);
 		} catch (error) {
@@ -404,7 +404,7 @@ export class NotifyService {
 			kinds,
 			// Per kind ({kind, why: "bad_template", at}), plus a kind-less {why: "auth", at} while every send is stopped.
 			halted: [...[...this.halted].map(([kind, h]) => ({ kind, why: h.why, at: h.at })), ...(this.haltedAll ? [{ why: this.haltedAll.why, at: this.haltedAll.at }] : [])],
-			// Every send stopped: Roblox refused the key (401 / 403). Ends when an owner turns notify.enabled back on.
+			// Every send stopped: Roblox refused the key (401, or 3 403s in a row). Ends when an owner turns notify.enabled back on.
 			haltedAll: this.haltedAll ? { why: this.haltedAll.why, at: this.haltedAll.at } : null,
 			haltedTemplates: [...this.haltedTemplates].map(([template, at]) => ({ template, at })),
 			presenceStaleHours: s.presenceStaleHours(),

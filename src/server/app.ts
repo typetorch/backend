@@ -380,7 +380,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			presenceStaleHours: () => runtime.get("notify.presenceStaleHours"),
 		},
 		stopAll: (why) => {
-			// 401 / 403: every send stops; an owner turning notify.enabled back on (or a config push) resumes them.
+			// 401, or 3 403s in a row: every send stops; an owner turning notify.enabled back on (or a config push) resumes them.
 			try {
 				runtime.patchBySystem({ "notify.enabled": false }, "system (notify: Open Cloud key refused)");
 			} catch (error) {

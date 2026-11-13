@@ -104,7 +104,8 @@ describe("classify", () => {
 		[500, {}, "retry"],
 		[503, "not json", "retry"],
 		[401, { code: "UNAUTHENTICATED" }, "fatal"],
-		[403, { code: "PERMISSION_DENIED" }, "fatal"],
+		[403, { code: "PERMISSION_DENIED" }, "forbidden"],
+		[403, {}, "forbidden"],
 	])("HTTP %d %j -> %s", (http, body, outcome) => {
 		expect(classify(http as number, body)).toBe(outcome as ReturnType<typeof classify>);
 	});
@@ -584,9 +585,9 @@ describe("review fixes (backend#23)", () => {
 		}
 	});
 
-	test("401 / 403: every send stops (kind-less halted entry), nobody is muted; turning notifications back on resumes", async () => {
+	test("401: every send stops (kind-less halted entry), nobody is muted; turning notifications back on resumes", async () => {
 		// Both sends were already on their way (4 workers): both refused, nothing more leaves after.
-		const refused = { status: 403, body: { code: "PERMISSION_DENIED", message: "scope" } };
+		const refused = { status: 401, body: { code: "UNAUTHENTICATED", message: "bad key" } };
 		const s = await setup({ answers: [refused, refused] });
 		await s.want(37, "day2");
 		await s.want(38, "gift", { key: "a" });
@@ -606,6 +607,60 @@ describe("review fixes (backend#23)", () => {
 		await s.svc.planTick();
 		await s.svc.sendTick();
 		expect(s.roblox.calls).toHaveLength(4);
+	});
+
+	test("one 403 is that recipient's alone: the send and intent fail (forbidden), the user is muted, Roblox's text kept, nothing halts", async () => {
+		// 2026-11-12: one 403 stopped every send while the same key's next sends were answered 400 not-opted-in.
+		const s = await setup({ answers: [{ status: 403, body: { errors: [{ code: 0, message: "The user cannot receive notifications." }] } }] });
+		await s.want(51, "day2");
+		await s.want(52, "day2");
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		expect(s.roblox.calls).toHaveLength(2);
+		expect(s.stoppedAll).toEqual([]);
+		expect(((await s.svc.status()).body as Record<string, any>).haltedAll ?? null).toBeNull();
+		const failedRow = s.named("failed");
+		expect(failedRow).toHaveLength(1);
+		expect(failedRow[0]).toMatchObject({ http: 403, code: "forbidden", final: true });
+		const refusedNid = failedRow[0].nid;
+		expect(await s.svc.store.send(refusedNid)).toMatchObject({ status: "failed", code: "forbidden", error: "The user cannot receive notifications." });
+		const u = Number((await s.svc.store.send(refusedNid))?.user_id);
+		expect((await s.svc.store.intent(u, "day2", ""))?.status).toBe("failed");
+		expect(Number((await s.svc.store.user(u))?.mute_until)).toBe(T0 + 7 * 86_400_000);
+		expect((await s.svc.store.intent(u === 51 ? 52 : 51, "day2", ""))?.status).toBe("sent");
+	});
+
+	test("a 403 with no message field keeps Roblox's reply as it came, cut short", async () => {
+		const s = await setup({ answers: [{ status: 403, body: "Forbidden ".repeat(60) }] });
+		await s.want(53, "day2");
+		await s.svc.planTick();
+		await s.svc.sendTick();
+		const nid = s.named("failed")[0].nid;
+		const error = (await s.svc.store.send(nid))?.error ?? "";
+		expect(error.startsWith('"Forbidden Forbidden')).toBe(true);
+		expect(error.length).toBeLessThanOrEqual(300);
+	});
+
+	test("3 403s in a row halt every send; an answer proving the key (400 not opted in) in between resets the run", async () => {
+		const no403 = { status: 403, body: {} };
+		const notOptedIn = { status: 400, body: { code: "FAILED_PRECONDITION", message: "User 1 is not opted in to receive notifications for your experience 4242." } };
+		const a = await setup({ answers: [no403, no403, notOptedIn, no403] });
+		for (const u of [61, 62, 63, 64]) await a.want(u, "day2");
+		await a.svc.planTick();
+		await a.svc.sendTick();
+		expect(a.roblox.calls).toHaveLength(4);
+		expect(a.stoppedAll).toEqual([]);
+
+		const b = await setup({ answers: [no403, no403, no403] });
+		for (const u of [71, 72, 73, 74]) await b.want(u, "day2");
+		await b.svc.planTick();
+		await b.svc.sendTick();
+		await b.svc.sendTick();
+		expect(b.stoppedAll).toEqual(["auth"]);
+		expect(((await b.svc.status()).body as Record<string, any>).haltedAll).toEqual({ why: "auth", at: T0 });
+		// The first two failed alone (forbidden); the third's send went back untouched, its intent pending.
+		expect(b.named("failed").filter((r) => r.code === "forbidden" && r.final)).toHaveLength(2);
+		expect(b.roblox.calls.length).toBeLessThanOrEqual(4);
 	});
 
 	test("a 400 other than not-opted-in fails that intent for good (no re-plan)", async () => {

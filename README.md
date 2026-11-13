@@ -1798,7 +1798,9 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
   page; turn it back on after fixing it; a game-supplied template under `allowTemplate` stops only that template, until the
   next config push); Roblox's per-recipient limit (429 `RESOURCE_EXHAUSTED`, per-recipient message) ends the send and
   re-plans for the user's next day, or, on a retry, counts as delivered (`dup_refused`: the first POST most likely went
-  out). A 401 / 403 stops every send (`halted: [{why: "auth"}]` in the status, an alert, `notify.enabled` off as the
+  out). A 403 fails only that send (`code: "forbidden"`, the intent for good, the user muted 7 days: Roblox refuses some
+  accounts, e.g. restricted ones); 3 403s in a row with no answer in between that proves the key (a 2xx, 400, 404 or
+  429), or one 401, stop every send (`halted: [{why: "auth"}]` in the status, an alert, `notify.enabled` off as the
   system; turning it back on or a config push resumes); any other refusal (e.g. 400 `INVALID_ARGUMENT`) fails that intent
   for good. `roblox_id` is Roblox's `id` only (its `path` names the user).
 - **Dry run** (`notify.dryRun`, **on by default**): everything but the POST; the send ends `dry` and its `sent` row has
