@@ -41,17 +41,29 @@ export const FATAL_RECHECK_MS = 3_600_000;
  * (`daily_limit`: no retry, no backoff, re-planned for the user's next day); any other 429 is `rate_limited`.
  * Our `dailyCap` (planner) stays the first guard.
  */
-export type Outcome = "ok" | "not_subscribed" | "bad_template" | "daily_limit" | "rate_limited" | "retry" | "fatal";
+export type Outcome = "ok" | "not_subscribed" | "bad_template" | "daily_limit" | "rate_limited" | "retry" | "forbidden" | "fatal";
+
+/**
+ * 403s in a row (no answer in between that proves the key works: a 2xx, 400, 404 or 429) before every send stops.
+ * One recipient's 403 (an account Roblox won't notify) is that send's alone (2026-11-12: one 403 halted everything
+ * while the same key's next sends were answered 400 not-opted-in, which Roblox only checks after the key).
+ */
+export const AUTH_HALT_AFTER_403 = 3;
 
 // TODO(S3): the exact per-recipient message is to be confirmed on a non-owner account (the owner skips the throttle).
 export const DAILY_LIMIT_MESSAGE = /per recipient|recipient.*(limit|throttl)|notifications? per (user|day)/i;
 
 /** Roblox's answer -> what to do. `http` 0 = no answer (network error, timeout). */
 /** Roblox's refusal as the explorer shows it: its message, plus the details when there are any (up to 1000 chars). */
-export function refusalText(body: unknown): string | null {
-	const b = (typeof body === "object" && body !== null ? body : {}) as { message?: unknown; details?: unknown };
-	const parts = [typeof b.message === "string" ? b.message : "", b.details !== undefined ? JSON.stringify(b.details) : ""].filter(Boolean);
-	return parts.length ? parts.join(" ").slice(0, 1000) : null;
+export function refusalText(body: unknown, raw?: string): string | null {
+	const b = (typeof body === "object" && body !== null ? body : {}) as { message?: unknown; details?: unknown; errors?: unknown };
+	// The legacy shape: { errors: [{ code, message }] }.
+	const legacy = Array.isArray(b.errors) ? b.errors.map((e) => (typeof e?.message === "string" ? e.message : "")).filter(Boolean).join("; ") : "";
+	const parts = [typeof b.message === "string" ? b.message : "", legacy, b.details !== undefined ? JSON.stringify(b.details) : ""].filter(Boolean);
+	if (parts.length) return parts.join(" ").slice(0, 1000);
+	// No message field (an empty or non-JSON body, a proxy's page): Roblox's reply as it came, cut short.
+	const text = raw?.replace(/\s+/g, " ").trim();
+	return text ? text.slice(0, 300) : null;
 }
 
 /** The request body a send posts (sendBody) without the signed launch data, which only the send itself makes. */
@@ -85,6 +97,8 @@ export function classify(http: number, body: unknown): Outcome {
 	// S1b: an opted-in user and a message id that doesn't exist: the kind's config is wrong.
 	if (http === 404 && code === "NOT_FOUND" && /message id/i.test(message)) return "bad_template";
 	if (http === 429) return code === "RESOURCE_EXHAUSTED" && DAILY_LIMIT_MESSAGE.test(message) ? "daily_limit" : "rate_limited";
+	// One recipient refused (a restricted account), or the key lacks the scope: the sender tells them apart by a run of 403s.
+	if (http === 403) return "forbidden";
 	return "fatal";
 }
 
@@ -248,7 +262,7 @@ export interface SenderOptions {
 	halt(kind: string, why: "bad_template"): void;
 	/** S1b for a game-supplied template (allowTemplate): only that template stops. */
 	haltTemplate(template: string): void;
-	/** 401 / 403: the API key is wrong or lacks the scope: every send stops until an owner turns notifications back on. */
+	/** 401, or AUTH_HALT_AFTER_403 403s in a row: the API key is wrong or lacks the scope: every send stops until an owner turns notifications back on. */
 	haltAll(why: "auth"): void;
 	/** Every send stopped (the auth halt). */
 	allHalted(): boolean;
@@ -271,6 +285,8 @@ export class Sender {
 	private restored = false;
 	/** A send's POST in flight (the stop waits for them; their leases cover a kill). */
 	private inflight = 0;
+	/** 403s in a row with no answer in between that proves the key works (AUTH_HALT_AFTER_403). */
+	private forbiddenRun = 0;
 
 	constructor(private readonly o: SenderOptions) {
 		this.bucket = new TokenBucket(() => o.rate(), o.clock);
@@ -371,15 +387,19 @@ export class Sender {
 			await this.sleep(Math.min(wait, 5000));
 		}
 		await store.sending(nid, attempt);
-		const { http, body, retryAfter } = await this.post(send);
+		const { http, body, retryAfter, raw } = await this.post(send);
 		const outcome = classify(http, body);
+		// Answers that prove the key and its scope work (Roblox checks auth before opt-in, the template or its limits).
+		// Counted right after the answer (before any await), so parallel workers see the true run.
+		if ((http >= 200 && http < 300) || http === 400 || http === 404 || http === 429) this.forbiddenRun = 0;
+		const keyRefused = outcome === "forbidden" && ++this.forbiddenRun >= AUTH_HALT_AFTER_403;
 		const at = this.o.clock();
 		const user = await store.user(userId);
 		const subscribed = user?.optin === "subscribed";
 		const inferred = subscribed ? [] : [row("optin_inferred", { state: "subscribed" })];
 		const code = typeof (body as { code?: unknown })?.code === "string" ? String((body as { code: string }).code).slice(0, 64) : http ? String(http) : "network";
 		const failed = (c: string, final: boolean) => row("failed", { nid, k: send.kind, http, code: c, final });
-		const error = refusalText(body);
+		const error = refusalText(body, raw);
 		switch (outcome) {
 			case "ok": {
 				// Roblox's id only: its `path` names the user (users/<UserId>/...), never stored or sent to the events.
@@ -440,8 +460,26 @@ export class Sender {
 				else await store.retryAt(nid, at + Math.max(RETRY_DELAYS_MS[attempt - 1] as number, retryAfter), [failed(code, false)]);
 				break;
 			}
+			case "forbidden": {
+				if (!keyRefused) {
+					// This recipient, not the key: the intent fails for good and the user is muted (no retry every plan).
+					await store.finish(nid, {
+						status: "failed", error, http,
+						code: "forbidden",
+						intent: test ? undefined : "failed",
+						user: { mute_until: at + MUTE_MS, next_check: at + MUTE_MS },
+						rows: [failed("forbidden", true)],
+					});
+					this.log(`notify: Roblox refused one recipient (HTTP 403${error ? `: ${error.slice(0, 120)}` : ""})`);
+					break;
+				}
+				// A run of 403s with nothing in between: the key's scope is gone. Same as a 401.
+				await store.finish(nid, { status: "cancelled", http, code, error, rows: [failed(code, false)] });
+				this.o.haltAll("auth");
+				break;
+			}
 			case "fatal":
-				if (http === 401 || http === 403) {
+				if (http === 401) {
 					// The key, not the user: put the send back untouched and stop every send until an owner turns them back on.
 					await store.finish(nid, { status: "cancelled", http, code, error, rows: [failed(code, false)] });
 					this.o.haltAll("auth");
@@ -454,7 +492,7 @@ export class Sender {
 		}
 	}
 
-	private async post(send: SendRow): Promise<{ http: number; body: unknown; retryAfter: number }> {
+	private async post(send: SendRow): Promise<{ http: number; body: unknown; retryAfter: number; raw: string }> {
 		const userId = Number(send.user_id);
 		const keys = this.o.keys();
 		let launchData: string | undefined;
@@ -483,9 +521,9 @@ export class Sender {
 				parsed = JSON.parse(text);
 			} catch {}
 			this.bucket.onHeaders(parseRateHeaders((name) => res.headers.get(name)));
-			return { http: res.status, body: parsed, retryAfter: retryAfterMs(res.headers.get("retry-after"), this.o.clock()) };
+			return { http: res.status, body: parsed, retryAfter: retryAfterMs(res.headers.get("retry-after"), this.o.clock()), raw: res.ok ? "" : text };
 		} catch {
-			return { http: 0, body: {}, retryAfter: 0 };
+			return { http: 0, body: {}, retryAfter: 0, raw: "" };
 		} finally {
 			this.inflight--;
 		}
