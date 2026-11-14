@@ -1176,6 +1176,11 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
 | `experiment-players` | the players in one `experiment` (at most 200, `limit`; one `variant` or all): per player and variant, `how` (`random`, `forced` from the row's `forced` prop, or `unknown` when the window holds only `exp` stamps), `assignedAt`, `firstAt` / `lastAt`, `events`, `mixed` (seen in two variants); `variants` (players and forced per variant), `total`, `more`. Most recently seen first. Over HTTP as `GET /v1/experiments/<key>/players?variant=&limit=&from=&to=` (or `window=7d`; the filters as repeatable params, the filter bar's variant filter as `inExperiment` + `inVariant`), with `uid` / `name` / `displayName` joined in and erased players left out | 30 days |
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
+| `recording-layers` | [first-session recordings on a map](#recordings-maps-replays-quit-autopsy): `maps` (samples, sessions, positioned events per map), the chosen `map` (default the busiest), its top-down `frame` (x right, z down; cells a multiple of 4 studs, at most `grid` (96) along the longer side), `background` (every recorded sample on it: the walkable area's silhouette), and `layers` as `[col, row, count]` cells (at most `maxCells`, 4,000): `path`, `idle` (10 s+), `death`, `spawn`, `screen_open` / `screen_close` (by screen), `button` (by path), `prompt` (used, by path), `quit` (the last position of recordings that ended with `left`), and positioned events `ev:<kind>:<name>` (optionally `split` by a props key); `values` per layer filter (`values: {layer: [...]}`), `zone` / `screen` filters; `catalog` of positioned events; `sampling` | 7 days |
+| `recording-sessions` | recorded first sessions, latest first (`limit` 50, at most 500): device, build, why it ended, length, maps, confusion signal counts. Filters: `map` (+ `box` `[x0, z0, x1, z1]` and the `layer` whose point must be in it, default `path`), `why`, `signal` (`idle`, `camera_spin`, `repeated_clicks`, optionally in a `zone` or on a `target` button), `search` (a sid or pid prefix) | 7 days |
+| `recording-replay` | one recorded session (`sid`) for the replay: `samples` `[t, x, y, z, yaw, lookY]` (ms after `start`), `inputs`, `events` (all but tech), confusion `signals`, the map over time (`maps`), the map it spent most time on (`map`) and its own `frame` | 30 days |
+| `quit-autopsy` | the recordings that ended with the player leaving (`why = left`): their last `windowSeconds` (10) classified (`screen` open, `died` / downed within `diedSeconds` (20), `idle`, `dead_clicks`, `stuck`, `tutorial` step, `place` = a map cell, `none`), each reason with its count and share among quitters, the same among the other recordings' last seconds, `lift` (the ratio: over 1 = over-represented among quitters) and example sids | 7 days |
+| `first-action` | per recorded first session, seconds from spawn to the first move (3 studs, `moveStuds`), screen the player opened, button press, prompt used, and round start (`roundEvents`, default `round_start` / `phase`, from the events): median, p25, p75, reached share and a histogram, in total, `byDevice` and `byBuild` | 7 days |
 | `top-events` | the most logged names per kind | 7 days |
 | `servers` | game servers from `fleet` heartbeat rows (history; the CLI's live view is the fleet API) | recent |
 | `deployReport` | a deploy's results, errors and servers still below its seq, from `fleet` rows | 2 days |
@@ -1278,6 +1283,44 @@ framework's own encoder, byte for byte).
 {"seq":42,"branch":"prod","artifact":"e4f5a6b-222222","reported":3,"results":[{"result":"swapped","servers":2,"players":20,"medianSeconds":1.8,"maxSeconds":2.4},{"result":"failed","servers":1,"players":10,"medianSeconds":0.4,"maxSeconds":0.4}],"errors":[{"error":"swap failed: boom","servers":1,"exampleJob":"job-4"}],"behind":[{"job":"job-4","appliedSeq":41,"health":"degraded","...":"..."}]}
 ```
 </details>
+
+### Recordings: maps, replays, quit autopsy
+
+The first-session recordings (tt-rec-1, framework SCHEMA.md) answer "what did new players do" without Roblox Studio. Each
+recorded session runs from spawn until 60 s after the player's first input (or until they leave: the `recording_meta`
+`end` row's `why` is `left`, `window`, `cap` or `end`). Queries (`src/queries/recordings.ts`, analyses in
+`src/recording-analysis.ts`): `recording-layers`, `recording-sessions`, `recording-replay`, `quit-autopsy` and
+`first-action` (table above), all over `POST /v1/query/<name>` with the usual filters (range, device, build, branch,
+new / returning, variant).
+
+- **Maps (`mapKey`, default `map`).** A sample, input or positioned event belongs to the map of the latest event before it
+  on the same server (`job`) whose props have the map key (any kind, e.g. a game's `round_start {map}`), else the
+  player's own latest such event. A zone matching `lobby` (the state's `zone:`), an empty map value, no map event yet,
+  or a position far outside the map's area (a stale map while the player waits in the lobby; "far" = beyond the 5th-95th
+  percentile box widened by its own span, at least 60 studs) go to the **`(lobby / unknown)`** layer. Another game uses
+  `mapKey: "arena"` (or any props key) the same way.
+- **Positioned events (`px`, `py`, `pz`).** Any event whose props carry numeric `px` and `pz` (studs, world space; `py`
+  optional) is drawn on its map, not only in the first minute: `ev:<kind>:<name>` layers, e.g. `ev:custom:down` split by
+  `cause`. The map comes from the same rule, in SQL (a running count of map events per server and per player).
+- **Frames.** Each map's top-down x / z frame covers its samples and positioned events; there is no map image, so the
+  background is the density of every recorded sample on the map (the walkable area).
+- **Speed.** Positioned events are counted per 4-stud cell in SQL; recordings are decoded in the server and kept in an
+  in-memory cache (96 MB, about 3 M samples) keyed by each session's chunk rows: Parquet days never change and decode
+  once, a session still being written today decodes again when a chunk arrives. Past `maxSessions` (3,000) the
+  sessions are sampled in a fixed hash order (the same range gives the same sample) and `sampling` / `notes` say so.
+  Basin caps each statement at 10,000 rows (sessions are read in batches; `sampling.capped` when the list itself hit it).
+  On a synthetic game of 3,000 sessions (12 k chunks, ~1 M samples) in DuckDB: `recording-layers` about 5 s cold and
+  2 s warm, `quit-autopsy` 1 s, `first-action` 0.3 s, `recording-replay` 30 ms.
+- **Quit autopsy.** For each `left` recording, the last `windowSeconds` (10): `screen` (the screen open at the end, from
+  the recording's screen events, else the state), `died` (a death record or a `downEvents` event, default `down` /
+  `death_final`, within `diedSeconds`), `idle` (no input and under `stillStuds` of movement), `stuck` (movement keys or
+  the stick, under `stuckStuds`, no screen open), `dead_clicks` (2+ button presses with no screen change within
+  `deadClickMs`), `tutorial` (the last step of a funnel matching `tutorialPattern`, default `tutorial|onboard`, below
+  the furthest step anyone reached), `place` (a `placeCells` x `placeCells` cell of the map, "Forest · B3"), `none`. The
+  other recordings' last seconds are the baseline, so a reason shows as over-represented (`lift` > 1), not just common.
+- **Time to first action.** Spawn = the first `spawn` record or character sample. A screen counts when it opens within
+  `screenAfterInputMs` (1.5 s) of a player input (HUDs the game opens itself don't). Move, screen, button and prompt
+  are only seen inside the recording (60 s after the first input); round start comes from the events.
 
 ## Cloudflare Basin setup
 

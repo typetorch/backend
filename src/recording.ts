@@ -261,15 +261,23 @@ export function decodeTtRec1(chunks: ChunkRow[]): DecodedRecording {
 }
 
 const decoders = new Map<string, RecordingDecoder>([["tt-rec-1", { codec: "tt-rec-1", decode: decodeTtRec1 }]]);
+let decoderGeneration = 0;
 
 /** Replaces or adds a decoder (tests, or a newer codec). Returns a function that puts the previous one back. */
 export function registerDecoder(decoder: RecordingDecoder): () => void {
 	const previous = decoders.get(decoder.codec);
 	decoders.set(decoder.codec, decoder);
+	decoderGeneration++;
 	return () => {
 		if (previous) decoders.set(decoder.codec, previous);
 		else decoders.delete(decoder.codec);
+		decoderGeneration++;
 	};
+}
+
+/** Changes whenever a decoder is replaced (caches of decoded sessions key on it). */
+export function decoderVersion(): number {
+	return decoderGeneration;
 }
 
 export function hasDecoder(codec: string): boolean {
