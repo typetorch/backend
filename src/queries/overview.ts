@@ -262,6 +262,9 @@ export interface RetentionCohort {
 	/** offset -> share kept; null while that day isn't over yet. */
 	kept: Record<string, number | null>;
 	keptPlayers: Record<string, number | null>;
+	/** The day in progress (today, UTC), so far: offset -> share back already, and how many. Only that offset, missing otherwise. */
+	partial: Record<string, number>;
+	partialPlayers: Record<string, number>;
 }
 
 export interface RetentionResult {
@@ -269,6 +272,8 @@ export interface RetentionResult {
 	to: string;
 	days: number[];
 	cohorts: RetentionCohort[];
+	/** How much of today (UTC) is over, 0-1, for the partial cells. */
+	todayElapsed: number;
 	/** Weighted over the cohorts whose day is over. */
 	average: Record<string, number | null>;
 }
@@ -303,11 +308,16 @@ export const retention = defineQuery<RetentionOptions, RetentionResult>({
 		const cohorts = rows.cohorts.map((r) => {
 			const cday = num(r.cday);
 			const size = num(r.size);
-			const out: RetentionCohort = { date: isoDay(cday), size, kept: {}, keptPlayers: {} };
+			const out: RetentionCohort = { date: isoDay(cday), size, kept: {}, keptPlayers: {}, partial: {}, partialPlayers: {} };
 			for (const d of o.days) {
 				if (cday + d >= today) {
 					out.kept[d] = null;
 					out.keptPlayers[d] = null;
+					if (cday + d === today) {
+						const k = kept.get(`${cday}:${d}`) ?? 0;
+						out.partial[d] = ratio(k, size);
+						out.partialPlayers[d] = k;
+					}
 					continue;
 				}
 				const k = kept.get(`${cday}:${d}`) ?? 0;
@@ -321,7 +331,8 @@ export const retention = defineQuery<RetentionOptions, RetentionResult>({
 		});
 		const average: Record<string, number | null> = {};
 		for (const d of o.days) average[d] = sums[d] ? ratio(sums[d].kept, sums[d].size) : null;
-		return { from: iso(f.from), to: iso(f.to), days: o.days, cohorts, average };
+		const todayElapsed = Math.round(((ctx.now - today * DAY_MS) / DAY_MS) * 1000) / 1000;
+		return { from: iso(f.from), to: iso(f.to), days: o.days, cohorts, todayElapsed, average };
 	},
 });
 

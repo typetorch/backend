@@ -84,6 +84,7 @@
     --status-serious: #ec835a;
     --status-critical: #d03b3b;
     --heat: 42, 120, 214;
+    --heat-partial: 226, 120, 40;
     --radius: 0.625rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
@@ -127,6 +128,7 @@
     --status-serious: #ec835a;
     --status-critical: #d03b3b;
     --heat: 57, 135, 229;
+    --heat-partial: 240, 140, 60;
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);
