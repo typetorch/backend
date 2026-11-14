@@ -195,11 +195,29 @@ export interface MapSources {
 	byPid: Map<string, MapTimeline>;
 	/** A zone matching this counts as no map (the lobby). Default /lobby/i. */
 	lobbyZone?: RegExp;
+	/**
+	 * Zones that name a map (lower case -> the map's name as the events spell it): a game whose zones are its maps
+	 * (gnome: zone "hedgemaze" on the HedgeMaze map, "lobby" / "shop" in the lobby building) says exactly where a player
+	 * is, which beats the server's latest map event (still "hedgemaze" for a player shopping in the lobby).
+	 */
+	zoneMaps?: Map<string, string>;
 }
 
-/** The map a moment belongs to: the server's latest map event, else the player's own, else NO_MAP; a lobby zone wins. */
+/** The map names the timelines carry, by their lower case: a zone equal to one names that map. */
+export function zoneMapsOf(...timelines: Map<string, MapTimeline>[]): Map<string, string> {
+	const out = new Map<string, string>();
+	for (const byKey of timelines) for (const list of byKey.values()) for (const p of list) if (p.map) out.set(p.map.toLowerCase(), p.map);
+	return out;
+}
+
+/**
+ * The map a moment belongs to: a zone that names a map, else the server's latest map event, else the player's own, else
+ * NO_MAP; a lobby zone wins over all.
+ */
 export function assignMap(sources: MapSources, job: string, pid: string, t: number, zone?: string | null): string {
 	if (zone && (sources.lobbyZone ?? /lobby/i).test(zone)) return NO_MAP;
+	const named = zone ? sources.zoneMaps?.get(zone.toLowerCase()) : undefined;
+	if (named) return named;
 	const byJob = job ? mapAt(sources.byJob.get(job), t) : undefined;
 	if (byJob !== undefined) return byJob || NO_MAP;
 	const byPid = pid ? mapAt(sources.byPid.get(pid), t) : undefined;
@@ -458,20 +476,27 @@ export function addRecordingLayers(
 	return out;
 }
 
-/** Per sample: the map index (names shared across sessions), from the sources, the zone, and the maps' core bounds. */
+/**
+ * Per sample: the map index (names shared across sessions), from the sources and the zone; and whether the zone itself
+ * named that map (`confirmed`: those points alone give a map's area when there are enough of them).
+ */
 export function assignSamples(
 	track: Track,
 	events: readonly SessionEvent[],
 	sources: MapSources,
 	index: (name: string) => number,
-): Uint16Array {
-	const out = new Uint16Array(track.t.length);
+): { maps: Uint16Array; confirmed: Uint8Array } {
+	const maps = new Uint16Array(track.t.length);
+	const confirmed = new Uint8Array(track.t.length);
 	const cursor = new StateCursor(events);
 	for (let i = 0; i < track.t.length; i++) {
 		const t = track.t[i];
-		out[i] = index(assignMap(sources, track.job, track.pid, t, statePart(cursor.at(t), "zone")));
+		const zone = statePart(cursor.at(t), "zone");
+		const map = assignMap(sources, track.job, track.pid, t, zone);
+		maps[i] = index(map);
+		if (zone && map !== NO_MAP && zone.toLowerCase() === map.toLowerCase()) confirmed[i] = 1;
 	}
-	return out;
+	return { maps, confirmed };
 }
 
 /** Moves samples that fall outside their map's core bounds to NO_MAP (a stale map while the player is in the lobby). */

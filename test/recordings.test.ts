@@ -9,7 +9,9 @@ import {
 	Grid,
 	NO_MAP,
 	assignMap,
+	assignSamples,
 	classifyEnding,
+	zoneMapsOf,
 	firstActionStats,
 	firstActions,
 	frameFor,
@@ -21,7 +23,7 @@ import {
 	type SessionEvent,
 } from "../src/recording-analysis.ts";
 import { decodeSessions, registerDecoder, type DecodedRecording, type RecordingInput } from "../src/recording.ts";
-import { clearRecordingCache, sampleSessions, trackCache } from "../src/queries/recordings.ts";
+import { clearRecordingCache, prepareMaps, sampleSessions, trackCache, type LoadedSession } from "../src/queries/recordings.ts";
 import { BasinStore } from "../src/store/basin.ts";
 import { DuckDbStore, readRows } from "../src/store/duckdb.ts";
 import { fixtureDb } from "./fixtures.ts";
@@ -82,6 +84,45 @@ describe("map assignment", () => {
 		expect(assignMap(sources, "j1", "p1", 600, "Lobby")).toBe(NO_MAP);
 		expect(assignMap(sources, "j1", "p1", 600, "Arena")).toBe("Desert");
 		expect(assignMap({ ...sources, lobbyZone: /^hub$/i }, "j1", "p1", 600, "Hub")).toBe(NO_MAP);
+	});
+});
+
+describe("zones that name maps (gnome: zone hedgemaze on HedgeMaze, lobby / shop in the lobby building)", () => {
+	const byJob = new Map([["j1", [{ t: 0, map: "hedgemaze" }]]]);
+	const sources: MapSources = { byJob, byPid: new Map(), zoneMaps: zoneMapsOf(byJob) };
+
+	test("a zone naming a map decides it; another zone falls back to the server's map", () => {
+		expect(assignMap(sources, "j1", "p1", 10, "HedgeMaze")).toBe("hedgemaze");
+		expect(assignMap(sources, "j1", "p1", 10, "shop")).toBe("hedgemaze");
+		expect(assignMap(sources, "j1", "p1", 10, "lobby")).toBe(NO_MAP);
+		expect(assignMap({ ...sources, zoneMaps: zoneMapsOf(new Map([["j9", [{ t: 0, map: "port" }]]])) }, "j1", "p1", 10, "port")).toBe("port");
+	});
+
+	test("a player shopping in the lobby while the server's map is hedgemaze doesn't stretch hedgemaze's frame", () => {
+		// 60 samples on the map (zone hedgemaze, x 700..760), then 40 in the lobby's shop (zone shop, x -400): the server's
+		// latest map event says hedgemaze the whole time.
+		const samples = [
+			...Array.from({ length: 60 }, (_, i) => ({ t: T0 + i * 100, pos: [700 + i, 3, 10] as [number, number, number], look: [0, 0, -1] as [number, number, number] })),
+			...Array.from({ length: 40 }, (_, i) => ({ t: T0 + 6000 + i * 100, pos: [-400 - (i % 5), 3, 0] as [number, number, number], look: [0, 0, -1] as [number, number, number] })),
+		];
+		const track = toTrack({ pid: "p1", sid: "s1", samples, inputs: [] }, { job: "j1", art: "a" });
+		const events: SessionEvent[] = [
+			{ t: T0, kind: "state", name: "zone", state: "zone:hedgemaze" },
+			{ t: T0 + 6000, kind: "state", name: "zone", state: "zone:shop" },
+		];
+		const { maps, confirmed } = assignSamples(track, events, sources, (n) => (n === NO_MAP ? 0 : 1));
+		expect(maps.every((m) => m === 1)).toBe(true);
+		expect(confirmed.slice(0, 60).every((c) => c === 1)).toBe(true);
+		expect(confirmed.slice(60).every((c) => c === 0)).toBe(true);
+		const loaded = { sid: "s1", pid: "p1", job: "j1", art: "a", t0: T0, t1: T0 + 10_000, chunks: 1, n: 100, bytes: 0, dev: "phone", why: "window", track, events } as unknown as LoadedSession;
+		const prepared = prepareMaps([loaded], sources, [], 96);
+		const frame = prepared.frames.get("hedgemaze");
+		expect(frame).toBeDefined();
+		expect(frame!.minX).toBeGreaterThan(600);
+		expect(frame!.maxX).toBeLessThan(800);
+		// The shop samples went to no map.
+		const s0 = prepared.sessions[0]!;
+		expect([...s0.maps.slice(60)].every((m) => prepared.names[m] === NO_MAP)).toBe(true);
 	});
 });
 
