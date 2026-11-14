@@ -1,6 +1,9 @@
 import { useMemo } from "react";
 import { cn } from "cn";
+import { ChartBarStacked } from "lucide-react";
 import { DataTable, type DataColumn } from "@/components/data-table";
+import { ExplainPanel, useExplain } from "@/components/ExplainPanel";
+import { Button } from "@/components/ui/button";
 import { PageHeader, QueryState, Section } from "@/components/common";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtInt, plural } from "@/lib/format";
@@ -166,10 +169,17 @@ function PlayersBack() {
 /** Two tabs over the same join-day cohorts: who came back (retention), and what they spent (revenue per cohort, LTV). */
 export default function Retention() {
 	const [tab, setTab] = useParam("view", "players");
+	const [, explain] = useExplain();
 	return (
 		<>
 			<PageHeader
 				title="Retention"
+				actions={
+					<Button variant="outline" size="sm" onClick={() => explain("d1")} title="Which segments moved D1 against the period before, of the same length">
+						<ChartBarStacked />
+						Explain the D1 change
+					</Button>
+				}
 				description="New players by the day they joined: how many came back on each day from 1 to 30 (D1 = the day after joining), and what they spent by D0 to D30. Today (UTC) shows the value so far in orange; later days show –. Hide days under Columns."
 			/>
 			<Tabs value={tab === "revenue" ? "revenue" : "players"} onValueChange={setTab}>
@@ -184,6 +194,7 @@ export default function Retention() {
 					<RetentionLtv />
 				</TabsContent>
 			</Tabs>
+			<ExplainPanel />
 		</>
 	);
 }

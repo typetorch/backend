@@ -19,8 +19,10 @@ import type {
 	ErrorList,
 	ErrorPlayers,
 	PlayerErrors,
+	ExperimentChangeRequest,
 	ExperimentOverrides,
 	ExperimentPlayers,
+	PreparedExperimentChange,
 	Filters,
 	FleetAlert,
 	FleetReports,
@@ -63,6 +65,7 @@ import type {
 } from "./types";
 import type { DeployMark, PerfServer, ServerMetricPoint } from "./perf";
 import type { DeployDetail, DeployPage } from "./deploys";
+import type { LiftReport, LiveEvent, LiveEventInput, LiveEventsView, SignCommands } from "./live-events";
 
 /** The header the backend wants on cookie-authenticated requests that change something. */
 export const CSRF_HEADER = "x-typetorch";
@@ -217,6 +220,9 @@ export function createApi(options: ApiOptions = {}) {
 		/** The experiment overrides the server knows (weights, active, forced variant; read-only). */
 		experimentOverrides: (signal?: AbortSignal) => get<ExperimentOverrides>("/v1/experiments", signal),
 		/** The players in one experiment (at most 200; one variant or all), under the filter bar's range and filters. */
+		/** Owners: the checked change and the signed `typetorch experiment ...` command that applies it (audited; applies nothing). */
+		experimentChange: (experiment: string, change: ExperimentChangeRequest, signal?: AbortSignal) =>
+			post<PreparedExperimentChange>(`/v1/experiments/${encodeURIComponent(experiment)}/change`, change, signal),
 		experimentPlayers: (experiment: string, filters: Filters = {}, options: { variant?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<ExperimentPlayers>(`/v1/experiments/${encodeURIComponent(experiment)}/players${experimentPlayerQuery(filters, options)}`, signal),
 		/** The live SSE stream's URL (EventSource sends the session cookie; the dev proxy adds the token). */
@@ -329,6 +335,14 @@ export function createApi(options: ApiOptions = {}) {
 		 * browser's read-only owner session became admin in place (re-check auth).
 		 */
 		blessDevice: (token: string, signal?: AbortSignal) => post<{ ok: boolean; blessed: boolean; upgraded?: boolean }>("/auth/device", { token }, signal),
+		/** Scheduled live events, the schedule servers should hold and whether the signed record has it (`refresh`: read it again). */
+		liveEvents: (refresh = false, signal?: AbortSignal) => get<LiveEventsView>(`/v1/live-events${qs({ refresh: refresh ? 1 : undefined })}`, signal),
+		/** Schedule a live event (owners); the answer carries the CLI commands that sign the new schedule. */
+		createLiveEvent: (input: LiveEventInput, signal?: AbortSignal) => post<{ event: LiveEvent; commands: SignCommands }>("/v1/live-events", input, signal),
+		cancelLiveEvent: (id: string, signal?: AbortSignal) => post<{ event: LiveEvent; commands: SignCommands }>(`/v1/live-events/${encodeURIComponent(id)}/cancel`, {}, signal),
+		/** An event's lift report against the same weekdays and hours of earlier weeks. */
+		liveEventLift: (id: string, params: { weeks?: number; afterDays?: number } = {}, signal?: AbortSignal) =>
+			get<{ event: LiveEvent; report: LiftReport; cached: boolean }>(`/v1/live-events/${encodeURIComponent(id)}/lift${qs(params)}`, signal),
 		/** Chart marks: releases, kernel publishes and backup refreshes in a window, oldest first (GET /v1/fleet/marks). */
 		fleetMarks: (params: { since?: number; until?: number; branch?: string; kinds?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ marks: DeployMark[] }>(`/v1/fleet/marks${qs(params)}`, signal).then((r) => r.marks),

@@ -1,6 +1,6 @@
 /**
  * Deploy markers for any recharts chart: one vertical line per release, rollback, kernel publish or backup refresh (GET
- * /v1/fleet/marks), labelled "#42 prod", with a hover card (focus works too) and, by default, a click that opens the
+ * /v1/fleet/marks) and per live event start and end (GET /v1/live-events), labelled "#42 prod", with a hover card (focus works too) and, by default, a click that opens the
  * release's deploy page.
  *
  *   const deploys = useDeployMarks({ from, to }, branch);         // the marks in range, [] while hidden
@@ -21,6 +21,7 @@ import { ReferenceLine } from "recharts";
 import { ToggleChip } from "@/components/ToggleChip";
 import { api } from "@/lib/api";
 import { markDeploySeq, markLabel, type MarkGroup } from "@/lib/deploys";
+import { liveEventMarks } from "@/lib/live-events";
 import { MARK_STYLE, markDetails, markTitle, type DeployMark } from "@/lib/perf";
 
 // Shown or hidden (one switch for every chart, kept in localStorage) ----------------------------------------------------
@@ -89,15 +90,31 @@ export function useDeployMarks(range: { from: number; to: number } | null | unde
 		retry: false,
 		staleTime: 60_000,
 	});
-	const all = useMemo(() => query.data ?? [], [query.data]);
+	// Live events' start and end lines (place-wide, every branch). No error shown: an older backend has no such route.
+	const events = useQuery({
+		queryKey: ["live-events"],
+		queryFn: ({ signal }) => api.liveEvents(false, signal),
+		enabled: valid && (options.enabled ?? true),
+		retry: false,
+		staleTime: 60_000,
+	});
+	const all = useMemo(() => {
+		const marks = query.data ?? [];
+		const extra = events.data && from !== null && to !== null ? liveEventMarks(events.data.events, from, to) : [];
+		return extra.length ? [...marks, ...extra].sort((a, b) => a.at - b.at) : marks;
+	}, [query.data, events.data, from, to]);
 	return { marks: shown ? all : [], all, shown, setShown, error: query.error };
 }
 
-/** Opens a release's deploy page (kernel and backup marks have none). */
+/** Opens a release's deploy page (kernel and backup marks have none), or the Live events page for an event's mark. */
 export function useOpenDeploy(): (mark: DeployMark) => void {
 	const navigate = useNavigate();
 	return useCallback(
 		(mark: DeployMark) => {
+			if (mark.kind === "event") {
+				void navigate("/live-events");
+				return;
+			}
 			const seq = markDeploySeq(mark);
 			if (seq !== null) void navigate(`/deploys/${seq}`);
 		},

@@ -4,9 +4,11 @@ import { benchmarks, realtime, trends } from "./benchmarks.ts";
 import { confusion } from "./confusion.ts";
 import { demographics } from "./demographics.ts";
 import { economy } from "./economy.ts";
+import { explain } from "./explain.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment, experimentPlayers } from "./experiment.ts";
 import { events, players, values } from "./explore.ts";
+import { liveEventLift } from "./live-event-lift.ts";
 import { feedbackList, feedbackSummary } from "./feedback.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { ltv } from "./ltv.ts";
@@ -30,6 +32,7 @@ export const QUERIES = {
 	ltv,
 	churn,
 	demographics,
+	explain,
 	funnel,
 	"funnel-progress": funnelProgress,
 	"playtime-funnel": playtimeFunnel,
@@ -65,6 +68,7 @@ export const QUERIES = {
 	"notify-player": notifyPlayer,
 	"feedback-summary": feedbackSummary,
 	"feedback-list": feedbackList,
+	"live-event-lift": liveEventLift,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;

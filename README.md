@@ -43,6 +43,7 @@ is the same command.
 - [The fleet API (SQLite)](#the-fleet-api-sqlite) ([game server addresses and locations](#game-server-addresses-and-locations))
 - [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Experience notifications](#experience-notifications) (intents from the game, the planner, the sender, signed launch data)
+- [Live events](#live-events) (scheduled live value changes, signed by the CLI; each event's lift report)
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -598,6 +599,9 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/storage` | admin | what the data folder holds |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
+| `GET /v1/live-events` | admin, web | [live events](#live-events): the events with their status and sync state, the schedule servers should hold, the CLI commands that sign it (`refresh=1`: read the signed record again) |
+| `POST /v1/live-events`, `POST /v1/live-events/<id>/cancel` | admin | schedule or cancel a live event (audited); the answer carries the new signing commands |
+| `GET /v1/live-events/<id>/lift` | admin, web | an event's lift report (`weeks` 1-8, `afterDays` 0-7) |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
 | `GET /v1/roblox/demographics?from&to&dev&players` | admin, web | Creator Hub's Demographics from Roblox: daily active users per age group, gender, locale, country, platform and OS over the range's full UTC days; device / players as Roblox's Platform / IsNewUser (matched on the values Roblox reports; `applied`, `notApplied` say what happened) |
@@ -612,6 +616,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/saved-queries`, `GET /v1/saved-queries/<id>` | admin, web | the Query page's saved queries (see [Saved queries](#saved-queries)) |
 | `POST /v1/saved-queries`, `PATCH /v1/saved-queries/<id>`, `DELETE /v1/saved-queries/<id>` | admin | save, change (name, SQL, chart, pinned), delete one |
 | `GET /v1/experiments/<key>/players` | admin, web | the players in one experiment: variant, random or forced, assigned / first / last seen |
+| `POST /v1/experiments/<key>/change` | admin | prepare a start / stop / split / settle / clear: checked, audited (`experiment.prepare`), answered with the signed `typetorch experiment ...` command and its `--dry-run`; applies nothing (the signing keys never reach this server) |
 | `GET /v1/experiments` | admin, web | the experiment overrides from `data/settings.json` (`active`, `weights`, `variant` per experiment; nothing else from the file): `{ source: "settings-file" \| "none" \| "unreadable", experiments }` |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
 | `GET /v1/roblox/products` | admin, web | game pass and developer product names, Robux prices and icons for the explorer's product tooltips, looked up by the server |
@@ -746,8 +751,10 @@ method: `token`, `roblox`, `typetorch.dev`, `bearer` for a wrong token on a rout
 URL only as `set` / `not set`; lists such as viewers and the allow list as added / removed), refused saves (the lockout
 guards), test alerts, the owner list (`access.owners`: seq, added, removed) and the signing keys, trusted browsers
 (`device.trust`, `device.revoke`), alert acks (`alert.ack`), erasure (`erasure`: counts only, never a pid or a UserId; the
-Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), remote debug watches and
-commands, the CLI's release starts and marks (`deploy.start`, `deploy.mark`, by the API key), and any other write by a
+Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), live events (`live-events.create`,
+`live-events.cancel`), remote debug watches and commands, the CLI's release starts and marks (`deploy.start`,
+`deploy.mark`, by the API key), experiment changes prepared on the Experiments page (`experiment.prepare`: the
+experiment, the change and the CLI command; a refused body as `failed`), and any other write by a
 signed-in caller under `<METHOD> <route>` (a write the web role tried is recorded as `refused`).
 
 Each entry has the time, the actor (`admin token`, `roblox user <id> (<name>)`, `typetorch.dev user <id> (<name>)`,
@@ -953,6 +960,46 @@ this server's `data/settings.json` copy (`GET /v1/experiments`); without an over
 (an even split over the variants its rows declare) applies, and says so when it doesn't know the variants. The live
 record is the game's signed settings in its DataStore, which this server does not read.
 
+#### Results you can trust
+
+Per player, the results of one experiment (the `experiment` query) now:
+
+- **Leave forced players out.** A player with an `experiment` row marked `forced` in the range (settled for everyone, or
+  forced for them with `typetorch experiment force` or the in-game dev panel) didn't get a random variant, so they are
+  not in the numbers; `forcedPlayers` counts them.
+- **Check the split (sample ratio mismatch).** The random assignments per variant (the `experiment` rows, forced players
+  out) against the intended split: the override's weights (the page passes them as the `weights` option when this
+  server knows them) or an even split over the variants the game declares. A chi-square goodness-of-fit test; below
+  p = 0.001 (with at least 5 players expected per variant) the page shows a loud "don't trust these numbers" warning: a
+  variant that crashes or loses its events, a bug in when the game asks, bots, or a split changed inside the range.
+  Uneven weights are in the game's variant order: rows from framework 0.7.1+ carry each variant's position (`vi`), so
+  the check knows it; for older rows only an even split is checked. A variant nobody got counts as 0.
+- **Correct for more than two variants.** Each variant is compared with the control; with several, `sure` and the plain
+  words use Holm-corrected p-values per metric (`pAdjusted`; the test's own is `pValue`), so three variants don't get
+  three chances at a lucky "95% sure".
+- **Say what the traffic can find.** Per comparison: `mde` / `mdeLift`, the smallest true difference these group sizes
+  find 80% of the time at 5% (Bonferroni over the variants); `needed`, the players per group for the observed
+  difference; and `days`, how long at the range's traffic until it is sure (0 = now, null = no difference to find).
+
+#### Running an experiment from the page (owners)
+
+Owners get a **Run it** panel under the results: Start (resume), Stop, Clear override, Change split (one weight per
+variant, in the game's order when the rows carry it) and Settle (everyone gets one variant). The split lives in the
+game's **signed** settings record (plans/20): servers only apply a record the game's two prod keys signed, and those
+keys stay on the owners' machines. This server never holds them and never writes settings, so it cannot apply the
+change itself. Instead `POST /v1/experiments/<key>/change` (owners; `{ action: start | stop | split | settle | clear,
+weights?, variant?, variants? }`) checks the change, records it in the audit log (`experiment.prepare`, with the
+command), and answers the exact CLI command that applies it, plus its `--dry-run` twin:
+
+```sh
+typetorch experiment weights onboarding 3,1 --variants short,long   # run in the game's folder (CLI 0.9+)
+```
+
+The CLI reads the record, verifies it with your keys, changes the one experiment, signs it with both keys, writes it
+and pings servers, which apply it within seconds (no deploy). Names and variants are shell-quoted; a variant can't start
+with `-`; `--variants` (the CLI's count and name check) is left out when a name holds a comma. Viewers see no controls,
+and the route answers them 403.
+
 The **Funnels** page does it for funnel steps: a step (click, or Enter / Space) of a logged funnel or of the built-in
 playtime funnels, in one funnel or either side of the compare view, opens a side sheet
 (`?stepFunnel=<funnel>&step=<step>&stepMode=dropped`, under the page's range and filters) with the players who reached it
@@ -1005,11 +1052,16 @@ Compare a change that is worse by over 10% (orange) or 25% (red); nothing is fla
 "few samples"). All the lines live in `web/src/lib/perf-thresholds.ts`. Picked chips and toggles (percentile, Compare builds,
 History) are filled with the primary colour with a check. Every chart carries **deploy marks**, like Creator
 Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-sign, kernel publish and backup refresh
-(`GET /v1/fleet/marks`); hover for the branch, seq, build, place version and results, click to filter the page to that build.
+(`GET /v1/fleet/marks`), plus each [live event](#live-events)'s start and end; hover for the branch, seq, build, place version and
+results, click to filter the page to that build.
 **Compare**: builds side by side over the range, or before vs after a mark over two windows of the same length (1 h to 7 d).
 **Live servers**: each server's latest TPS and memory from its heartbeat, and its own history
 (`GET /v1/fleet/servers/<jobId>/metrics`, kernel 0.4.2 heartbeats; the page says so when a server or the backend doesn't have
 it). A **Step** picker overrides the window's step (1 min to 1 day, 2 to 400 steps).
+
+**Live events** (`/live-events`): scheduled live value changes (Live now, Upcoming, Past, with UTC and local times and whether
+servers hold the signed schedule), the owners' form and Cancel, the signing command, and each event's lift report. See
+[Live events](#live-events).
 
 **Economy** (`/economy`): the in-game currency from the game's server-sent `currency` rows (the `economy` query), one currency at
 a time (a picker lists every currency in the range, busiest first; `?currency=`). Earned vs spent per UTC day, the running
@@ -1085,6 +1137,18 @@ days before it; a custom range without a start date has nothing to compare and t
 dashed previous-period line, step by step. Errors compares the three count tiles with the window before. Performance adds a tile
 per metric (the picked percentile now vs before) and, without a grouping, the previous period as a dashed line on each chart.
 
+**Explain this change.** With **vs previous period** on, each Overview tile with a change chip (Players, New players,
+Returning, Sessions, Playtime, Avg session, Playtime per player) gets a **Why?** button, and the Retention page an **Explain the
+D1 change** button. Both open a side panel (`explain=<metric>` in the URL) running the [`explain`](#explain-this-change) query on
+the filter bar's range against the same period the chips compare with, under the same filters. It leads with a plain-language
+headline ("D1 fell 4.1 points; 72% of it is phones (rate) and 15% is a bigger share of join source teleport (mix)": the biggest
+effect, then the biggest of the other kind from another dimension), both periods' values, a picker of the dimensions (the one
+whose trusted segment explains the most first), a diverging bar chart of each segment's rate and mix effects, and a table of the
+segments with players, both values, the effects and their share of the change (small segments marked "few players"). A metric
+picker switches the metric (DAU, sessions per player, payer conversion, Robux per player, ...). Clicking a segment's name splits
+that segment by the other dimensions (one level; **All players** goes back). Code: `web/src/components/ExplainPanel.tsx`,
+`web/src/lib/explain.ts`.
+
 ## Row format
 
 Two row kinds, flat JSON, one object per row, as the framework writes them (`framework/src/analytics/SCHEMA.md`, the
@@ -1113,7 +1177,7 @@ Props the queries read (SCHEMA.md "Event catalog"; each can be overridden by a q
 | `funnel` (`name` = funnel id; `step(funnel, index, name?)`) | `i` (the index), `step` (the name) |
 | `purchase` (`name` = kind, default `product`) | `robux`, `product` |
 | `currency` (`name` = currency) | `delta` |
-| `experiment` (`name` = experiment) | `variant` |
+| `experiment` (`name` = experiment) | `variant`, `variants` (how many the game declares), `vi` (the variant's 1-based position in the game's list; framework 0.7.1+), `forced` (true when the settings or a dev override chose it) |
 | `fleet` `heartbeat` (no pid; `job` = JobId) | the kernel's fleet status: `t` server type, `b` `c` `a` `n` `m`, `s` `u` (unix s), `p`, `pv` (place version), `x` (1 = A/B pin), `v`, `q`, `g`, `h`, `e`, `sv`. `k` is never read |
 | `fleet` `deploy_report` | `s` `b` `a` `j` `r` `e` `d` `t` `g` `k` `p` |
 
@@ -1182,6 +1246,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `overview` | players, new players, sessions, playtime, in total and per day; windows of a day or less also per step (`bucketMs`: 1 min up to an hour, 5 min up to 6 h, else 1 h; `buckets`, by the time a session started) | 30 days |
 | `roblox` | first-play bounce (first session < 60 s), qualified plays (sessions >= 5 min), D1/D7, playtime and play days per user, payer conversion, Robux per user and per payer | 30 days |
 | `demographics` | who plays, from join events: country, language (`locale`, framework 2026-11-15 on), device, Roblox account age, Premium; each player once per dimension, `share` of the players with a join | 28 days |
+| `explain` | why a metric moved between two windows ([Explain this change](#explain-this-change)): `metric` (`players`, `dau`, `newPlayers`, `returningPlayers`, `sessions`, `playtime`, `playtimePerPlayer`, `sessionsPerPlayer`, `avgSession`, `d1`, `payerConversion`, `robuxPerPlayer`, `revenuePerPlayer`; default `players`) in the filter range vs `baseline` (`{from, to}`; default the same length right before it), per segment of `dimension` (`device`, `country`, `language`, `accountAge`, `premium`, `source`, `build`, `branch`, `playerType`, or `all`, the default): both windows' players, value and share, and a shift-share split of the change into `rate` and `mix` effects, ranked, the rest past `top` (8, at most 20) folded into one `other` row; `small` when a segment has fewer than `minPlayers` (30) players in a window; `within: {dimension, value}` for one segment only (the drill-down). Every filter applies | 7 days |
 | `retention` | retention by join-day cohort (`days`: up to 31 offsets from 1 to 90, default 1, 3, 7, 14, 30; the explorer asks for every day 1-30; days not over are `null`) | 30 days |
 | `ltv` | revenue per join-day cohort (the `retention` cohorts; every filter applies, so a join source or country filter shows whether a campaign's players paid back): per cohort and `days` offset (default D0 = the join day, 1, 3, 7, 14, 30; up to 12 offsets from 0 to 90), cumulative `robux` paid, `robuxPerPlayer`, `revenuePerPlayer` (x `creatorShare`, 0.7), `payers` and `payerShare` by that day; a day not started is `null`, the day in progress (today, UTC) `partial: true` and out of the `average` (weighted by cohort size; `players` = the new players it covers). Purchases as in `monetization` (server-sent distinct rows, Studio left out), on any device or build | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
@@ -1192,7 +1257,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `player-graph` | one player's node graph (all sessions, or one with `sid`): states as nodes with what happened in them, moves as edges with counts and time | 90 days |
 | `player-stats` | one player (by `pid`, or `uid`): Robux, purchases, sessions and playtime per UTC day (for a range up to a day per hour, up to 6 hours per 5 minutes, up to an hour per minute: `window.bucket`; dense, sessions count where they start), totals (avg / median session, playtime per day, active days, first / last seen), each session (`sessions`, default 1,000, at most 5,000) and each purchase (`purchases`, default 500, at most 2,000), newest first, with `...Truncated` flags. The range is cut to its last 400 days (`window.clamped`). Server-sent purchases only, like the revenue queries | 30 days |
 | `flow` | the merged flow graph for a filter (where most go next, where they quit) | 7 days |
-| `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
+| `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means; Holm-corrected over several variants), the minimum detectable effect and days to significance per comparison; per player (`exp`, forced players left out, with the sample ratio check `assignment` against `weights` or an even split), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
 | `experiment-players` | the players in one `experiment` (at most 200, `limit`; one `variant` or all): per player and variant, `how` (`random`, `forced` from the row's `forced` prop, or `unknown` when the window holds only `exp` stamps), `assignedAt`, `firstAt` / `lastAt`, `events`, `mixed` (seen in two variants); `variants` (players and forced per variant), `total`, `more`. Most recently seen first. Over HTTP as `GET /v1/experiments/<key>/players?variant=&limit=&from=&to=` (or `window=7d`; the filters as repeatable params, the filter bar's variant filter as `inExperiment` + `inVariant`), with `uid` / `name` / `displayName` joined in and erased players left out | 30 days |
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
 | `top-events` | the most logged names per kind | 7 days |
@@ -1256,6 +1321,49 @@ section: the four buckets (players, share, payers), one bucket's players (`?risk
 opens the player), as of today over the last 90 days with the filter bar's other filters (the Audience ones included).
 For owners each player carries the notification opt-in, and the section says how many of the at-risk players are
 subscribed: Export (CSV) gives their UserIds.
+
+### Explain this change
+
+The `explain` query (`src/queries/explain.ts`) says which segments moved a metric between two windows: the current one is
+the filter range, the baseline the same length right before it (or `baseline`; the windows must not overlap, each at most
+400 days). Every filter of the filter bar applies to both.
+
+**Segments.** Each player belongs to one segment per dimension and window, the way `demographics` does it: the highest
+value their rows in that window carry. From the join events (`session` / `join`, Studio left out): `country` (upper case),
+`language` (`locale` without its region, lower case; joins before the framework sent `locale` have none), `accountAge`
+(`age`), `premium` (`prem`), `source` (the join source, `from`). From the rows: `device` (`dev`), `build` (`art`), `branch`.
+`playerType`: `new` when one of their sessions in the window was their first-ever (`newp`), else `returning`. A player
+with no value (no join in the window, e.g. a session that began before it) is in the `null` segment ("Not sent").
+
+**Metrics.** Each is a population of players per window with a numerator (and for ratios a denominator) per player, the
+same numbers as the queries behind the tiles:
+
+| Metric | Kind | Population, value |
+|---|---|---|
+| `players` | count | players with a session row in the window (`overview`'s Players) |
+| `dau` | count | player-days (distinct UTC days a player started a session) / the UTC days the window touches |
+| `newPlayers`, `returningPlayers` | count | players with a first-ever session in the window / without one (`overview`) |
+| `sessions` | count | sessions (one `sid`, cut to the window) |
+| `playtime` | count | hours, each session first to last event (`overview`) |
+| `playtimePerPlayer`, `sessionsPerPlayer` | ratio | playtime (minutes) or sessions, per player (players with a session row) |
+| `avgSession` | ratio | playtime (minutes) / sessions; the shares are of sessions |
+| `d1` | ratio | new players by their first newp row's UTC day (Studio left out), only cohorts whose day 1 is over (before today, UTC), back = a session started the day after with no segment filter (`roblox` / `retention`'s D1) |
+| `payerConversion` | ratio | players with a purchase / players with any row (`monetization`; distinct server-sent purchase rows) |
+| `robuxPerPlayer` | ratio | Robux paid (gross) / players with any row |
+| `revenuePerPlayer` | ratio | the same x `creatorShare` (0.7: net, what the creator keeps) |
+
+**The split.** A ratio is R = sum_i s_i r_i, with s_i the segment's share of the population and r_i its own value. Per
+segment, `rate` = (r1 - r0) x (s0 + s1) / 2 (the segment itself got better or worse) and `mix` = (s1 - s0) x ((r0 + r1) / 2
+- (R0 + R1) / 2) (its share of players changed; a bigger share only helps when it is above average). A segment missing from
+one window takes its value from the other (all mix). Rate and mix of every segment add up to R1 - R0 exactly (the test has a
+hand-checked case). For counts a segment's contribution is its own change, given as `rate` (`mix` = 0). `shareOfChange` =
+(rate + mix) / the change. Segments are ranked by |rate + mix|; past `top` they fold into one `other` row whose effects are
+the sum of theirs, so the totals stay exact. The dimensions overlap (each player is in one segment of every dimension), so
+shares add up to 100% within a dimension, never across them.
+
+**Too small to trust.** A segment with fewer than `minPlayers` (default 30) players in either window is still shown, with
+`small: true` ("few players" in the explorer): with so few players one or two of them move its value a lot. The explorer's
+headline skips small segments unless nothing else explains the change, and then says "few players".
 
 ### Roblox parity
 
@@ -1907,6 +2015,70 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
 - **Erasure**: the Right to Erasure path deletes the user's rows in all three tables and their queued sends.
 - **Limits**: 200 items and 256 KB per intents request, 6000 notify requests a minute per address (plus the ingest limit),
   2,000,000 pending intents at most (`full`), 30 admin sends / config / key changes a minute.
+
+## Live events
+
+"Double cash, Saturday 12:00 to Sunday 23:59 UTC": an owner schedules a change to game live values (`liveConfig` keys)
+on the explorer's **Live events** page; every game server switches it on and off at those times; afterwards the page
+reports whether it raised playtime, revenue and so on, or only moved them in time.
+
+**Security: the backend never signs.** Live values only reach servers through the CLI-signed settings record, and this
+stays so. The backend keeps the schedule (SQLite `live_events`, `src/server/live-events.ts`) and prepares its JSON; the
+owner signs it with the CLI like any other value:
+
+```bash
+typetorch settings set game.tt.events - <<'TT_EVENTS'
+{"v":1,"events":[{"id":"ev_k3j9x0a1b2","name":"Double cash","start":1763812800,"end":1763942340,"set":{"cash.multiplier":2}}]}
+TT_EVENTS
+```
+
+(the page gives the exact command, a PowerShell one and the JSON file). The start and end times are INSIDE the signed
+record (unix seconds, UTC), and the framework (`src/settings.ts`, the release after 0.7.0) switches each event's values on and off on the
+server's own clock: no message at the start or end, so a server that starts mid-event has it from its first read, and
+the event ends on time even when the backend is down. While it runs, its `set` values replace `game[key]` for
+`TypeTorch.liveConfig(key)` (the game's `parse` still checks them); `TypeTorch.liveEvents()` lists the active and upcoming
+ones for game UI. Cancelling is signing the schedule without the event. Nothing unsigned ever reaches a server, and the
+signing checks are unchanged. (The alternatives were an unsigned channel limited to declared, bounded flags, or the
+backend pushing on and off messages: both trust the backend at run time and can't end an event while it's down.)
+
+- **Checks** (owners, `manage()`): a name (1-80 characters), 1-8 game keys (the CLI's key rule, not `tt.events`), JSON
+  values (no null, at most 1 KB each), start and end as ISO with a zone or unix ms, whole seconds (a start up to 5 minutes
+  ago starts now; never backdated), at most 31 days long and 366 days ahead, no two events on one key at the same time
+  (409), at most 50 scheduled or live at once, the schedule at most 8 KB (the record's `game` is 16 KB in all).
+- **Status**: `scheduled`, `live`, `ended` (from the times), `cancelled`. Audited: `live-events.create`,
+  `live-events.cancel` (with the id, the keys and the times; refused and failed ones too).
+- **Do servers have it?** The backend reads the signed record back (DataStore `TypeTorch` / `settings` through Open
+  Cloud: `OPENCLOUD_API_KEY` with `universe-datastores.objects:read` and `TYPETORCH_UNIVERSE_ID`; at most once a minute,
+  "Check again" at most every 10 s), verifies its signature with the game's public keys when it knows them (the trust
+  link keys, Sign in with typetorch.dev), and shows per event: `signed`, `outdated` (other times or values), `unsigned`
+  (servers won't run it), `cancel-unsigned` (cancelled here but still signed: servers WILL run it until the owner
+  signs), `done`, `unknown` (no key, or signed by other keys).
+- **Chart marks**: each event's start and end are dashed lines next to the deploy marks on every time chart (the same
+  toggle); clicking one opens the page.
+
+**The lift report** (`GET /v1/live-events/<id>/lift?weeks=3&afterDays=3`, `src/server/live-event-lift.ts`, the
+`live-event-lift` query):
+
+- **Windows**: the event (cut at now while it runs); the days after it (`afterDays`, default 3: the pull-forward check);
+  and the baseline, the same weekdays and hours `weeks` weeks back (default 3, at most 8). The step is a whole number of
+  weeks covering the event and its after window, so a baseline never overlaps the event; a week overlapping another live
+  event is skipped for an earlier one; a week with no players (before the data) is dropped.
+- **Metrics per window**: players, playtime per player (each session's time inside the window), sessions per player,
+  Robux per player and payer conversion (monetization's convention: server-sent distinct purchase rows; payers /
+  players), new players; Studio rows never count.
+- **Math**: baseline = the mean of the baseline weeks; lift = event / baseline - 1. The range is how much a normal week
+  moved: each baseline week against the mean of the others (min to max). Above the range is up, below is down, inside
+  is no clear change; fewer than 2 weeks is "not enough baseline". A plain, hand-checkable band, not a significance test.
+  The after window is judged the same way (a dip there = pulled forward), and `net` adds the event and after windows for
+  playtime, Robux, sessions and new players.
+- **Example** (test/live-event-lift.test.ts, hand-checked): a one-day event with 10 players at 36 min each and 3 payers
+  of 100 Robux, the next day 9 players at 28 min; baseline weeks of 10 players at 30, 29 and 31 min (after: 30, 31, 29)
+  with 2 payers:
+
+  > +20% playtime per player (baseline range -5% to +5%), +50% Robux per player (baseline range +0% to +0%), +50% payer
+  > conversion (baseline range +0% to +0%). Dip after: -7% playtime per player (baseline range -5% to +5%), -10% players
+  > (baseline range +0% to +0%) the 1 day after: part of it was pulled forward; net over the event and the 1 day after:
+  > +2% playtime.
 
 ## Player feedback
 
