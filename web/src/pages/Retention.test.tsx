@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type { RetentionResult } from "@/lib/types";
-import Retention, { RETENTION_DAYS } from "./Retention";
+import Retention, { RETENTION_DAYS, retentionPct } from "./Retention";
 
 afterEach(() => {
 	cleanup();
@@ -42,5 +42,14 @@ describe("Retention page", () => {
 		for (const h of ["D1", "D2", "D4", "D5", "D30"]) expect(await screen.findByText(h)).toBeTruthy();
 		expect(calls[0]?.days).toEqual(days);
 		expect(screen.getByText("(5)")).toBeTruthy();
+		// 2 decimals: 10 / 480 = 2.08%, 5 / 480 = 1.04% (the cohort row and the weighted average).
+		expect(screen.getAllByText("2.08%").length).toBe(2);
+		expect(screen.getAllByText("1.04%").length).toBe(2);
+	});
+
+	it("formats a share with 2 decimals, always both", () => {
+		expect(retentionPct(0.0345)).toBe("3.45%");
+		expect(retentionPct(0.01)).toBe("1.00%");
+		expect(retentionPct(0)).toBe("0.00%");
 	});
 });

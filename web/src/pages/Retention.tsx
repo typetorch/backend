@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { cn } from "cn";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { PageHeader, QueryState, Section } from "@/components/common";
-import { fmtInt, fmtPct, plural } from "@/lib/format";
+import { fmtInt, plural } from "@/lib/format";
 import { useAnalytics } from "@/lib/hooks";
 import type { RetentionResult } from "@/lib/types";
 
@@ -22,11 +22,14 @@ function Heat({ rate, kept }: { rate: number | null; kept?: number | null }) {
 			style={{ backgroundColor: `rgba(var(--heat), ${alpha.toFixed(2)})` }}
 			title={kept !== undefined && kept !== null ? plural(kept, "player") : undefined}
 		>
-			{fmtPct(rate, 0)}
+			{retentionPct(rate)}
 			{kept !== undefined && kept !== null ? <span className="ml-1 opacity-70">({kept})</span> : null}
 		</div>
 	);
 }
+
+/** A share as a percent with 2 decimals, always both (the backend keeps 4 decimals of the share): "3.45%", "1.00%". */
+export const retentionPct = (rate: number) => `${(rate * 100).toFixed(2)}%`;
 
 /** A cohort, or the weighted average (pinned above the cohorts, outside sorting and filtering). */
 interface Row {
@@ -37,7 +40,7 @@ interface Row {
 	kept?: Record<string, number | null>;
 }
 
-const heatText = (rate: number | null, kept?: number | null) => (rate === null ? "" : `${fmtPct(rate, 0)}${kept !== undefined && kept !== null ? ` (${kept})` : ""}`);
+const heatText = (rate: number | null, kept?: number | null) => (rate === null ? "" : `${retentionPct(rate)}${kept !== undefined && kept !== null ? ` (${kept})` : ""}`);
 
 /** One column per day. They sort and filter by the share in percent (42.1), not by the "42% (31)" text. */
 function retentionColumns(days: number[]): DataColumn<Row>[] {
