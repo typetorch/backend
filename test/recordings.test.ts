@@ -33,7 +33,7 @@ import { RecWriter } from "./recwriter.ts";
 const T0 = 1_000_000;
 
 /** A session: samples (t ms after T0, x, z), inputs (t ms after T0). */
-function track(samples: [number, number, number][], inputs: Omit<RecordingInput, "t">[] & { t: number }[] = [], job = "j1", pid = "p1") {
+function track(samples: [number, number, number][], inputs: (Omit<RecordingInput, "t"> & { t: number })[] = [], job = "j1", pid = "p1") {
 	const rec: DecodedRecording = {
 		pid,
 		sid: "s1",
