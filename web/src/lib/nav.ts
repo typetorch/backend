@@ -13,6 +13,7 @@
 import {
 	Activity,
 	Bell,
+	Box,
 	Bug,
 	CalendarClock,
 	CalendarRange,
@@ -84,6 +85,7 @@ export const NAV_GROUPS: NavGroup[] = [
 			{ label: "Feedback", path: "/feedback", icon: MessageSquareText, noFilters: true },
 			{ label: "First session", path: "/first-session", icon: Compass },
 			{ label: "Recordings", path: "/recordings", icon: MapIcon },
+			{ label: "Maps", path: "/maps", icon: Box },
 			{ label: "Economy", path: "/economy", icon: Coins },
 			{ label: "Monetization", path: "/monetization", icon: Wallet },
 			{ label: "Live events", path: "/live-events", icon: CalendarClock, noFilters: true },

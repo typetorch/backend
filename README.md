@@ -44,6 +44,7 @@ is the same command.
 - [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Experience notifications](#experience-notifications) (intents from the game, the planner, the sender, signed launch data)
 - [Live events](#live-events) (scheduled live value changes, signed by the CLI; each event's lift report)
+- [Maps](#maps) (map geometry exported from the place, no Studio: the 2D minimap and the 3D map)
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -619,6 +620,8 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `POST /v1/experiments/<key>/change` | admin | prepare a start / stop / split / settle / clear: checked, audited (`experiment.prepare`), answered with the signed `typetorch experiment ...` command and its `--dry-run`; applies nothing (the signing keys never reach this server) |
 | `GET /v1/experiments` | admin, web | the experiment overrides from `data/settings.json` (`active`, `weights`, `variant` per experiment; nothing else from the file): `{ source: "settings-file" \| "none" \| "unreadable", experiments }` |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
+| `GET /v1/maps`, `GET /v1/maps/<name>/geometry` | admin, web | the exported [maps](#maps) (bounds, part counts, place version, out of date, alignment) and one map's geometry (binary, with an ETag) |
+| `POST /v1/maps/export`, `PUT` / `DELETE /v1/maps/<name>/override` | admin | export the maps (a read-only Luau Execution task, audited `maps.export`; its end `maps.export.done`), a map's manual model path / offset (audited `maps.override.*`) |
 | `GET /v1/roblox/products` | admin, web | game pass and developer product names, Robux prices and icons for the explorer's product tooltips, looked up by the server |
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
@@ -1301,6 +1304,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `notify-queue` | notification sends per hour (planned, sent, dry, failed, 429s, skipped), planned by why, skipped by kind and why, failures by kind, HTTP status and code (final or retried). The live queue is `GET /v1/notify/status` | 1 day |
 | `monetization-purchases` | the latest purchases, newest first: player, session, product, kind, Robux paid, revenue and `where` (`limit`, 50, at most 200) | 30 days |
 | `feedback-summary` | [player feedback](#player-feedback) (plans/32): `total`, `withText`, `players`, `rated`, `legacy`, `avgNorm`; `scales`: one distribution per scale (`scale`, `type`, `steps`, `legacy`, `n`, `rated`, `textOnly`, `counts` per `r` with every step listed and its `label`, `labels` seen, `avgR`, `avgNorm`, `firstAt` / `lastAt`; newest scale first); `thumbs` (`up`, `down`, `upShare` over the thumbs scales, or null); `trend` of `n`, `rated`, `withText`, `avgNorm` per hour (`bucket: "hour"`, ranges up to 2 days) or per UTC day. Every filter applies | 30 days |
+| `map-positions` | for the [maps](#maps): `names`, the distinct values of the `mapKey` prop (default `map`) with their event counts (the 200 most common); `cells`, positioned events (numeric `px` and `pz` props, `py` optional) that carry the map prop, per map, event (`kind:name`) and `cell` x `cell` square (`cell` 0.5, 1, 2 or 4 studs, default 1): the low corner `x` / `z`, the average `y` and the lowest `ylo`, the count `n`; the `maxCells` (5,000, at most 10,000) busiest, `truncated` past that; `map` for one map. Every filter applies | 7 days |
 | `feedback-list` | player feedback rows, newest first (`limit` 50, at most 200; `offset`, at most 5,000; `total`, `more`): `t`, `pid`, `sid`, `dev`, `state`, `scale`, `type`, `steps`, `r`, `norm`, `label`, `text`, `len`, `topic`, `ctx`, `play_s`, `legacy`. Options `pid` (or `uid`), `scale`, `r`, `hasText`, `q` (a case-insensitive substring of the text, at most 100 characters); the device filter is the filters' `dev`. Over `POST /v1/query/feedback-list` with `uid` / `name` / `displayName` joined in and erased players left out | 30 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
@@ -2136,6 +2140,83 @@ backend pushing on and off messages: both trust the backend at run time and can'
   > conversion (baseline range +0% to +0%). Dip after: -7% playtime per player (baseline range -5% to +5%), -10% players
   > (baseline range +0% to +0%) the 1 day after: part of it was pulled forward; net over the event and the 1 day after:
   > +2% playtime.
+
+## Maps
+
+Plans/33. Each map's real geometry under the explorer, with no Studio and no game code: a top-down **2D minimap** and a
+**3D map** (hitboxes only), with positioned events drawn on them.
+
+**Export** (`POST /v1/maps/export`, owners, audited; `src/maps/`). The backend runs a read-only Luau script on the place
+through Open Cloud Luau Execution (binary output) with `OPENCLOUD_API_KEY` (scopes
+`universe.place.luau-execution-session:read` and `:write`) on `TYPETORCH_UNIVERSE_ID`'s root place (else the place the
+fleet's servers report):
+
+- **Which models are maps.** The map names come from the events: the distinct values of the `map` prop (the
+  `map-positions` query, last 30 days), plus the export's `names` and the overrides. The script packs every Model or
+  Folder in Workspace, ReplicatedStorage and ServerStorage whose name matches one, compared without case or punctuation
+  (`parking_garage` finds `ParkingGarage`); the backend keeps one per name (an override's model first, else the one with
+  the most parts, then the shortest path; the others are listed as `alternatives`). Names with no model are `unmatched`.
+  Everything else with geometry in Workspace (not Terrain, not the camera) is the **lobby**, listed as `(lobby)`.
+  Terrain is skipped.
+- **Every part counts**, transparent or not: parts at transparency 0.95 or more are flagged `invisible`, never dropped
+  (invisible walls shape where players walk). MeshParts and unions are exported as boxes of their size and flagged, so
+  the view can tint them.
+- **Rate limits.** One export at a time (409 while one runs), at most one every 30 s (429 with Retry-After). Roblox
+  allows 5 task creations a minute per key owner: a 429 from Roblox waits (its Retry-After, else 12 s x the attempt) and
+  tries again, up to 5 times; nothing else is retried. The task's own timeout is 180 s; the export runs in the
+  background and `GET /v1/maps` shows its step (`creating the task`, `queued on Roblox`, `running in the place`,
+  `downloading the geometry`, `storing`) and, on failure, why. The binary output's presigned URL gets no API key (only
+  apis.roblox.com would) and is never logged.
+- **Storage.** `<data dir>/maps/index.json` (the latest export: place, place version, when, by whom, each map's bounds
+  and part counts; a 20-entry history; the overrides) and `<data dir>/maps/geometry/<sha256>.ttmp`, one file per map named
+  by its content hash (an unchanged map is never written twice; files no export uses are removed). Gnome (2026-11-15,
+  place version 3617): 6 maps and the lobby, 4,991 parts, 240 KB, 7 s from the click to stored.
+- **Out of date.** The place's newest version from the Assets API (`asset:read` on the key); when the key can't read it,
+  the newest `pv` the fleet's game servers reported in the last day (`placeVersion.source` says which, `note` why).
+  Newer than the exported version: the page says "out of date, export again".
+
+**Alignment.** For each map, the positioned events on it (`px`/`pz` props of events carrying the map prop, last 30 days)
+against the map's box grown by 8 studs, the override's offset applied: `aligned` at 80% inside or more, `partial` from
+20%, `off` below that with a `suggestedOffset` (the events' median minus the box's center on x and z; on y the events'
+low end minus 3 studs minus the box's floor), `unknown` under 10 events. The **manual override**
+(`PUT /v1/maps/<name>/override { path?, offset? }`, owners) sets the model to export (an instance path such as
+`ReplicatedStorage.assets.maps.Mall`, used at the next export) and/or an offset (applied at once, to the geometry, never
+to the events); `DELETE` removes it.
+
+**Reads** (every signed-in role). `GET /v1/maps`: `{ configured, canExport, export: {state, step, startedAt, finishedAt,
+by, error}, latest, placeVersion: {latest, source, exported, outOfDate, note?}, maps: [{ name, kind (map / lobby), via
+(name / override / lobby), path, parts, meshes, unions, invisible, bounds: {min, max}, hash, bytes, alternatives,
+offset, override?, alignment: {state, samples, inside, suggestedOffset?} }], names, overrides, history }`.
+`GET /v1/maps/<name>/geometry` (the name in any spelling, or `(lobby)`): the map's binary with `ETag: "<sha256>"`
+(`If-None-Match` answers 304).
+
+**The format** (`src/maps/format.ts`; little-endian). The task's output is `TTMX`: magic `TTMX`, version u16 (1), entry
+count u16, then per entry kind u8 (0 map, 1 lobby), via u8 (0 name, 1 override, 2 lobby), the instance name (u8 length
++ UTF-8), the map name it was found for (u8 + UTF-8), its path (u16 + UTF-8), the part count u32 and the parts. A stored
+map is `TTMP`: magic, version u16 (1), record size u16 (48), part count u32, reserved u32, then the parts. One part is 48
+bytes:
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | position x, y, z (studs, world) | f32 x 3 |
+| 12 | rotation as a unit quaternion x, y, z, w (three.js order) | f32 x 4 |
+| 28 | size x, y, z (a mesh / union: its bounding size) | f32 x 3 |
+| 40 | color r, g, b | u8 x 3 |
+| 43 | transparency x 255 | u8 |
+| 44 | material (`Enum.Material` value) | u16 |
+| 46 | shape: 0 ball, 1 block, 2 cylinder (axis = the part's X), 3 wedge, 4 corner wedge | u8 |
+| 47 | flags: 1 mesh, 2 union, 4 invisible (transparency >= 0.95), 8 collides, 16 truss | u8 |
+
+**The page** (**Maps**, under Players & gameplay). The export card (last export, place version, "out of date", the Export button
+for owners with its progress, the names no model was found for), a map picker, **2D / 3D** (three.js, loaded only on
+this page: one instanced mesh per shape, so thousands of parts draw in a few calls; 3D: orbit with the mouse and fly
+with W A S D Q E; 2D: the same scene from above through an orthographic camera, north up, pan and zoom, crisp at any
+zoom), a **Y band** (floors found from the geometry's flat walkable slabs, or a free range: geometry above and below is
+cut away, so indoor floors show in 2D), invisible parts and a mesh tint, and the **layers**: one per positioned event, as
+dots or heat cells of **0.5, 1 or 2 studs** (the filter bar applies), with the alignment card (owners apply the
+suggested offset or set a model path). Layers are plain data in world coordinates (`web/src/lib/maps.ts` `MapLayer`:
+`points`, `paths`, `cells` + `cellSize`), so other pages (the recordings explorer's paths, replays, quits) draw on the
+same `MapScene` component. Not checked against Studio: the corner wedge's orientation.
 
 ## Player feedback
 

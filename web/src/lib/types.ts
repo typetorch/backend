@@ -1,4 +1,5 @@
 import type { PerfCompareResult, PerfSeriesResult } from "./perf";
+import type { MapPositionsResult } from "./maps";
 
 /**
  * The analytics server's answers, as the explorer reads them. They mirror `analytics/src/queries/*.ts` and
@@ -1311,6 +1312,7 @@ export interface QueryResults {
 	"notify-queue": NotifyQueueResult;
 	"feedback-summary": FeedbackSummaryResult;
 	"feedback-list": FeedbackListResult;
+	"map-positions": MapPositionsResult;
 }
 
 // Player feedback (plans/32) ------------------------------------------------------------------------------------------------

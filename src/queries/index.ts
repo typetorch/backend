@@ -12,6 +12,7 @@ import { liveEventLift } from "./live-event-lift.ts";
 import { feedbackList, feedbackSummary } from "./feedback.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { ltv } from "./ltv.ts";
+import { mapPositions } from "./maps.ts";
 import { churn } from "./churn.ts";
 import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
@@ -75,6 +76,7 @@ export const QUERIES = {
 	"feedback-summary": feedbackSummary,
 	"feedback-list": feedbackList,
 	"live-event-lift": liveEventLift,
+	"map-positions": mapPositions,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;
