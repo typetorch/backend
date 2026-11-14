@@ -153,7 +153,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_DEPLOY_KEEP_DAYS` | `365` | Days of releases in the [deploy history](#deploy-history) (at most 10,000 rows). |
 | `TYPETORCH_ERRORS_IP_PER_MINUTE` | `1200` | `POST /v1/errors` per address per minute (game servers share egress addresses). |
 | `TYPETORCH_ERROR_ROWS_PER_DAY` | `2000000` | New error count and player rows per UTC day; past it new rows are dropped and counted. |
-| `TYPETORCH_SESSION_IDLE_HOURS`, `TYPETORCH_SESSION_MAX_DAYS` | `12`, `7` | Explorer session lifetime. |
+| `TYPETORCH_SESSION_MAX_DAYS` | `3` | Explorer session lifetime from sign-in (no idle timeout). |
 | `TYPETORCH_LOGIN_MAX_FAILURES`, `TYPETORCH_LOGIN_WINDOW_MINUTES` | `5`, `15` | Failed logins per address before 429. |
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
 | `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams, and the same number of `GET /v1/fleet/stream` streams. |
@@ -316,11 +316,14 @@ effects; the CLI checks before it signs settings). A third role, **web**, has no
 session and only reads; see [Read-only access](#read-only-access-the-web-role).
 
 **The explorer's login.** You paste the admin token once (or sign in with Roblox, below); the backend answers with a
-session cookie and forgets the token. The session is a random 32-byte id kept in memory on the server, ending after 12 hours
-idle or 7 days at most, bound to the admin token it was made with (changing `TYPETORCH_ADMIN_TOKEN` and restarting ends every
-session; so does any restart). The cookie is `HttpOnly`, `SameSite=Strict`, `Path=/` and `Secure` whenever the request
+session cookie and forgets the token. The session is a signed JWT (HS256) that lasts 3 days from sign-in
+(`TYPETORCH_SESSION_MAX_DAYS`). Its key comes from a secret in `<data dir>/sessions.json` (mode 0600) and the admin token,
+so a restart or a deploy keeps everyone signed in, while changing `TYPETORCH_ADMIN_TOKEN` ends every session (so does
+deleting `sessions.json`). Removing an owner or viewer, revoking a blessed device or turning the token login off ends the
+sessions they affect on their next request. The cookie is `HttpOnly`, `SameSite=Strict`, `Path=/` and `Secure` whenever the request
 came over https (also behind a trusted proxy that says so, or with an https `TYPETORCH_PUBLIC_URL`). Sign out ends it on the
-server. A request that changes something and is authenticated by the cookie must also carry the header `X-TypeTorch: 1`
+server: the token's id goes on a short list in `sessions.json` until it would have expired, so a copy of the cookie
+stops working too. A request that changes something and is authenticated by the cookie must also carry the header `X-TypeTorch: 1`
 (a web page on another site can't send it) and, when the browser sends an `Origin`, that must be this site. Bearer requests
 (the CLI) need neither: a browser can't attach them by itself.
 

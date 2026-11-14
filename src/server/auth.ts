@@ -12,13 +12,15 @@
  * role, `game` keys as the API key, `analyst` keys as the read-only role (their scopes stop them before anything else),
  * `lookup` / `support` keys like the lookup token. A key never opens an explorer session.
  *
- * Explorer sessions are random 32-byte ids kept in memory (12 h idle / 7 days at most), bound to a hash of the admin
- * token they were made with, so changing the token ends them all. A session is made by pasting the admin token or by
+ * Explorer sessions are signed JWTs (HS256, 3 days by default; see Sessions), keyed by a secret in the data dir and a
+ * hash of the admin token, so they survive deploys and changing the token ends them all. A session is made by pasting the admin token or by
  * signing in with Roblox as an owner (admin) or a viewer (web). The cookie is HttpOnly, SameSite=Strict (Lax for the short OAuth state cookie only)
  * and Secure over https. A request authenticated by the cookie that changes something also needs the X-TypeTorch header
  * (and a matching Origin when the browser sends one); Bearer requests need neither, a browser can't attach them by itself.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { bearer, readCookie, tokenIn } from "./http.ts";
 import { KeyStore, type CallerKey, type KeyRole } from "./keys.ts";
 
@@ -40,6 +42,8 @@ export interface Session {
 	role: AccessRole;
 	created: number;
 	seen: number;
+	/** The JWT's id (jti). */
+	id?: string;
 	/** Hash of the admin token this session was made with. */
 	tokenHash: string;
 	/** The blessed device a typetorch.dev admin session came from: revoking the device ends the session. */
@@ -50,75 +54,253 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 
 export interface SessionsOptions {
 	adminToken: string;
-	idleMs: number;
+	/** Absolute lifetime of a session (the JWT's exp), ms. */
 	maxMs: number;
-	/** Oldest sessions go first past this many. */
+	/**
+	 * Where the signing secret and the signed-out list live (`<data dir>/sessions.json`, mode 0600), so sessions survive a
+	 * restart or a deploy. Absent (tests): a random secret in memory.
+	 */
+	file?: string;
+	/** Live sessions this process remembers (for counts and ending them by a rule); oldest go first past this many. */
 	maxSessions?: number;
 	clock?: () => number;
 }
 
+/** The only header a session JWT may carry (anything else, `alg: none` included, is refused before the signature). */
+const JWT_HEADER = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+/** A JWT is a few hundred bytes; anything far bigger is not ours. */
+const JWT_MAX = 4096;
+/** Clock skew allowed on `iat` between the two containers of a rolling deploy. */
+const SKEW_MS = 60_000;
+/** Signed-out ids kept on disk at most (the oldest expire first anyway). */
+const REVOKED_MAX = 5000;
+
+interface Claims {
+	v: 1;
+	jti: string;
+	iat: number;
+	exp: number;
+	role: AccessRole;
+	user: SessionUser;
+	dev?: string;
+}
+
+interface SessionsFile {
+	secret: string;
+	/** jti -> exp (ms): signed out before their time. */
+	revoked: Record<string, number>;
+}
+
+function validUser(u: unknown): u is SessionUser {
+	if (typeof u !== "object" || u === null) return false;
+	const user = u as Record<string, unknown>;
+	if (user.kind === "token") return true;
+	return user.kind === "roblox" && Number.isSafeInteger(user.userId) && typeof user.name === "string";
+}
+
+/**
+ * Explorer sessions as signed JWTs (HS256) in the session cookie: nothing per session is kept on the server, so a
+ * deploy or a restart signs no one out. The key is HMAC(secret, admin token hash): the secret is made once and kept in
+ * the data dir, and changing the admin token makes every session's signature wrong. A session lasts `maxMs` from sign-in
+ * (no idle timeout, no sliding renewal). Signing out puts the token's id on a small list on disk until it would have
+ * expired anyway, so a copied cookie stops working too.
+ */
 export class Sessions {
-	private readonly byId = new Map<string, Session>();
 	private readonly tokenHash: string;
 	private readonly clock: () => number;
+	private secret: Buffer;
+	private revoked = new Map<string, number>();
+	/** Sessions this process issued or saw since it started (jti -> session, exp): counts and endWhere only. */
+	private readonly live = new Map<string, { session: Session; exp: number }>();
+	private fileMtime = 0;
+	private checkedAt = 0;
 
 	constructor(private readonly options: SessionsOptions) {
 		this.tokenHash = Sessions.hashToken(options.adminToken);
 		this.clock = options.clock ?? Date.now;
+		this.secret = randomBytes(32);
+		if (options.file) this.load(true);
 	}
 
 	static hashToken(adminToken: string): string {
 		return sha256(`tt-session-v1\0${adminToken}`);
 	}
 
-	/** A new session; returns the cookie value (a random 32-byte id, base64url). */
-	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.tokenHash, device?: string): string {
-		const id = randomBytes(32).toString("base64url");
-		const now = this.clock();
-		this.sweep(now);
-		this.byId.set(sha256(id), { user, role, created: now, seen: now, tokenHash, ...(device ? { device } : {}) });
-		const max = this.options.maxSessions ?? 200;
-		while (this.byId.size > max) this.byId.delete(this.byId.keys().next().value as string);
-		return id;
+	private key(tokenHash: string): Buffer {
+		return createHmac("sha256", this.secret).update(`tt-session-jwt-v1\0${tokenHash}`).digest();
 	}
 
-	/** The live session for a cookie value (and refreshes its idle timer), or undefined. */
-	get(id: string | undefined): Session | undefined {
-		if (!id || id.length > 128) return undefined;
-		const key = sha256(id);
-		const session = this.byId.get(key);
-		if (!session) return undefined;
-		const now = this.clock();
-		if (session.tokenHash !== this.tokenHash || now - session.seen > this.options.idleMs || now - session.created > this.options.maxMs) {
-			this.byId.delete(key);
+	private readFile(): SessionsFile | undefined {
+		const file = this.options.file;
+		if (!file || !existsSync(file)) return undefined;
+		try {
+			const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<SessionsFile>;
+			if (typeof parsed.secret !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(parsed.secret)) return undefined;
+			const revoked: Record<string, number> = {};
+			if (parsed.revoked && typeof parsed.revoked === "object") {
+				for (const [jti, exp] of Object.entries(parsed.revoked)) if (typeof exp === "number") revoked[jti] = exp;
+			}
+			return { secret: parsed.secret, revoked };
+		} catch {
 			return undefined;
 		}
-		session.seen = now;
+	}
+
+	/** Reads the file (the other container of a rolling deploy may have written it); makes the secret on first start. */
+	private load(first = false): void {
+		const file = this.options.file as string;
+		const found = this.readFile();
+		if (found) {
+			this.secret = Buffer.from(found.secret, "base64url");
+			this.revoked = new Map(Object.entries(found.revoked));
+		} else if (first) {
+			if (existsSync(file)) throw new Error(`${file} is unreadable: fix or delete it (deleting signs everyone out)`);
+			this.write();
+		}
+		try {
+			this.fileMtime = statSync(file).mtimeMs;
+		} catch {}
+	}
+
+	/** Picks up what the other process wrote, at most every 2 s. */
+	private refresh(now: number): void {
+		if (!this.options.file || now - this.checkedAt < 2000) return;
+		this.checkedAt = now;
+		try {
+			if (statSync(this.options.file).mtimeMs !== this.fileMtime) this.load();
+		} catch {}
+	}
+
+	private write(): void {
+		const file = this.options.file;
+		if (!file) return;
+		const now = this.clock();
+		// Merge what the other process may have added meanwhile.
+		const onDisk = this.readFile();
+		if (onDisk && onDisk.secret === this.secret.toString("base64url")) for (const [jti, exp] of Object.entries(onDisk.revoked)) if (!this.revoked.has(jti)) this.revoked.set(jti, exp);
+		for (const [jti, exp] of this.revoked) if (exp <= now) this.revoked.delete(jti);
+		while (this.revoked.size > REVOKED_MAX) this.revoked.delete(this.revoked.keys().next().value as string);
+		mkdirSync(dirname(file), { recursive: true });
+		const tmp = `${file}.${process.pid}.tmp`;
+		writeFileSync(tmp, `${JSON.stringify({ secret: this.secret.toString("base64url"), revoked: Object.fromEntries(this.revoked) })}\n`, { mode: 0o600 });
+		try {
+			chmodSync(tmp, 0o600);
+		} catch {}
+		renameSync(tmp, file);
+		try {
+			this.fileMtime = statSync(file).mtimeMs;
+		} catch {}
+	}
+
+	/** Re-reads the file now (the handover: the previous container is gone). */
+	reload(): void {
+		if (this.options.file) this.load();
+	}
+
+	/** A new session; returns the cookie value (a JWT). */
+	create(user: SessionUser, role: AccessRole = "admin", tokenHash: string = this.tokenHash, device?: string): string {
+		const now = this.clock();
+		const claims: Claims = {
+			v: 1,
+			jti: randomBytes(16).toString("base64url"),
+			iat: Math.floor(now / 1000),
+			exp: Math.floor((now + this.options.maxMs) / 1000),
+			role,
+			user,
+			...(device ? { dev: device } : {}),
+		};
+		const body = `${JWT_HEADER}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}`;
+		const token = `${body}.${createHmac("sha256", this.key(tokenHash)).update(body).digest("base64url")}`;
+		if (tokenHash === this.tokenHash) this.remember(claims, now);
+		return token;
+	}
+
+	private remember(claims: Claims, now: number): Session {
+		const session: Session = { user: claims.user, role: claims.role, created: claims.iat * 1000, seen: now, tokenHash: this.tokenHash, id: claims.jti, ...(claims.dev ? { device: claims.dev } : {}) };
+		this.live.delete(claims.jti);
+		this.live.set(claims.jti, { session, exp: claims.exp * 1000 });
+		const max = this.options.maxSessions ?? 1000;
+		while (this.live.size > max) this.live.delete(this.live.keys().next().value as string);
 		return session;
 	}
 
-	destroy(id: string | undefined): boolean {
-		return id ? this.byId.delete(sha256(id)) : false;
+	/** Checks a cookie value: our signature, not expired, not signed out. */
+	private verify(token: string, now: number): Claims | undefined {
+		const parts = token.split(".");
+		if (parts.length !== 3 || parts[0] !== JWT_HEADER) return undefined;
+		const [header, payload, signature] = parts as [string, string, string];
+		const expected = createHmac("sha256", this.key(this.tokenHash)).update(`${header}.${payload}`).digest();
+		const given = Buffer.from(signature, "base64url");
+		if (given.length !== expected.length || !timingSafeEqual(given, expected)) return undefined;
+		let claims: Claims;
+		try {
+			claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Claims;
+		} catch {
+			return undefined;
+		}
+		if (claims?.v !== 1 || typeof claims.jti !== "string" || !Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp)) return undefined;
+		if (claims.role !== "admin" && claims.role !== "web") return undefined;
+		if (!validUser(claims.user) || (claims.dev !== undefined && typeof claims.dev !== "string")) return undefined;
+		const iat = claims.iat * 1000;
+		// exp, and the lifetime as it is set now (lowering TYPETORCH_SESSION_MAX_DAYS shortens old sessions too).
+		if (claims.exp * 1000 <= now || iat > now + SKEW_MS || now - iat > this.options.maxMs) return undefined;
+		if (this.revoked.has(claims.jti)) return undefined;
+		return claims;
 	}
 
-	/** Ends every session the predicate matches; returns how many. */
+	/** The live session for a cookie value, or undefined. */
+	get(token: string | undefined): Session | undefined {
+		if (!token || token.length > JWT_MAX) return undefined;
+		const now = this.clock();
+		this.refresh(now);
+		const claims = this.verify(token, now);
+		if (!claims) {
+			return undefined;
+		}
+		return this.remember(claims, now);
+	}
+
+	/** Signs a cookie value out (it stays refused until it would have expired). */
+	destroy(token: string | undefined): boolean {
+		if (!token || token.length > JWT_MAX) return false;
+		const claims = this.verify(token, this.clock());
+		if (!claims) return false;
+		this.revoke(claims.jti, claims.exp * 1000);
+		this.write();
+		return true;
+	}
+
+	private revoke(jti: string, exp: number): void {
+		this.revoked.set(jti, exp);
+		this.live.delete(jti);
+	}
+
+	/**
+	 * Ends every session this process knows of that the predicate matches; returns how many. Sessions it never saw are
+	 * stopped by the checks on every request instead (Auth: the owner / viewer lists, the device, the token login).
+	 */
 	endWhere(match: (session: Session) => boolean): number {
+		const now = this.clock();
 		let ended = 0;
-		for (const [key, session] of this.byId) {
+		for (const [jti, { session, exp }] of [...this.live]) {
+			if (exp <= now) {
+				this.live.delete(jti);
+				continue;
+			}
 			if (match(session)) {
-				this.byId.delete(key);
+				this.revoke(jti, exp);
 				ended++;
 			}
 		}
+		if (ended) this.write();
 		return ended;
 	}
 
-	private sweep(now: number): void {
-		for (const [key, s] of this.byId) if (now - s.seen > this.options.idleMs || now - s.created > this.options.maxMs) this.byId.delete(key);
-	}
-
+	/** Live sessions this process has issued or seen since it started. */
 	get size(): number {
-		return this.byId.size;
+		const now = this.clock();
+		for (const [jti, { exp }] of this.live) if (exp <= now || this.revoked.has(jti)) this.live.delete(jti);
+		return this.live.size;
 	}
 }
 
@@ -142,6 +324,10 @@ export interface AuthOptions {
 	isViewer(userId: number): boolean;
 	/** Named API keys (plans/31); absent = env tokens only. */
 	keys?: KeyStore;
+	/** Whether the token login is on; a token session ends while it is off. */
+	tokenLogin?(): boolean;
+	/** Whether a blessed device still is; a session a device opened ends with it. */
+	deviceActive?(id: string): boolean;
 }
 
 export class Auth {
@@ -199,7 +385,11 @@ export class Auth {
 		const cookie = readCookie(req, SESSION_COOKIE);
 		const session = this.o.sessions.get(cookie);
 		if (!session || !cookie) return undefined;
-		if (session.user.kind === "roblox" && !this.robloxStillHolds(session.user.userId, session.role)) {
+		const stale =
+			(session.user.kind === "roblox" && !this.robloxStillHolds(session.user.userId, session.role)) ||
+			(session.user.kind === "token" && this.o.tokenLogin !== undefined && !this.o.tokenLogin()) ||
+			(session.device !== undefined && this.o.deviceActive !== undefined && !this.o.deviceActive(session.device));
+		if (stale) {
 			this.o.sessions.destroy(cookie);
 			return undefined;
 		}

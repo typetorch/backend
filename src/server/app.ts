@@ -486,7 +486,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	live.start();
 
 	// Auth -------------------------------------------------------------------------------------------------------------
-	const sessions = new Sessions({ adminToken: config.adminToken, idleMs: config.sessionIdleMs, maxMs: config.sessionMaxMs, clock });
+	const sessions = new Sessions({ adminToken: config.adminToken, maxMs: config.sessionMaxMs, file: join(config.dataDir, "sessions.json"), clock });
 	// Named API keys (plans/31) in the fleet SQLite file; the secrets made here go on the audit's redaction list.
 	const keys = await KeyStore.open(sqlite, clock);
 	const auth = new Auth({
@@ -497,6 +497,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		sessions,
 		isOwner: (id) => access.isOwner(id),
 		isViewer: (id) => runtime.isViewer(id),
+		tokenLogin: () => runtime.get("tokenLogin"),
+		// `central` is made below; this runs per request, after it.
+		deviceActive: (id) => central?.devices.has(id) ?? true,
 	});
 	/** Ends the Roblox sessions whose user no longer holds the role they signed in with (an owner removed, a viewer removed). */
 	const endStaleRobloxSessions = () => sessions.endWhere((s) => s.user.kind === "roblox" && !auth.robloxStillHolds(s.user.userId, s.role));
@@ -2909,6 +2912,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		log(`handover: DuckDB is open after ${((Date.now() - handover.since) / 1000).toFixed(1)} s; analytics is on`);
 		// The previous server is gone now; what it saved while both ran (the Settings page, the owner list) applies here too.
 		const changed = runtime.reload();
+		sessions.reload();
 		const listsChanged = access.reload() || changed.includes("webViewers");
 		const ended = (listsChanged ? endStaleRobloxSessions() : 0) + (changed.includes("tokenLogin") && !runtime.get("tokenLogin") ? sessions.endWhere((s) => s.user.kind === "token") : 0);
 		if (changed.length || ended) log(`handover: picked up what the previous server saved meanwhile${changed.length ? ` (settings: ${changed.join(", ")})` : ""}${ended ? `; ${ended} session(s) ended` : ""}`);
