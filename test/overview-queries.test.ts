@@ -224,8 +224,10 @@ describe("trends", () => {
 		const r = await store.query("trends", {}, { window: 7 });
 		expect(r.window).toBe(7);
 		expect(r.sources.sort()).toEqual(["direct", "teleport"]);
-		expect(r.days.length).toBe(28); // 28 days back from mid-day: 29 calendar days, today isn't over
-		const lastDay = r.days.at(-1);
+		expect(r.days.length).toBe(29); // 28 days back from mid-day: 29 calendar days, today so far the last (partial)
+		expect(r.days.at(-1)).toMatchObject({ date: new Date(TODAY * DAY).toISOString().slice(0, 10), partial: true });
+		expect(r.days.filter((d) => d.partial)).toHaveLength(1);
+		const lastDay = r.days.at(-2);
 		expect(lastDay?.date).toBe(new Date((TODAY - 1) * DAY).toISOString().slice(0, 10));
 		// Reference: player-days by the day their first session that day started, source = that session's join.
 		const all = sessions(players(NOW - 35 * DAY, NOW + DAY));
@@ -256,16 +258,17 @@ describe("trends", () => {
 			}
 			return rates.length ? Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 10_000) / 10_000 : null;
 		};
-		expect(r.days.at(-3)?.total.d1).toBe(d1At(TODAY - 3));
-		expect(r.days.at(-1)?.total.d1).toBe(d1At(TODAY - 1));
+		expect(r.days.at(-4)?.total.d1).toBe(d1At(TODAY - 3));
+		expect(r.days.at(-2)?.total.d1).toBe(d1At(TODAY - 1));
+		expect(r.days.at(-1)?.total.d1).toBe(d1At(TODAY)); // yesterday's cohort isn't counted until today is over
 		// Session time and playtime per DAU: means of the daily values.
 		const perDay = (d: number) => {
 			const ss = all.filter((s) => day(s.t0) === d);
 			return { sessions: ss.length, dau: new Set(ss.map((s) => s.pid)).size, playtime: ss.reduce((sum, s) => sum + s.t1 - s.t0, 0) };
 		};
 		const window = Array.from({ length: 7 }, (_, i) => perDay(TODAY - 7 + i));
-		expect(r.days.at(-1)?.total.sessionMinutes).toBeCloseTo((mean(window.map((v) => (v.sessions ? v.playtime / v.sessions : null))) ?? 0) / 60_000, 2);
-		expect(r.days.at(-1)?.total.playtimeMinutes).toBeCloseTo((mean(window.map((v) => (v.dau ? v.playtime / v.dau : null))) ?? 0) / 60_000, 2);
+		expect(r.days.at(-2)?.total.sessionMinutes).toBeCloseTo((mean(window.map((v) => (v.sessions ? v.playtime / v.sessions : null))) ?? 0) / 60_000, 2);
+		expect(r.days.at(-2)?.total.playtimeMinutes).toBeCloseTo((mean(window.map((v) => (v.dau ? v.playtime / v.dau : null))) ?? 0) / 60_000, 2);
 		expect(r.days[10].total.newUsers).toBeGreaterThan(0);
 		expect(r.days[10].total.playtimeMinutes).toBeGreaterThan(0);
 	});

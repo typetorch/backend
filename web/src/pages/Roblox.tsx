@@ -594,13 +594,13 @@ export function trendStep(choice: string, days: number): { key: string; bucketHo
 		const h = key === "6h" ? 6 : 12;
 		return { key, bucketHours: h, window: 1, title: `Every ${h} hours`, description: `Per ${h} hours (UTC), ${sources}. The running ${h} hours show too, marked "so far".` };
 	}
-	if (key === "1") return { key, bucketHours: 24, window: 1, title: "Daily values", description: `Per full UTC day, ${sources}: each day's own value.` };
+	if (key === "1") return { key, bucketHours: 24, window: 1, title: "Daily values", description: `Per UTC day, ${sources}: each day's own value. Today shows so far.` };
 	return {
 		key,
 		bucketHours: 24,
 		window: 7,
 		title: "Snapshot of 7-day moving averages",
-		description: `Per full UTC day, ${sources}. Counts are averaged over the 7 days; ratios are the mean of the 7 daily values.`,
+		description: `Per UTC day, ${sources}. Counts are averaged over the 7 days; ratios are the mean of the 7 daily values. The last point includes today so far.`,
 	};
 }
 
@@ -621,7 +621,7 @@ function Trends({ filters }: { filters: Filters }) {
 	const days = TREND_RANGES.includes(Number(range)) ? Number(range) : 28;
 	// Today has no full day yet: a daily view of it shows 6-hour buckets instead.
 	const step = trendStep(smooth, days);
-	// From `days` UTC days back (0 = today's midnight). Daily views end yesterday; 6 / 12 h include today so far.
+	// From `days` UTC days back (0 = today's midnight), up to now: the running day / bucket is the last point ("so far").
 	const from = isoDate(Date.now() - days * 86_400_000);
 	const q = useAnalytics("trends", { window: step.window, ...(step.bucketHours !== 24 ? { bucketHours: step.bucketHours } : {}) }, { filters: { ...filters, from } });
 	const spec = TRENDS.find((t) => t.key === metric) ?? TRENDS[0];
@@ -729,7 +729,7 @@ function Trends({ filters }: { filters: Filters }) {
 
 /** The rules the page's numbers follow (Creator Hub's definitions, create.roblox.com/docs/production/analytics). */
 export const CALCULATION_NOTES: { title: string; text: string }[] = [
-	{ title: "Days", text: "UTC, midnight to midnight, as Creator Hub's daily numbers. Only full days count: the cards and charts end yesterday, since today isn't over." },
+	{ title: "Days", text: "UTC, midnight to midnight, as Creator Hub's daily numbers. Only full days count on the cards: they end yesterday, since today isn't over. The trends chart shows today so far as its last point, marked \"so far\"." },
 	{ title: "Sessions", text: "One session per join, from its first to its last event, with no minimum length. It counts on the day it started, so a player active past midnight is a daily active user of the first day only." },
 	{ title: "Who counts", text: "Players on public, private and reserved servers. Studio play tests don't count (Creator Hub only sees published games)." },
 	{ title: "Active users", text: "Daily active users are the distinct players who started a session that UTC day, averaged over the period. Monthly active users are the distinct players of the 30 days ending on the period's last day." },

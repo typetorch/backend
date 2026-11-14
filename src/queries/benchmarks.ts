@@ -98,9 +98,8 @@ function playerEvents(ctx: QueryContext, f: NormalizedFilters, from: number, to:
 	return `SELECT ${cols} FROM ${ctx.table("events", from, to)} e WHERE ${playerRows(fr, ctx, NOT_STUDIO)}`;
 }
 
-/** Trends' last bucket: the last full UTC day (24 h), or the bucket holding the earlier of `to` and now (6 / 12 h). */
+/** Trends' last bucket: the one holding the earlier of `to` and now (today so far included, marked partial). */
 function lastTrendBucket(ctx: QueryContext, to: number, hours: number): number {
-	if (hours === 24) return lastFullDay(ctx, to);
 	const B = hours * 3_600_000;
 	return Math.floor((Math.min(to, ctx.now + 1) - 1) / B);
 }
@@ -475,9 +474,9 @@ export interface TrendsResult {
 	sources: string[];
 	bucketHours: number;
 	/**
-	 * One point per bucket. Days (bucketHours 24): full UTC days only, the last one yesterday at the latest, `date` is
-	 * YYYY-MM-DD. 12 / 6 hours: `date` is the bucket's start (ISO), the current bucket included with `partial: true`;
-	 * D1 is null (a per-day measure).
+	 * One point per bucket, up to now: the running bucket (today, for days) is included with `partial: true`. Days
+	 * (bucketHours 24): `date` is YYYY-MM-DD. 12 / 6 hours: `date` is the bucket's start (ISO); D1 is null there (a
+	 * per-day measure).
 	 */
 	days: { date: string; partial?: boolean; total: TrendValues; bySource: Record<string, TrendValues> }[];
 }
@@ -486,7 +485,7 @@ const TREND_BUCKET_HOURS = [6, 12, 24];
 
 export const trends = defineQuery<TrendsOptions, TrendsResult>({
 	name: "trends",
-	summary: "per full UTC day (or 12 / 6 hours), moving averages of new users, DAU, session time, playtime per DAU, revenue and D1, in total and per join source",
+	summary: "per UTC day (or 12 / 6 hours; today so far included), moving averages of new users, DAU, session time, playtime per DAU, revenue and D1, in total and per join source",
 	defaultDays: 28,
 	options: (input = {}) => ({
 		window: intOption(input.window, "window", 7, 1, 28),
@@ -529,7 +528,7 @@ export const trends = defineQuery<TrendsOptions, TrendsResult>({
 				`c AS (SELECT pid, day AS cday, src FROM (SELECT pid, day, src, ROW_NUMBER() OVER (PARTITION BY pid ORDER BY t0) AS n FROM sd WHERE isnew = 1) x WHERE n = 1), ` +
 				`${sessionDaysCte(ctx, lo, hi)} ` +
 				`SELECT cday, src, COUNT(*) AS cohort, SUM(kept) AS kept FROM (SELECT c.pid AS pid, c.cday AS cday, c.src AS src, MAX(CASE WHEN a.day = c.cday + 1 THEN 1 ELSE 0 END) AS kept ` +
-				`FROM c LEFT JOIN a ON a.pid = c.pid GROUP BY c.pid, c.cday, c.src) r WHERE cday >= ${int(firstDay)} AND cday < ${int(lastDay)} GROUP BY cday, src ORDER BY cday, src ${lim(10_000)}`,
+				`FROM c LEFT JOIN a ON a.pid = c.pid GROUP BY c.pid, c.cday, c.src) r WHERE cday >= ${int(firstDay)} AND cday < ${int(lastFullDay(ctx, f.to))} GROUP BY cday, src ORDER BY cday, src ${lim(10_000)}`,
 		};
 	},
 	shape(rows, ctx, f, o) {
