@@ -91,6 +91,7 @@ import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-pla
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import type { FunnelPlayersResult } from "../queries/funnel.ts";
 import type { MonetizationPlayersResult, MonetizationPurchasesResult } from "../queries/monetization.ts";
+import type { FeedbackListResult } from "../queries/feedback.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
 import { rollupDays } from "../sql/filters.ts";
@@ -1311,6 +1312,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const found = result as MonetizationPurchasesResult;
 				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.purchases });
 				result = { ...found, total, more: Math.max(0, total - players.length), purchases: players };
+			}
+			if (name === "feedback-list") {
+				// UserIds and Roblox names from identities (never on the row); erased players left out.
+				const found = result as FeedbackListResult;
+				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.rows });
+				result = { ...found, total, rows: players };
 			}
 			if (name === "timeline" || name === "player-graph" || name === "player-stats") {
 				const r = result as { pid?: string; uid?: number };
