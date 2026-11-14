@@ -89,9 +89,9 @@ export interface PerfCompareResult {
 	periods: ComparePeriod[];
 }
 
-export type MarkKind = "deploy" | "rollback" | "promote" | "resign" | "kernel" | "backup";
+export type MarkKind = "deploy" | "rollback" | "promote" | "resign" | "kernel" | "backup" | "event";
 
-/** A vertical mark on the charts: a release, a kernel publish or a backup refresh. */
+/** A vertical mark on the charts: a release, a kernel publish, a backup refresh, or a live event's start or end. */
 export interface DeployMark {
 	id: string;
 	kind: MarkKind;
@@ -249,7 +249,7 @@ export function timeTick(t: number, spanMs: number): string {
 
 // Marks -------------------------------------------------------------------------------------------------------------------
 
-export const MARK_KINDS: MarkKind[] = ["deploy", "rollback", "promote", "resign", "kernel", "backup"];
+export const MARK_KINDS: MarkKind[] = ["deploy", "rollback", "promote", "resign", "kernel", "backup", "event"];
 
 export const MARK_STYLE: Record<MarkKind, { label: string; color: string; dash?: string }> = {
 	deploy: { label: "Deploy", color: "var(--chart-1)" },
@@ -258,12 +258,14 @@ export const MARK_STYLE: Record<MarkKind, { label: string; color: string; dash?:
 	rollback: { label: "Rollback", color: "var(--status-critical)" },
 	kernel: { label: "Kernel publish", color: "var(--chart-4)", dash: "6 3" },
 	backup: { label: "Backup refresh", color: "var(--chart-3)", dash: "2 3" },
+	event: { label: "Live event", color: "var(--chart-5)", dash: "4 2" },
 };
 
 /** "Deploy #42 prod e4f5a6b", "Kernel publish 0.4.0", "Backup refresh #41 a1b2c3d". */
 export function markTitle(m: DeployMark): string {
 	const style = MARK_STYLE[m.kind];
 	if (m.kind === "kernel") return `${style.label}${m.kernel ? ` ${m.kernel}` : ""}`;
+	if (m.kind === "event") return `${style.label}: ${m.message ?? ""}`;
 	return [style.label, m.seq !== null ? `#${m.seq}` : null, m.branch, m.artifact].filter(Boolean).join(" ");
 }
 

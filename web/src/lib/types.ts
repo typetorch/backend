@@ -20,7 +20,19 @@ export interface Filters {
 	variant?: { experiment: string; variant: string | string[] };
 	sexp?: string | string[];
 	place?: number;
+	/** Audience (player-level, from the players' join rows in the range): ISO country code(s). */
+	country?: string | string[];
+	/** Language code(s) without the region ("en"). */
+	lang?: string | string[];
+	age?: AccountAge | AccountAge[];
+	prem?: boolean;
+	/** Join source(s) (`from` of the join: direct, teleport, ...). */
+	source?: string | string[];
 }
+
+/** The Roblox account-age buckets the framework sends on joins. */
+export const ACCOUNT_AGES = ["<1d", "1-7d", "7-30d", "30-90d", "90-365d", "1-3y", "3y+"] as const;
+export type AccountAge = (typeof ACCOUNT_AGES)[number];
 
 export interface Rate {
 	rate: number;
@@ -98,6 +110,75 @@ export interface RetentionResult {
 	/** How much of today (UTC) is over, 0-1. */
 	todayElapsed?: number;
 	average: Record<string, number | null>;
+}
+
+export type ChurnBucket = "active" | "at_risk" | "lapsing" | "churned";
+
+/** One player of the `churn` query. */
+export interface ChurnPlayer {
+	pid: string;
+	bucket: ChurnBucket;
+	firstPlayed: string;
+	lastPlayed: string;
+	daysSince: number;
+	/** Median days between play days; null with one play day. */
+	usualGap: number | null;
+	playDays: number;
+	/** Play days in the last 14 days, and in the 14 before. */
+	recentDays: number;
+	priorDays: number;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+	/** Owners only: the notification opt-in the backend learned (subscribed / not_subscribed), null when unknown. */
+	optin?: string | null;
+}
+
+/** The `churn` query: churn risk from play patterns. */
+export interface ChurnResult {
+	from: string;
+	to: string;
+	asOf: string;
+	players: number;
+	buckets: { bucket: ChurnBucket; players: number; share: number }[];
+	payers: Record<ChurnBucket, number>;
+	bucket: ChurnBucket | null;
+	list: ChurnPlayer[];
+	total: number;
+	more: number;
+}
+
+/** One cell of the `ltv` query: the cohort's numbers from its join day through day N. */
+export interface LtvCell {
+	/** Robux paid (gross). */
+	robux: number;
+	robuxPerPlayer: number;
+	/** What the creator keeps per player (robuxPerPlayer x creatorShare). */
+	revenuePerPlayer: number;
+	payers: number;
+	payerShare: number;
+	/** Today (UTC), so far. */
+	partial?: true;
+	/** The average row: the new players it is weighted over. */
+	players?: number;
+}
+
+export interface LtvCohort {
+	date: string;
+	size: number;
+	/** offset -> numbers; null while that day hasn't started. */
+	days: Record<string, LtvCell | null>;
+}
+
+/** The `ltv` query: revenue per join-day cohort. */
+export interface LtvResult {
+	from: string;
+	to: string;
+	days: number[];
+	creatorShare: number;
+	cohorts: LtvCohort[];
+	average: Record<string, LtvCell | null>;
+	todayElapsed: number;
 }
 
 export interface FunnelStep {
@@ -270,6 +351,43 @@ export interface Comparison {
 	sure: number;
 	method: string;
 	words: string;
+	/** The test's own p-value, and Holm-corrected over the variants (what `sure` and `words` use). Older servers: absent. */
+	pValue?: number;
+	pAdjusted?: number;
+	/** Smallest difference these group sizes find 80% of the time (absolute, the metric's unit); Infinity serializes as null. */
+	mde?: number | null;
+	mdeLift?: number | null;
+	needed?: { control: number; variant: number } | null;
+	/** Days more at the range's traffic until it can tell (0: it can now); null when it can't be told. */
+	days?: number | null;
+}
+
+/** The sample ratio check of one experiment (the `experiment` query, player scope). */
+export interface AssignmentCheck {
+	variants: { variant: string; index: number | null; players: number }[];
+	order: "game" | "names";
+	variantCount: number | null;
+	weights: number[] | null;
+	weightsFrom: "settings" | "even" | null;
+	srm: { expected: number[]; chi2: number | null; df: number; pValue: number; enough: boolean; mismatch: boolean } | null;
+	note?: string;
+}
+
+/** POST /v1/experiments/<key>/change: the signed CLI command that applies the change (nothing is applied by the server). */
+export interface ExperimentChangeRequest {
+	action: "start" | "stop" | "split" | "settle" | "clear";
+	weights?: number[];
+	variant?: string;
+	variants?: string[];
+}
+
+export interface PreparedExperimentChange {
+	experiment: string;
+	action: ExperimentChangeRequest["action"];
+	command: string;
+	dryRun: string;
+	effect: string;
+	notes: string[];
 }
 
 export type ExperimentResult =
@@ -281,6 +399,10 @@ export type ExperimentResult =
 			variants: VariantStats[];
 			comparisons: Comparison[];
 			mixedPlayers: number;
+			/** Players the settings forced (left out of the numbers). Older servers: absent. */
+			forcedPlayers?: number;
+			assignment?: AssignmentCheck | null;
+			rangeDays?: number;
 	  };
 
 /** One experiment's override, as the server's settings file has it (GET /v1/experiments). */
@@ -1148,7 +1270,10 @@ export interface QueryResults {
 	overview: OverviewResult;
 	roblox: RobloxResult;
 	retention: RetentionResult;
+	ltv: LtvResult;
+	churn: ChurnResult;
 	demographics: DemographicsResult;
+	explain: ExplainResult;
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;
 	"playtime-funnel": PlaytimeFunnelResult;
@@ -2275,8 +2400,8 @@ export interface RobloxDemographics {
 	source: "roblox";
 	window: { from: string; to: string; days: number; note?: string };
 	metric: "DailyActiveUsers";
-	applied: { filter: "device" | "players"; dimension: "Platform" | "IsNewUser"; values: string[] }[];
-	notApplied: { filter: "device" | "players"; reason: string }[];
+	applied: { filter: "device" | "players" | "country"; dimension: "Platform" | "IsNewUser" | "Country"; values: string[] }[];
+	notApplied: { filter: "device" | "players" | "country"; reason: string }[];
 	breakdowns: Record<RobloxDemographicBreakdown, { rows: RobloxDemographicRow[]; total: number } | { error: string }>;
 	fetchedAt: string;
 	cached: boolean;
@@ -2429,4 +2554,59 @@ export interface NotifyUserOpen {
 	t: number;
 	sid: string;
 	jd: Record<string, unknown> | null;
+}
+
+// Explain this change (the `explain` query) ---------------------------------------------------------------------------------
+
+export type ExplainDimension = "device" | "country" | "language" | "accountAge" | "premium" | "source" | "build" | "branch" | "playerType";
+export type ExplainMetric =
+	| "players"
+	| "dau"
+	| "newPlayers"
+	| "returningPlayers"
+	| "sessions"
+	| "playtime"
+	| "playtimePerPlayer"
+	| "sessionsPerPlayer"
+	| "avgSession"
+	| "d1"
+	| "payerConversion"
+	| "robuxPerPlayer"
+	| "revenuePerPlayer";
+export type ExplainUnit = "players" | "sessions" | "hours" | "minutes" | "share" | "robux" | "number";
+
+export interface ExplainWithin {
+	dimension: ExplainDimension;
+	value: string | null;
+}
+
+export interface ExplainSegment {
+	/** null = not sent (or the `other` row). */
+	value: string | null;
+	other?: true;
+	segments?: number;
+	baseline: { players: number; value: number | null; share: number };
+	current: { players: number; value: number | null; share: number };
+	contribution: number;
+	/** The segment itself got better or worse (counts: its whole change). */
+	rate: number;
+	/** Its share of players changed (0 for counts). */
+	mix: number;
+	shareOfChange: number | null;
+	/** Fewer than minPlayers in a window: shown, not to be trusted. */
+	small: boolean;
+}
+
+/** The `explain` query: a metric in two windows, split by segment into rate and mix effects. */
+export interface ExplainResult {
+	metric: ExplainMetric;
+	kind: "ratio" | "count";
+	unit: ExplainUnit;
+	within: ExplainWithin | null;
+	minPlayers: number;
+	current: { from: string; to: string; value: number; players: number };
+	baseline: { from: string; to: string; value: number; players: number };
+	change: number;
+	relative: number | null;
+	dimensions: { dimension: ExplainDimension; segments: ExplainSegment[]; total: number }[];
 }

@@ -35,6 +35,9 @@ const progress: FunnelProgressResult = {
 	],
 };
 
+/** The page's Churn risk section and Risk column (not what these tests look at). */
+const NO_CHURN = { from: "", to: "", asOf: "", players: 0, buckets: [], payers: { active: 0, at_risk: 0, lapsing: 0, churned: 0 }, bucket: null, list: [], total: 0, more: 0 };
+
 let progressCalls: Record<string, unknown>[] = [];
 beforeEach(() => {
 	progressCalls = [];
@@ -47,6 +50,7 @@ beforeEach(() => {
 			progressCalls.push(options);
 			return progress;
 		}
+		if (name === "churn") return NO_CHURN;
 		throw new Error(`unexpected query ${name}`);
 	}) as typeof api.query);
 });
@@ -144,6 +148,7 @@ describe("Players list: a funnel's step names", () => {
 		vi.mocked(api.query).mockImplementation((async (name: string) => {
 			if (name === "players") return players;
 			if (name === "funnel-progress") return { ...progress, progress: progress.progress.filter((p) => p.pid !== "pid-bravo-0002") };
+			if (name === "churn") return NO_CHURN;
 			return { funnel: null, funnels: [] };
 		}) as typeof api.query);
 		mount("?funnels=v1_tutorial");

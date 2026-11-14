@@ -64,6 +64,7 @@ beforeAll(async () => {
 	await connection.run(`CREATE MACRO json_get_str(j, k) AS json_extract_string(j, '$."' || k || '"')`);
 	await connection.run(`CREATE MACRO json_get_float(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS DOUBLE)`);
 	await connection.run(`CREATE MACRO json_get_int(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS BIGINT)`);
+	await connection.run(`CREATE MACRO json_get_bool(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS BOOLEAN)`);
 	// DataFusion's estimate, as DuckDB's exact percentile (the perf-* queries).
 	await connection.run("CREATE MACRO approx_percentile_cont(x, p) AS quantile_cont(x, p)");
 });
@@ -92,6 +93,11 @@ describe("Basin SQL rendering", () => {
 		const sql = store.render("roblox").statements.numbers;
 		expect(sql).toContain("COALESCE(json_get_float(props, 'robux'), CAST(json_get_int(props, 'robux') AS DOUBLE))");
 		expect(store.render("overview", { variant: { experiment: "onboarding", variant: "short" } }).statements.totals).toContain("json_get_str(e.exp, 'onboarding') = 'short'");
+		// The audience filters: a semi-join on the join rows; Premium (a JSON boolean) through json_get_bool.
+		const audience = store.render("overview", { country: "US", prem: true }).statements.totals;
+		expect(audience).toContain("e.pid IN (SELECT aj.pid FROM typetorch.events aj WHERE");
+		expect(audience).toContain("UPPER(json_get_str(aj.props, 'country')) = 'US'");
+		expect(audience).toContain("json_get_bool(aj.props, 'prem') = TRUE");
 	});
 });
 
@@ -103,11 +109,36 @@ describe("Basin results equal DuckDB results (Basin SQL run on DuckDB through sh
 		expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(expected)));
 	});
 
+	test("the audience filters", async () => {
+		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
+		for (const [name, filters] of [
+			["overview", { country: ["US", "GB"], prem: false }],
+			["demographics", { lang: "en", age: "1-3y" }],
+			["retention", { source: "direct", country: "BR" }],
+		] as const) {
+			const expected = await duck.query(name, filters as never);
+			expect(JSON.parse(JSON.stringify(await basinStore().query(name, filters as never)))).toEqual(JSON.parse(JSON.stringify(expected)));
+		}
+	});
+
 	test("playtime-funnel, first sessions", async () => {
 		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
 		const expected = await duck.query("playtime-funnel", {}, { measure: "first" });
 		expect(expected.players).toBeGreaterThan(0);
 		expect(await basinStore().query("playtime-funnel", {}, { measure: "first" })).toEqual(expected);
+	});
+
+	test("explain: D1, money, a drill-down", async () => {
+		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
+		for (const options of [
+			{ metric: "d1" },
+			{ metric: "robuxPerPlayer", dimension: "country" },
+			{ metric: "avgSession", within: { dimension: "device", value: "phone" } },
+			{ metric: "players", within: { dimension: "language", value: null } },
+		]) {
+			const expected = await duck.query("explain", {}, options as never);
+			expect(await basinStore().query("explain", {}, options as never)).toEqual(expected);
+		}
 	});
 
 	test("funnel-players: drop-offs and the playtime funnels", async () => {

@@ -1,7 +1,7 @@
 /**
  * Who plays, from our own join events (`session` / `join`, one per session; the framework fills its props): country
  * (LocalizationService), language (Player.LocaleId, framework 2026-11-15 on; older payloads have none), Roblox account
- * age bucket, Premium, and device. Each player counts once per dimension, with the highest value their joins in the
+ * age bucket, Premium, and device (from all their rows: a real device wins over "unknown"). Each player counts once per dimension, with the highest value their joins in the
  * window carry (a player rarely changes country or device inside one window). Shares are of the players with a join.
  * Every filter of the filter bar applies (new / returning: the joins of first-ever sessions / of the others).
  *
@@ -9,7 +9,7 @@
  * (server/roblox-analytics.ts, GET /v1/roblox/demographics).
  */
 import { NOT_STUDIO, defineQuery, eventsTable, playerRows, ratio, str, num, type QueryContext } from "./core.ts";
-import type { NormalizedFilters } from "../sql/filters.ts";
+import { audienceValueSql, type NormalizedFilters } from "../sql/filters.ts";
 
 export const DEMOGRAPHIC_DIMENSIONS = ["country", "language", "accountAge", "premium", "device"] as const;
 export type DemographicDimension = (typeof DEMOGRAPHIC_DIMENSIONS)[number];
@@ -34,20 +34,30 @@ export interface DemographicsResult {
 const MAX_VALUES = 250;
 
 function valueExpr(ctx: QueryContext, d: DemographicDimension): string {
-	const j = (key: string) => ctx.dialect.jsonText("e.props", key);
 	switch (d) {
 		case "country":
-			return `UPPER(${j("country")})`;
-		// "en-us" -> "en": the language without the region, like Creator Hub's Language card.
+			return audienceValueSql(ctx.dialect, "e.props", "country");
 		case "language":
-			return `LOWER(split_part(${j("locale")}, '-', 1))`;
+			return audienceValueSql(ctx.dialect, "e.props", "lang");
 		case "accountAge":
-			return j("age");
-		case "premium":
-			return `LOWER(${j("prem")})`;
+			return audienceValueSql(ctx.dialect, "e.props", "age");
+		// A JSON boolean: Basin's json_get_str reads strings only, so through jsonBool.
+		case "premium": {
+			const b = ctx.dialect.jsonBool("e.props", "prem");
+			return `(CASE WHEN ${b} THEN 'true' WHEN NOT ${b} THEN 'false' END)`;
+		}
 		case "device":
 			return "e.dev";
 	}
+}
+
+/**
+ * One value per player: the highest their joins carry. For the device, "unknown" (rows from before the client reported
+ * its device) only when no real device was seen; a plain MAX would pick it, as it sorts after every device name.
+ */
+function playerValue(ctx: QueryContext, d: DemographicDimension): string {
+	if (d === "device") return "COALESCE(MAX(NULLIF(NULLIF(e.dev, ''), 'unknown')), MAX(NULLIF(e.dev, '')))";
+	return `MAX(NULLIF(${valueExpr(ctx, d)}, ''))`;
 }
 
 export const demographics = defineQuery<Record<string, never>, DemographicsResult>({
@@ -61,10 +71,15 @@ export const demographics = defineQuery<Record<string, never>, DemographicsResul
 		const out: Record<string, string> = {
 			total: `SELECT COUNT(DISTINCT e.pid) AS players FROM ${joins} ${lim(1)}`,
 		};
+		// The device from all of a player's rows (the join is sent before the client reports its device, so it often says
+		// "unknown"), counting only the players with a join, like the other cards.
+		const allRows = `${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, NOT_STUDIO)}`;
 		for (const d of DEMOGRAPHIC_DIMENSIONS) {
-			out[d] =
-				`SELECT v, COUNT(*) AS players FROM (SELECT e.pid AS pid, MAX(NULLIF(${valueExpr(ctx, d)}, '')) AS v FROM ${joins} GROUP BY e.pid) x ` +
-				`GROUP BY v ORDER BY players DESC, v ${lim(MAX_VALUES)}`;
+			const perPlayer =
+				d === "device"
+					? `SELECT e.pid AS pid, ${playerValue(ctx, d)} AS v FROM ${allRows} GROUP BY e.pid HAVING MAX(CASE WHEN e.kind = 'session' AND e.name = 'join' THEN 1 ELSE 0 END) = 1`
+					: `SELECT e.pid AS pid, ${playerValue(ctx, d)} AS v FROM ${joins} GROUP BY e.pid`;
+			out[d] = `SELECT v, COUNT(*) AS players FROM (${perPlayer}) x GROUP BY v ORDER BY players DESC, v ${lim(MAX_VALUES)}`;
 		}
 		return out;
 	},

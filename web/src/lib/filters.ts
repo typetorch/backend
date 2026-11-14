@@ -4,7 +4,7 @@
  * (1h, 6h) send an exact instant (ISO, on a whole minute so the query cache holds still within a minute); the day
  * presets and custom ranges send dates, as before.
  */
-import { DEVICES, type Device, type Filters } from "./types";
+import { ACCOUNT_AGES, DEVICES, type AccountAge, type Device, type Filters } from "./types";
 
 export const RANGE_PRESETS = ["1h", "6h", "1d", "3d", "7d", "30d", "90d", "deploy"] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number] | "custom";
@@ -41,6 +41,16 @@ export interface FilterState {
 	/** Experiment and variant (both needed). */
 	exp?: string;
 	variant?: string;
+	/** Audience (player-level, matched on their join rows): ISO country code, upper case. */
+	country?: string;
+	/** Language code, lower case ("en"). */
+	lang?: string;
+	/** Roblox account-age bucket. */
+	age?: AccountAge;
+	/** Premium at the join. */
+	prem?: "true" | "false";
+	/** Join source (direct, teleport, referral, ...). */
+	source?: string;
 	/**
 	 * range = deploy: when the last prod release started (unix ms), looked up by useFilters (not in the URL). Unknown
 	 * (still loading, no release, no access): the range is today.
@@ -49,7 +59,11 @@ export interface FilterState {
 }
 
 /** The URL parameters the filter bar owns; pages keep their own (pid, funnel, ...) alongside. */
-export const FILTER_KEYS = ["range", "from", "to", "branch", "art", "dev", "players", "exp", "variant"] as const;
+export const FILTER_KEYS = ["range", "from", "to", "branch", "art", "dev", "players", "exp", "variant", "country", "lang", "age", "prem", "source"] as const;
+
+/** The audience filters (player-level: a player matches when one of their join rows in the range has the value). */
+export const AUDIENCE_KEYS = ["country", "lang", "age", "prem", "source"] as const;
+export type AudienceKey = (typeof AUDIENCE_KEYS)[number];
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
@@ -93,6 +107,17 @@ export function readFilters(params: URLSearchParams): FilterState {
 	if (dev && (DEVICES as string[]).includes(dev)) state.dev = dev as Device;
 	const players = get("players");
 	if (players === "new" || players === "returning") state.players = players;
+	// The audience values the backend takes (anything else is dropped here, not sent to be refused).
+	const country = get("country");
+	if (country && /^[A-Za-z]{2}$/.test(country)) state.country = country.toUpperCase();
+	const lang = get("lang");
+	if (lang && /^[A-Za-z]{2,3}$/.test(lang)) state.lang = lang.toLowerCase();
+	const age = get("age");
+	if (age && (ACCOUNT_AGES as readonly string[]).includes(age)) state.age = age as AccountAge;
+	const prem = get("prem");
+	if (prem === "true" || prem === "false") state.prem = prem;
+	const source = get("source");
+	if (source && /^[a-z][a-z0-9_]{0,31}$/.test(source)) state.source = source;
 	return state;
 }
 
@@ -105,7 +130,7 @@ export function writeFilters(state: FilterState, params: URLSearchParams): URLSe
 		if (state.from) next.set("from", state.from);
 		if (state.to) next.set("to", state.to);
 	}
-	for (const key of ["branch", "art", "dev", "players", "exp", "variant"] as const) {
+	for (const key of ["branch", "art", "dev", "players", "exp", "variant", ...AUDIENCE_KEYS] as const) {
 		const v = state[key];
 		if (v) next.set(key, v);
 	}
@@ -135,6 +160,11 @@ export function toApiFilters(state: FilterState, now = Date.now()): Filters {
 	if (state.dev) filters.dev = state.dev;
 	if (state.players) filters.players = state.players;
 	if (state.exp && state.variant) filters.variant = { experiment: state.exp, variant: state.variant };
+	if (state.country) filters.country = state.country;
+	if (state.lang) filters.lang = state.lang;
+	if (state.age) filters.age = state.age;
+	if (state.prem) filters.prem = state.prem === "true";
+	if (state.source) filters.source = state.source;
 	return filters;
 }
 
@@ -162,5 +192,10 @@ export function describeRange(state: FilterState): string {
 
 /** How many filters besides the range are set. */
 export function activeFilterCount(state: FilterState): number {
-	return (["branch", "art", "dev", "players"] as const).filter((k) => state[k]).length + (state.exp && state.variant ? 1 : 0);
+	return (["branch", "art", "dev", "players", ...AUDIENCE_KEYS] as const).filter((k) => state[k]).length + (state.exp && state.variant ? 1 : 0);
+}
+
+/** How many audience filters are set. */
+export function audienceFilterCount(state: FilterState): number {
+	return AUDIENCE_KEYS.filter((k) => state[k]).length;
 }

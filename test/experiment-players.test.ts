@@ -176,6 +176,16 @@ describe("parseExperimentPlayers", () => {
 		});
 		// `from` wins over `window`.
 		expect(parseExperimentPlayers("/v1/experiments/a/players", new URLSearchParams("from=2026-10-01&window=1h"), T0).filters).toEqual({ from: "2026-10-01" });
+		// The audience filters (checked by the query itself).
+		expect(parseExperimentPlayers("/v1/experiments/a/players", new URLSearchParams("from=2026-10-01&country=US&country=BR&lang=en&age=%3C1d&source=direct&prem=false"), T0).filters).toEqual({
+			from: "2026-10-01",
+			country: ["US", "BR"],
+			lang: ["en"],
+			age: ["<1d"],
+			source: ["direct"],
+			prem: "false",
+		});
+		expect(() => parseExperimentPlayers("/v1/experiments/a/players", new URLSearchParams("prem=yes"), T0)).toThrow("prem is true or false");
 	});
 });
 

@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
-import type { RetentionResult } from "@/lib/types";
+import type { LtvResult, RetentionResult } from "@/lib/types";
 import Retention, { RETENTION_DAYS, retentionPct } from "./Retention";
+import { LTV_DAYS, ltvText } from "./RetentionLtv";
 
 afterEach(() => {
 	cleanup();
@@ -51,5 +52,71 @@ describe("Retention page", () => {
 		expect(retentionPct(0.0345)).toBe("3.45%");
 		expect(retentionPct(0.01)).toBe("1.00%");
 		expect(retentionPct(0)).toBe("0.00%");
+	});
+});
+
+describe("Revenue (LTV) tab", () => {
+	const cell = (robux: number, size: number, payers: number, partial = false) => ({
+		robux,
+		robuxPerPlayer: Math.round((robux / size) * 100) / 100,
+		revenuePerPlayer: Math.round((robux / size) * 0.7 * 100) / 100,
+		payers,
+		payerShare: Math.round((payers / size) * 10_000) / 10_000,
+		...(partial ? { partial: true as const } : {}),
+	});
+	const ltv: LtvResult = {
+		from: "2026-11-01T00:00:00.000Z",
+		to: "2026-11-15T12:00:00.000Z",
+		days: LTV_DAYS,
+		creatorShare: 0.7,
+		todayElapsed: 0.5,
+		cohorts: [
+			{ date: "2026-11-01", size: 4, days: { "0": cell(100, 4, 1), "1": cell(300, 4, 2), "3": cell(300, 4, 2), "7": cell(400, 4, 3), "14": cell(500, 4, 3, true), "30": null } },
+			{ date: "2026-11-14", size: 2, days: { "0": cell(10, 2, 1), "1": cell(30, 2, 1, true), "3": null, "7": null, "14": null, "30": null } },
+		],
+		average: { "0": { ...cell(110, 6, 2), players: 6 }, "1": { ...cell(300, 4, 2), players: 4 }, "3": { ...cell(300, 4, 2), players: 4 }, "7": { ...cell(400, 4, 3), players: 4 }, "14": null, "30": null },
+	};
+
+	function mount(url: string) {
+		const calls: { name: string; options: Record<string, unknown> }[] = [];
+		vi.spyOn(api, "query").mockImplementation((async (name: string, _filters: unknown, options: Record<string, unknown> = {}) => {
+			calls.push({ name, options });
+			if (name === "ltv") return ltv;
+			throw new Error(`unexpected ${name}`);
+		}) as typeof api.query);
+		render(
+			<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+				<MemoryRouter initialEntries={[url]}>
+					<TooltipProvider>
+						<Retention />
+					</TooltipProvider>
+				</MemoryRouter>
+			</QueryClientProvider>,
+		);
+		return calls;
+	}
+
+	it("asks for D0-D30; revenue per player by default, the day in progress orange, not started –, the weighted average pinned", async () => {
+		const calls = mount("/retention?view=revenue");
+		const table = await screen.findByRole("table", { name: "Revenue per cohort" });
+		expect(calls.map((c) => c.name)).toEqual(["ltv"]);
+		expect(calls[0]?.options.days).toEqual([0, 1, 3, 7, 14, 30]);
+		for (const h of ["D0", "D1", "D3", "D7", "D14", "D30"]) expect(within(table).getByText(h)).toBeTruthy();
+		expect(within(table).getByText("Weighted average")).toBeTruthy();
+		// 300 R$ / 4 players x 0.7 = 52.50 (the cohort's D1 and D3, the average's D1 and D3).
+		expect(within(table).getAllByText("52.50 R$").length).toBe(4);
+		// 110 / 6 x 0.7 = 12.83 (the average's D0).
+		expect(within(table).getByText("12.83 R$")).toBeTruthy();
+		const partial = within(table).getByText("10.50 R$");
+		expect(partial.getAttribute("title")).toContain("In progress");
+		expect(within(table).getAllByText("–").length).toBeGreaterThan(0);
+	});
+
+	it("Robux paid per player and payer share from the picker's URL value", async () => {
+		mount("/retention?view=revenue&ltv=payers");
+		const table = await screen.findByRole("table", { name: "Revenue per cohort" });
+		expect(within(table).getAllByText("50% (2)").length).toBeGreaterThan(0);
+		expect(ltvText(cell(300, 4, 2), "robux")).toBe("75.00 R$");
+		expect(ltvText(cell(300, 4, 2), "payers")).toBe("50% (2)");
 	});
 });

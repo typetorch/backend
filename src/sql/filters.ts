@@ -22,10 +22,29 @@ export interface Filters {
 	/** Server experiment(s) (`sexp`). */
 	sexp?: string | string[];
 	place?: number;
+	// Audience (player-level, from the players' join rows in the range; see whereSql):
+	/** ISO country code(s), e.g. "US" (join `country`). */
+	country?: string | string[];
+	/** Language code(s) without the region, e.g. "en" (join `locale` "en-us"; framework 2026-11-15 on). */
+	lang?: string | string[];
+	/** Roblox account-age bucket(s) (join `age`). */
+	age?: AccountAge | AccountAge[];
+	/** Roblox Premium at the join (join `prem`); "true" / "false" are taken too (URL parameters). */
+	prem?: boolean | "true" | "false";
+	/** Join source(s) (join `from`: direct, teleport, teleport_game, referral, share, follow, ...). */
+	source?: string | string[];
 }
 
+/** The account-age buckets the framework sends (join `age`). */
+export const ACCOUNT_AGES = ["<1d", "1-7d", "7-30d", "30-90d", "90-365d", "1-3y", "3y+"] as const;
+export type AccountAge = (typeof ACCOUNT_AGES)[number];
+
+/** The audience filters: player-level, matched on the players' join rows (see whereSql). */
+export const AUDIENCE_KEYS = ["country", "lang", "age", "prem", "source"] as const;
+
 /** Filters after checking, with the time range resolved to ms. */
-export interface NormalizedFilters extends Omit<Filters, "from" | "to" | "art" | "branch" | "channel" | "dev" | "sexp"> {
+export interface NormalizedFilters
+	extends Omit<Filters, "from" | "to" | "art" | "branch" | "channel" | "dev" | "sexp" | "country" | "lang" | "age" | "prem" | "source"> {
 	from: number;
 	to: number;
 	art?: string[];
@@ -33,6 +52,13 @@ export interface NormalizedFilters extends Omit<Filters, "from" | "to" | "art" |
 	channel?: string[];
 	dev?: Device[];
 	sexp?: string[];
+	/** Upper case. */
+	country?: string[];
+	/** Lower case. */
+	lang?: string[];
+	age?: AccountAge[];
+	prem?: boolean;
+	source?: string[];
 }
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -102,6 +128,24 @@ export function normalizeFilters(filters: Filters = {}, options: { now: number; 
 		if (!Number.isSafeInteger(filters.place)) throw new Error("place must be an integer");
 		out.place = filters.place;
 	}
+	out.country = list(filters.country, "country", (v) => {
+		if (!/^[A-Za-z]{2}$/.test(v)) throw new Error("country must be a two-letter ISO code such as US");
+	})?.map((v) => v.toUpperCase());
+	out.lang = list(filters.lang, "lang", (v) => {
+		if (!/^[A-Za-z]{2,3}$/.test(v)) throw new Error("lang must be a two- or three-letter language code such as en");
+	})?.map((v) => v.toLowerCase());
+	out.age = list(filters.age, "age", (v) => {
+		if (!(ACCOUNT_AGES as readonly string[]).includes(v)) throw new Error(`age must be one of ${ACCOUNT_AGES.join(", ")}`);
+	});
+	out.source = list(filters.source, "source", (v) => {
+		if (!/^[a-z][a-z0-9_]{0,31}$/.test(v)) throw new Error("source must be a join source such as direct or teleport (lowercase letters, digits, _)");
+	});
+	if (filters.prem !== undefined) {
+		const prem = filters.prem as unknown;
+		if (prem === true || prem === "true") out.prem = true;
+		else if (prem === false || prem === "false") out.prem = false;
+		else throw new Error("prem must be true or false");
+	}
 	for (const key of Object.keys(out) as (keyof NormalizedFilters)[]) if (out[key] === undefined) delete out[key];
 	return out;
 }
@@ -117,6 +161,45 @@ export interface WhereOptions {
 	noTime?: boolean;
 	/** Only the filters that exist on the recordings table (time, art). */
 	recordings?: boolean;
+	/**
+	 * The events table for a range: the audience filters need it (their join rows). Without it they don't apply (server
+	 * and fleet rows have no player, like the device filter's perf.ts serverFilters).
+	 */
+	table?: (from: number, to: number) => string;
+}
+
+/** Whether any audience filter is set. */
+export function hasAudience(f: NormalizedFilters): boolean {
+	return AUDIENCE_KEYS.some((k) => f[k] !== undefined);
+}
+
+/** A join row's audience value as SQL (on a JSON props column): the same expressions the demographics query reads. */
+export function audienceValueSql(dialect: Dialect, props: string, key: "country" | "lang" | "age" | "source"): string {
+	switch (key) {
+		case "country":
+			return `UPPER(${dialect.jsonText(props, "country")})`;
+		// "en-us" -> "en": the language without the region, like Creator Hub's Language card.
+		case "lang":
+			return `LOWER(split_part(${dialect.jsonText(props, "locale")}, '-', 1))`;
+		case "age":
+			return dialect.jsonText(props, "age");
+		case "source":
+			return dialect.jsonText(props, "from");
+	}
+}
+
+/**
+ * The audience filters as one condition on the join rows (alias `aj`), or null when none is set. Each filter is one
+ * test on a row, so "US and Premium" means one join row that says both (a player changes neither inside a window).
+ */
+function audienceJoinSql(f: NormalizedFilters, dialect: Dialect): string | null {
+	const parts: string[] = [];
+	for (const key of ["country", "lang", "age", "source"] as const) {
+		const values = f[key];
+		if (values) parts.push(inList(audienceValueSql(dialect, "aj.props", key), values));
+	}
+	if (f.prem !== undefined) parts.push(f.prem ? `${dialect.jsonBool("aj.props", "prem")} = TRUE` : `${dialect.jsonBool("aj.props", "prem")} = FALSE`);
+	return parts.length ? parts.join(" AND ") : null;
 }
 
 /** The filters as one SQL condition (never empty: "TRUE" when nothing applies). */
@@ -134,6 +217,15 @@ export function whereSql(f: NormalizedFilters, dialect: Dialect, options: WhereO
 		if (f.players === "new") parts.push(`${p}newp = TRUE`);
 		if (f.players === "returning") parts.push(`(${p}newp IS NULL OR ${p}newp = FALSE)`);
 		if (f.variant) parts.push(inList(dialect.jsonText(`${p}exp`, f.variant.experiment), f.variant.variant as string[]));
+		// Player-level: every row of a player with a join row in the range that matches (a semi-join; rows without a
+		// player drop out). No LIMIT inside: a capped list would cut the audience silently.
+		const audience = options.table ? audienceJoinSql(f, dialect) : null;
+		if (audience && options.table) {
+			parts.push(
+				`${p}pid IN (SELECT aj.pid FROM ${options.table(f.from, f.to)} aj WHERE aj.t >= ${int(f.from)} AND aj.t < ${int(f.to)} ` +
+					`AND aj.kind = 'session' AND aj.name = 'join' AND aj.pid IS NOT NULL AND aj.pid <> '' AND ${audience})`,
+			);
+		}
 	}
 	return parts.length ? parts.join(" AND ") : "TRUE";
 }

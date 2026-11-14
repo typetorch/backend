@@ -6,6 +6,7 @@
  *   &limit=            1-200 (default 200)
  *   &from=&to=         the explorer's range (unix ms, ISO, or a date), or &window=30m|6h|7d (ends now) without `from`
  *   &branch=&art=&channel=&dev=&sexp=   repeatable;  &players=new|returning;  &place=
+ *   &country=&lang=&age=&source=        repeatable;  &prem=true|false   (the audience filters)
  *   &inExperiment=&inVariant=           the filter bar's "players in a variant" filter (another experiment's variant)
  */
 import type { Filters } from "../sql/filters.ts";
@@ -17,7 +18,7 @@ export class ExperimentPlayersInput extends Error {
 }
 
 const UNIT_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
-const LIST_FILTERS = ["branch", "art", "channel", "dev", "sexp"] as const;
+const LIST_FILTERS = ["branch", "art", "channel", "dev", "sexp", "country", "lang", "age", "source"] as const;
 /** Longest raw parameter value read (the query refuses longer filter values itself; this bounds the work before it). */
 const MAX_PARAM = 256;
 
@@ -70,6 +71,11 @@ export function parseExperimentPlayers(path: string, q: URLSearchParams, now: nu
 	if (players !== undefined) {
 		if (players !== "new" && players !== "returning") throw new ExperimentPlayersInput('players is "new" or "returning"');
 		filters.players = players;
+	}
+	const prem = one(q, "prem");
+	if (prem !== undefined) {
+		if (prem !== "true" && prem !== "false") throw new ExperimentPlayersInput("prem is true or false");
+		filters.prem = prem;
 	}
 	const place = one(q, "place");
 	if (place !== undefined) {

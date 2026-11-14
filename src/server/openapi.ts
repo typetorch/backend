@@ -310,6 +310,10 @@ const ROUTES: Route[] = [
 		body: SAVED_QUERY_BODY(["name", "sql"]),
 		ok: { status: 201, description: "`{ query }`" },
 	},
+	{ method: "get", path: "/v1/live-events", tag: "analytics", roles: ["admin", "web"], summary: "Scheduled live events with their status and sync state against the signed settings record, the schedule servers should hold (`game[\"tt.events\"]`) and the CLI commands that sign it", params: [q("refresh", "1 = read the signed record again (at most every 10 s)")] },
+	{ method: "post", path: "/v1/live-events", tag: "analytics", roles: ["admin"], summary: "Schedule a live event: `201 { event, commands }`; the owner signs the new schedule with the CLI (the backend can't sign)", body: obj({ name: str("1-80 characters"), values: { type: "object", description: 'game keys -> JSON values, 1-8 keys: { "cash.multiplier": 2 }' }, start: str("unix ms or ISO time with a zone"), end: str("unix ms or ISO time with a zone"), note: str() }, ["name", "values", "start", "end"]) },
+	{ method: "post", path: "/v1/live-events/{id}/cancel", tag: "analytics", roles: ["admin"], summary: "Cancel a scheduled or live event (servers drop it once the owner signs the new schedule)", params: [p("id", "ev_ + 10 characters")] },
+	{ method: "get", path: "/v1/live-events/{id}/lift", tag: "analytics", roles: ["admin", "web"], summary: "An event's lift report: the event window against the same weekdays and hours of earlier weeks, the days after it (pull-forward), and a plain verdict", params: [p("id", "ev_ + 10 characters"), q("weeks", "baseline weeks, 1-8 (default 3)"), q("afterDays", "days after the event, 0-7 (default 3)")] },
 	{ method: "get", path: "/v1/saved-queries/{id}", tag: "analytics", roles: ["admin", "web"], summary: "One saved query", params: [SAVED_ID] },
 	{ method: "patch", path: "/v1/saved-queries/{id}", tag: "analytics", roles: ["admin"], summary: "Change a saved query (the fields given)", params: [SAVED_ID], body: SAVED_QUERY_BODY([]) },
 	{ method: "delete", path: "/v1/saved-queries/{id}", tag: "analytics", roles: ["admin"], summary: "Delete a saved query", params: [SAVED_ID] },
@@ -328,6 +332,17 @@ const ROUTES: Route[] = [
 		roles: ["admin", "web"],
 		summary: "The players in one experiment",
 		params: [p("key", "the experiment"), q("variant", "one variant"), q("limit", "at most 200", int()), q("from", TIME), q("to", TIME), q("window", "e.g. 7d")],
+	},
+	{
+		method: "post",
+		path: "/v1/experiments/{key}/change",
+		tag: "analytics",
+		roles: ["admin"],
+		summary: "Prepare an experiment change: the signed CLI command that applies it",
+		description:
+			"`{ action: start | stop | split | settle | clear, weights?, variant?, variants? }` -> `{ command, dryRun, effect, notes }`. Audited. Applies nothing: the split lives in the game's signed settings, which only the owners' keys sign (`typetorch experiment ...`).",
+		params: [p("key", "the experiment")],
+		body: obj(),
 	},
 	{ method: "get", path: "/v1/storage", tag: "analytics", roles: ["admin"], summary: "What the data folder holds" },
 	{ method: "get", path: "/v1/settings", tag: "analytics", roles: ["admin"], summary: "Live dials from data/settings.json" },
@@ -494,7 +509,7 @@ const ROUTES: Route[] = [
 		tag: "roblox",
 		roles: ["admin", "web"],
 		summary: "Creator Hub's Demographics: daily active users per age group, gender, locale, country, platform and OS (Open Cloud Analytics Query API)",
-		params: [q("from", "unix ms or ISO (default 28 days before to)"), q("to", "unix ms or ISO (default now)"), q("dev", "devices, comma-separated: Roblox's Platform"), q("players", "new or returning: Roblox's IsNewUser")],
+		params: [q("from", "unix ms or ISO (default 28 days before to)"), q("to", "unix ms or ISO (default now)"), q("dev", "devices, comma-separated: Roblox's Platform"), q("players", "new or returning: Roblox's IsNewUser"), q("country", "ISO country codes, comma-separated: Roblox's Country (matched on the code or the English name)")],
 	},
 
 	// Live ----------------------------------------------------------------------------------------------------------------------

@@ -1,8 +1,9 @@
 /**
  * Who plays, like Creator Hub's Demographics page, from two sources:
  *   - Roblox (GET /v1/roblox/demographics): age group, gender, language, country, platform and OS, as daily active
- *     users over the filter bar's range (its full UTC days), with its device and new / returning filters as Roblox's
- *     Platform / IsNewUser; branch, artifact and experiment have no Roblox equivalent and are listed as not applied.
+ *     users over the filter bar's range (its full UTC days), with its device, new / returning and country filters as
+ *     Roblox's Platform / IsNewUser / Country; branch, artifact, experiment, language, account age, Premium and join
+ *     source have no Roblox equivalent and are listed as not applied.
  *     Needs `universe.analytics:read` on OPENCLOUD_API_KEY.
  *   - Our join events (the `demographics` query, every filter applies): country, language, device, account age and
  *     Premium, each player once.
@@ -16,6 +17,7 @@ import { EmptyState, ErrorState, LoadingBlock, PageHeader, QueryState, Section }
 import { Badge } from "@/components/ui/badge";
 import { api, ApiError } from "@/lib/api";
 import { fmtInt, fmtPct, plural } from "@/lib/format";
+import { ACCOUNT_AGE, ACCOUNT_AGE_ORDER, countryName, languageName } from "@/lib/audience";
 import type { FilterState } from "@/lib/filters";
 import { useAnalytics, useFilters } from "@/lib/hooks";
 import type { DemographicDimension, DemographicsResult, RobloxDemographicBreakdown, RobloxDemographics } from "@/lib/types";
@@ -30,52 +32,7 @@ export interface BarRow {
 	muted?: boolean;
 }
 
-const regionNames = (() => {
-	try {
-		return new Intl.DisplayNames(["en"], { type: "region" });
-	} catch {
-		return undefined;
-	}
-})();
-const languageNames = (() => {
-	try {
-		return new Intl.DisplayNames(["en"], { type: "language" });
-	} catch {
-		return undefined;
-	}
-})();
-
-/** "US" -> "United States"; anything Intl doesn't know stays as it is. */
-export function countryName(code: string): string {
-	if (!/^[A-Za-z]{2}$/.test(code)) return code;
-	try {
-		return regionNames?.of(code.toUpperCase()) ?? code;
-	} catch {
-		return code;
-	}
-}
-
-/** "en" / "en-us" / "en_us" -> "English" (the language without the region, like Creator Hub's Language card). */
-export function languageName(code: string): string {
-	const base = code.split(/[-_]/)[0]?.toLowerCase() ?? "";
-	if (!/^[a-z]{2,3}$/.test(base)) return code;
-	try {
-		return languageNames?.of(base) ?? code;
-	} catch {
-		return code;
-	}
-}
-
-const ACCOUNT_AGE: Record<string, string> = {
-	"<1d": "Under a day",
-	"1-7d": "1-7 days",
-	"7-30d": "1-4 weeks",
-	"30-90d": "1-3 months",
-	"90-365d": "3-12 months",
-	"1-3y": "1-3 years",
-	"3y+": "3+ years",
-};
-const ACCOUNT_AGE_ORDER = Object.keys(ACCOUNT_AGE);
+export { countryName, languageName };
 
 const capitalize = (s: string) => (s ? s[0]?.toUpperCase() + s.slice(1) : s);
 
@@ -87,7 +44,7 @@ export function ownRows(dimension: DemographicDimension, r: DemographicsResult):
 		if (x.value !== null) {
 			if (dimension === "country") label = countryName(x.value);
 			else if (dimension === "language") label = languageName(x.value);
-			else if (dimension === "accountAge") label = ACCOUNT_AGE[x.value] ?? x.value;
+			else if (dimension === "accountAge") label = ACCOUNT_AGE[x.value as keyof typeof ACCOUNT_AGE] ?? x.value;
 			else if (dimension === "premium") label = x.value === "true" ? "Premium" : "Not Premium";
 			else label = capitalize(x.value);
 		}
@@ -154,12 +111,16 @@ const ROBLOX_CARDS: { key: RobloxDemographicBreakdown; title: string; top?: numb
 	{ key: "OperatingSystem", title: "Operating system" },
 ];
 
-/** The filter bar's filters Roblox has no equivalent for (only device and new / returning map to Roblox's dimensions). */
+/** The filter bar's filters Roblox has no equivalent for (device, new / returning and country map to Roblox's dimensions). */
 export function filtersRobloxCannotTake(state: FilterState): string[] {
 	const out: string[] = [];
 	if (state.branch) out.push("branch");
 	if (state.art) out.push("artifact");
 	if (state.exp && state.variant) out.push("experiment variant");
+	if (state.lang) out.push("language");
+	if (state.age) out.push("account age");
+	if (state.prem) out.push("Premium");
+	if (state.source) out.push("join source");
 	return out;
 }
 
@@ -178,6 +139,7 @@ function RobloxSection() {
 		...(apiFilters.to !== undefined ? { to: String(apiFilters.to) } : {}),
 		...(state.dev ? { dev: state.dev } : {}),
 		...(state.players ? { players: state.players } : {}),
+		...(state.country ? { country: state.country } : {}),
 	};
 	const q = useQuery({
 		queryKey: ["roblox", "demographics", params],
@@ -220,7 +182,7 @@ function RobloxSection() {
 						{q.data.applied.length ? (
 							<p>
 								Filtered at Roblox:{" "}
-								{q.data.applied.map((a) => `${a.filter === "device" ? "device" : "players"} as ${a.dimension} ${a.values.join(" / ")}`).join("; ")}.
+								{q.data.applied.map((a) => `${a.filter} as ${a.dimension} ${a.values.join(" / ")}`).join("; ")}.
 							</p>
 						) : null}
 						{q.data.notApplied.length || cannot.length ? (
