@@ -81,10 +81,11 @@ describe("validateEvent", () => {
 		if (!result.ok) expect(result.error).toContain(message);
 	});
 
-	test("purchase and currency rows come from the server only", () => {
+	test("purchase, currency and feedback rows come from the server only", () => {
 		const purchase = { kind: "purchase", name: "product", props: '{"product":1234,"robux":99}' };
 		const currency = { kind: "currency", name: "coins", props: '{"delta":50,"reason":"x"}' };
-		for (const over of [purchase, currency]) {
+		const feedback = { kind: "feedback", name: "submit", props: '{"scale":"thumbs","type":"thumbs","steps":2,"r":1,"norm":1,"len":0,"play_s":30}' };
+		for (const over of [purchase, currency, feedback]) {
 			const client = validateEvent(event({ ...over, src: "client" }));
 			expect(client.ok).toBe(false);
 			if (!client.ok) expect(client.error).toContain("game server only");

@@ -1,8 +1,10 @@
 /**
  * Per-player support reads (plans/31, behind GET /v1/players/by-uid/{uid}/events and /summary): one player's rows of
  * the named events, for every pid of their UserId (the route resolves the pids from `identities`; the query never takes
- * a free-form filter). `join` / `leave` / `device` are the `session` kind's rows; other names match any kind but `session` and
- * `fleet`. Only the time range applies: `from` / `to` in the filters (the route sends `since` / `before`).
+ * a free-form filter). `join` / `leave` / `device` are the `session` kind's rows; `feedback` is the `feedback` kind's rows
+ * (plans/32, name `submit`, reported as `feedback`) plus the older `custom` rows named `feedback`; other names match any
+ * kind but `session`, `fleet` and `feedback` (so a support list naming `submit` never reads feedback). Only the time
+ * range applies: `from` / `to` in the filters (the route sends `since` / `before`).
  *
  *   player-events   newest first, `limit` (1..100, default 50) rows of { t, name, kind, pid, job, props } (+1 to say `more`)
  *   player-summary  counts per name (the given names, 0 when none), `ac_flag` rows by `props.cat`, distinct sessions,
@@ -15,6 +17,10 @@ export const PID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const NAME_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** The session kind's row names the support list may name. */
 export const SESSION_NAMES = ["join", "leave", "device"];
+/** The support list's name for player feedback (plans/32): the `feedback` kind's rows, whatever their name. */
+export const FEEDBACK_NAME = "feedback";
+/** The row's name as the support reads report it: `feedback` for the feedback kind's rows. */
+const NAME_EXPR = `CASE WHEN e.kind = 'feedback' THEN ${lit(FEEDBACK_NAME)} ELSE e.name END`;
 export const PIDS_MAX = 50;
 export const NAMES_MAX = 64;
 
@@ -67,7 +73,8 @@ function rowsWhere(ctx: QueryContext, f: NormalizedFilters, o: PlayerSupportOpti
 	const other = o.names.filter((n) => !SESSION_NAMES.includes(n));
 	const parts = [
 		...(session.length ? [`(e.kind = 'session' AND e.name IN (${session.map(lit).join(", ")}))`] : []),
-		...(other.length ? [`(e.kind <> 'session' AND e.kind <> 'fleet' AND e.name IN (${other.map(lit).join(", ")}))`] : []),
+		...(o.names.includes(FEEDBACK_NAME) ? ["e.kind = 'feedback'"] : []),
+		...(other.length ? [`(e.kind <> 'session' AND e.kind <> 'fleet' AND e.kind <> 'feedback' AND e.name IN (${other.map(lit).join(", ")}))`] : []),
 	];
 	return `e.t >= ${Math.floor(f.from)} AND e.t < ${Math.floor(f.to)} AND ${who} AND ${parts.length ? `(${parts.join(" OR ")})` : "1 = 0"}`;
 }
@@ -92,7 +99,7 @@ export const playerEvents = defineQuery<PlayerSupportOptions, PlayerEventsResult
 		// DISTINCT: a resent copy of a row is an exact duplicate (no row id exists).
 		return {
 			rows:
-				`SELECT DISTINCT e.t AS t, e.name AS name, e.kind AS kind, e.pid AS pid, e.job AS job, e.props AS props FROM ${ctx.table("events", f.from, f.to)} e ` +
+				`SELECT DISTINCT e.t AS t, ${NAME_EXPR} AS name, e.kind AS kind, e.pid AS pid, e.job AS job, e.props AS props FROM ${ctx.table("events", f.from, f.to)} e ` +
 				`WHERE ${rowsWhere(ctx, f, o)} ORDER BY t DESC, name, pid ${ctx.dialect.limit(o.limit + 1)}`,
 		};
 	},
@@ -115,7 +122,7 @@ export const playerSummary = defineQuery<PlayerSupportOptions, PlayerSummaryResu
 		const table = ctx.table("events", f.from, f.to);
 		const who = o.pids.length ? `e.pid IN (${o.pids.map(lit).join(", ")})` : "1 = 0";
 		const range = `e.t >= ${Math.floor(f.from)} AND e.t < ${Math.floor(f.to)}`;
-		const distinct = `SELECT DISTINCT e.t AS t, e.name AS name, e.kind AS kind, e.pid AS pid, e.props AS props FROM ${table} e WHERE ${rowsWhere(ctx, f, o)}`;
+		const distinct = `SELECT DISTINCT e.t AS t, ${NAME_EXPR} AS name, e.kind AS kind, e.pid AS pid, e.props AS props FROM ${table} e WHERE ${rowsWhere(ctx, f, o)}`;
 		return {
 			byName: `SELECT name, COUNT(*) AS n FROM (${distinct}) r GROUP BY name ORDER BY name ${d.limit(NAMES_MAX)}`,
 			byCategory:

@@ -28,6 +28,11 @@ export const EVENT_KINDS = [
 	 * `identities`, never a UserId). NOTIFY_PROPS lists the prop names.
 	 */
 	"notify",
+	/**
+	 * Player feedback (plans/32): one `submit` row per submission, written by the game server after the framework
+	 * validated it (`src = server`; clients can't send it). FEEDBACK_PROPS lists the prop names.
+	 */
+	"feedback",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -39,10 +44,11 @@ export const SOURCES = ["server", "client", "backend"] as const;
 export type Source = (typeof SOURCES)[number];
 
 /**
- * Kinds only a game server may send: revenue and the economy are server-authoritative. Framework clients can't send
+ * Kinds only a game server may send: revenue and the economy are server-authoritative, and feedback is validated and
+ * rate-limited by the game server. Framework clients can't send
  * them; ingest refuses a row of these kinds marked `src = client` (older engines let clients send them).
  */
-export const SERVER_ONLY_KINDS: readonly EventKind[] = ["purchase", "currency"];
+export const SERVER_ONLY_KINDS: readonly EventKind[] = ["purchase", "currency", "feedback"];
 
 /** The only recording codec so far (documented by the framework in framework/src/analytics/SCHEMA.md). */
 export const RECORDING_CODECS = ["tt-rec-1"] as const;
@@ -231,3 +237,14 @@ export const SERVER_HEALTH = ["ok", "failed", "unverified", "degraded"] as const
  */
 export const NOTIFY_ROW_NAMES = ["want", "drop", "optin_check", "optin_shown", "optin_closed", "optin_inferred", "planned", "skipped", "sent", "failed", "open", "open_bad", "played"] as const;
 export const NOTIFY_PROPS = ["k", "key", "at", "until", "offline", "why", "can", "where", "err", "secs", "state", "nid", "for", "try", "roblox_id", "category", "http", "code", "final", "age", "first", "dry", "test"] as const;
+
+/**
+ * `kind = "feedback"` rows (plans/32-feedback.md, the contract): `name = "submit"`, props
+ *   scale (the config's scale id), type (thumbs | stars | scale), steps (thumbs 2; stars / scale 2..10), r? (thumbs 0/1,
+ *   else 1..steps; absent for text-only), norm? (0..1), label?, text?, len (the original text length, 0 = none),
+ *   topic? ([a-z0-9_]{1,32}), play_s (seconds played this session), ctx? (the game's own object, at most 8 keys).
+ * The read side also maps CuceGame's older `kind = "custom", name = "feedback"` rows ({ rating 1..5, text, length })
+ * to scale `legacy_faces5` at query time (src/queries/feedback.ts).
+ */
+export const FEEDBACK_ROW_NAMES = ["submit"] as const;
+export const FEEDBACK_PROPS = ["scale", "type", "steps", "r", "norm", "label", "text", "len", "topic", "play_s", "ctx"] as const;

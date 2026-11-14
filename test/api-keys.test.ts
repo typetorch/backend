@@ -203,6 +203,9 @@ describe("per-player support endpoints", () => {
 					row("pid-b", "s2", 19 * 60_000, "session", "device", { dev: "phone", input: "touch" }),
 					row("pid-b", "s2", 40 * DAY, "custom", "ac_flag", { cat: "old" }),
 					row("pid-z", "s9", 5 * 60_000, "custom", "ac_flag", { cat: "someone_else" }),
+					// Player feedback (plans/32): a feedback-kind row and an older custom/feedback row.
+					row("pid-a", "s1", 45 * 60_000, "feedback", "submit", { scale: "faces5", type: "scale", steps: 5, r: 4, norm: 0.75, label: "GOOD", len: 0, play_s: 300 }),
+					row("pid-b", "s2", 12 * 60_000, "custom", "feedback", { rating: 2, text: "too hard", length: 8 }),
 				],
 				identities: [
 					{ pid: "pid-a", uid: UID, t: t - DAY },
@@ -255,6 +258,21 @@ describe("per-player support endpoints", () => {
 		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": ["ac_flag", "ac_action", "ac_honeypot", "join", "leave", "device"] }));
 		const r = await asJson(await get(`/v1/players/by-uid/${UID}/events?names=device`));
 		expect(r.rows).toEqual([{ t: expect.any(Number), name: "device", kind: "session", pid: "pid-b", job: "job-7", props: { dev: "phone", input: "touch" } }]);
+		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": null }));
+	});
+
+	test("feedback (plans/32): denied by default, never through another name, readable once `feedback` is allowed", async () => {
+		expect(await asJson(await get(`/v1/players/by-uid/${UID}/events?names=feedback`))).toEqual({ error: "event_not_allowed", name: "feedback" });
+		// Allowing `submit` (the row's own name) doesn't open the feedback kind.
+		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": ["ac_flag", "submit"] }));
+		expect((await asJson(await get(`/v1/players/by-uid/${UID}/events?names=submit`))).rows).toEqual([]);
+		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": ["ac_flag", "feedback"] }));
+		const r = await asJson(await get(`/v1/players/by-uid/${UID}/events?names=feedback`));
+		expect(r.rows).toEqual([
+			{ t: expect.any(Number), name: "feedback", kind: "custom", pid: "pid-b", job: "job-7", props: { rating: 2, text: "too hard", length: 8 } },
+			{ t: expect.any(Number), name: "feedback", kind: "feedback", pid: "pid-a", job: "job-7", props: { scale: "faces5", type: "scale", steps: 5, r: 4, norm: 0.75, label: "GOOD", len: 0, play_s: 300 } },
+		]);
+		expect((await asJson(await get(`/v1/players/by-uid/${UID}/summary`))).byName).toEqual({ ac_flag: 3, feedback: 2 });
 		await h.call("/v1/admin/settings", json("PATCH", ADMIN, { "players.supportEvents": null }));
 	});
 
