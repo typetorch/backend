@@ -286,7 +286,8 @@ describe("decoding at scale", () => {
 		expect(t.inputs.length).toBe(12);
 		console.log(`decoded 18,000 chunks / ${samples} samples in ${Math.round(ms)} ms`);
 		expect(ms).toBeLessThan(30_000);
-	});
+		// Building 18,000 chunks and decoding them takes ~2-6 s on a busy machine: past bun's default 5 s per test.
+	}, 60_000);
 	test("a fixed sample: the same sessions every time, sorted", () => {
 		const all = Array.from({ length: 100 }, (_, i) => ({ sid: `s${i}` }));
 		const a = sampleSessions(all, 10);
