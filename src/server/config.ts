@@ -97,8 +97,7 @@ export interface ServerConfig {
 	cloudflareIps?: IpRule[];
 	/** The built explorer (web/dist) served at /; undefined = not served. */
 	webDir?: string;
-	/** Explorer sessions: idle and absolute lifetimes, ms. */
-	sessionIdleMs: number;
+	/** Explorer sessions (signed JWTs): lifetime from sign-in, ms. */
 	sessionMaxMs: number;
 	/** Failed logins per IP before a 429 and the window they count in, ms. */
 	loginMaxFailures: number;
@@ -501,8 +500,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		webViewers,
 		tokenLogin: flag(env, "TYPETORCH_TOKEN_LOGIN", true),
 		trustProxy,
-		sessionIdleMs: num(env, "TYPETORCH_SESSION_IDLE_HOURS", 12, 0.01, 24 * 30) * 3_600_000,
-		sessionMaxMs: num(env, "TYPETORCH_SESSION_MAX_DAYS", 7, 0.01, 90) * 86_400_000,
+		sessionMaxMs: num(env, "TYPETORCH_SESSION_MAX_DAYS", 3, 0.01, 90) * 86_400_000,
 		loginMaxFailures: num(env, "TYPETORCH_LOGIN_MAX_FAILURES", 5, 1, 1000),
 		loginWindowMs: num(env, "TYPETORCH_LOGIN_WINDOW_MINUTES", 15, 0.01, 24 * 60) * 60_000,
 		liveMaxClients: num(env, "TYPETORCH_LIVE_MAX_CLIENTS", 20, 1, 1000),

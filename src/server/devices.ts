@@ -155,6 +155,12 @@ export class DeviceStore {
 			.sort((a, b) => b.used.localeCompare(a.used));
 	}
 
+	/** Whether a device id is blessed and not expired. */
+	has(id: string): boolean {
+		const record = this.records.find((d) => d.id === id);
+		return Boolean(record && this.clock() - record.used < DEVICE_LIFE_MS);
+	}
+
 	revoke(id: string): boolean {
 		const before = this.records.length;
 		this.records = this.records.filter((d) => d.id !== id);

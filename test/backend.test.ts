@@ -3,7 +3,7 @@
  * sessions), the admin allow list, security headers and the explorer's files. All tokens here are made up.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApp, type App } from "../src/server/app.ts";
@@ -50,8 +50,7 @@ describe("environment", () => {
 		// a public URL, so it stays off.
 		expect(c.warnings).toEqual([expect.stringContaining("TYPETORCH_API_KEY_PREVIOUS is set"), expect.stringContaining("Sign in with typetorch.dev is off: set TYPETORCH_PUBLIC_URL")]);
 		expect(c.centralLogin).toBeUndefined();
-		expect(c.sessionIdleMs).toBe(12 * 3_600_000);
-		expect(c.sessionMaxMs).toBe(7 * 86_400_000);
+		expect(c.sessionMaxMs).toBe(3 * 86_400_000);
 		expect(c.loginMaxFailures).toBe(5);
 		expect(c.loginWindowMs).toBe(15 * 60_000);
 		expect(c.adminAllowIps).toBeUndefined();
@@ -186,48 +185,60 @@ describe("IP rules and the failure limiter", () => {
 });
 
 describe("sessions", () => {
-	test("random ids, idle and absolute lifetimes, bound to the admin token", () => {
-		let now = 1_000_000;
-		const s = new Sessions({ adminToken: ADMIN, idleMs: 12 * 3_600_000, maxMs: 7 * 86_400_000, clock: () => now });
+	test("signed JWTs: 3-day lifetime, bound to the admin token, sign-out sticks", () => {
+		let now = 1_000_000_000_000;
+		const s = new Sessions({ adminToken: ADMIN, maxMs: 3 * 86_400_000, clock: () => now });
 		const id = s.create({ kind: "token" });
 		const other = s.create({ kind: "token" });
 		expect(id).not.toBe(other);
-		expect(Buffer.from(id, "base64url").length).toBe(32);
+		expect(id.split(".")).toHaveLength(3);
+		const payload = JSON.parse(Buffer.from(id.split(".")[1] as string, "base64url").toString("utf8"));
+		expect(payload.exp - payload.iat).toBe(3 * 86_400);
 		expect(s.get(id)?.user).toEqual({ kind: "token" });
 		expect(s.get("not-a-session")).toBeUndefined();
 		expect(s.get(undefined)).toBeUndefined();
-		// Active use keeps it alive past 12 h in total.
-		for (let step = 0; step < 6; step++) {
-			now += 11 * 3_600_000;
-			expect(s.get(id)).toBeDefined();
-		}
-		// 66 h in; idle for 13 h ends it.
-		now += 13 * 3_600_000;
+		// No idle timeout: unused for 2 days, still good; at 3 days it ends however busy.
+		now += 2 * 86_400_000;
+		expect(s.get(id)).toBeDefined();
+		now += 86_400_000;
 		expect(s.get(id)).toBeUndefined();
-		// The absolute limit ends even a busy session: used every 11 h it still dies at 7 days.
-		const busy = s.create({ kind: "token" });
-		const born = now;
-		let alive = 0;
-		while (s.get(busy)) {
-			now += 11 * 3_600_000;
-			alive = now - born;
-			if (alive > 8 * 86_400_000) break;
-		}
-		expect(alive).toBeGreaterThan(7 * 86_400_000);
-		expect(alive).toBeLessThanOrEqual(7 * 86_400_000 + 11 * 3_600_000);
-		// A session made under another admin token is dead under this one.
+		// Tampering: another payload, alg none, a signature from another admin token.
+		const fresh = s.create({ kind: "roblox", userId: 1, name: "a" }, "web");
+		const [h, p, sig] = fresh.split(".") as [string, string, string];
+		const forged = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(p, "base64url").toString()), role: "admin" })).toString("base64url");
+		expect(s.get(`${h}.${forged}.${sig}`)).toBeUndefined();
+		const none = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+		expect(s.get(`${none}.${p}.`)).toBeUndefined();
+		expect(s.get(fresh)?.role).toBe("web");
 		const foreign = s.create({ kind: "token" }, "admin", Sessions.hashToken("another-admin-token-0123456789abcdef"));
 		expect(s.get(foreign)).toBeUndefined();
-		// Logout.
+		// Logout: the same cookie stays refused.
 		const mine = s.create({ kind: "token" });
 		expect(s.destroy(mine)).toBe(true);
 		expect(s.get(mine)).toBeUndefined();
-		// The store is bounded.
-		const small = new Sessions({ adminToken: ADMIN, idleMs: 1e9, maxMs: 1e9, maxSessions: 3, clock: () => now });
-		const ids = [1, 2, 3, 4].map(() => small.create({ kind: "token" }));
-		expect(small.size).toBe(3);
-		expect(small.get(ids[0] as string)).toBeUndefined();
-		expect(small.get(ids[3] as string)).toBeDefined();
+		// endWhere ends the sessions this process knows.
+		const dev = s.create({ kind: "roblox", userId: 2, name: "b" }, "admin", undefined, "0123456789abcdef");
+		expect(s.endWhere((x) => x.device === "0123456789abcdef")).toBe(1);
+		expect(s.get(dev)).toBeUndefined();
+	});
+
+	test("survive a restart (the secret and the signed-out list are in the data dir); a new admin token ends them", () => {
+		const dir = mkdtempSync(join(tmpdir(), "tt-sessions-"));
+		try {
+			const file = join(dir, "sessions.json");
+			const a = new Sessions({ adminToken: ADMIN, maxMs: 3 * 86_400_000, file });
+			const kept = a.create({ kind: "token" });
+			const out = a.create({ kind: "token" });
+			a.destroy(out);
+			expect((statSync(file).mode & 0o777).toString(8)).toBe("600");
+			const b = new Sessions({ adminToken: ADMIN, maxMs: 3 * 86_400_000, file });
+			expect(b.get(kept)?.user).toEqual({ kind: "token" });
+			expect(b.get(out)).toBeUndefined();
+			const c = new Sessions({ adminToken: "another-admin-token-0123456789abcdef", maxMs: 3 * 86_400_000, file });
+			expect(c.get(kept)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -349,7 +360,7 @@ describe("explorer login", () => {
 		expect(raw).toContain("HttpOnly");
 		expect(raw).toContain("SameSite=Strict");
 		expect(raw).toContain("Path=/");
-		expect(raw).toContain("Max-Age=604800");
+		expect(raw).toContain("Max-Age=259200"); // 3 days
 		expect(raw).not.toContain("Secure"); // plain http here
 		expect(raw).not.toContain(ADMIN);
 		const cookie = cookieOf(res) as string;
@@ -412,24 +423,16 @@ describe("explorer login", () => {
 		expect((await h.call("/v1/queries", { headers: { cookie } })).status).toBe(401);
 	});
 
-	test("the session ends after 12 h idle and after 7 days", async () => {
+	test("the session lasts 3 days from sign-in, used or not (no idle timeout)", async () => {
 		const cookie = cookieOf(await login(ADMIN)) as string;
 		const start = h.now();
 		try {
-			h.setNow(start + 11 * 3_600_000);
+			h.setNow(start + 2 * 86_400_000);
 			expect((await h.call("/v1/auth/check", { headers: { cookie } })).status).toBe(200);
-			h.setNow(start + 11 * 3_600_000 + 13 * 3_600_000);
+			h.setNow(start + 3 * 86_400_000 - 60_000);
+			expect((await h.call("/v1/auth/check", { headers: { cookie } })).status).toBe(200);
+			h.setNow(start + 3 * 86_400_000 + 1000);
 			expect((await h.call("/v1/auth/check", { headers: { cookie } })).status).toBe(401);
-			h.setNow(start);
-			const busy = cookieOf(await login(ADMIN)) as string;
-			// Used every 11 hours it stays alive...
-			for (let t = 11 * 3_600_000; t < 7 * 86_400_000; t += 11 * 3_600_000) {
-				h.setNow(start + t);
-				expect((await h.call("/v1/auth/check", { headers: { cookie: busy } })).status).toBe(200);
-			}
-			// ...until 7 days after it was made.
-			h.setNow(start + 7 * 86_400_000 + 60_000);
-			expect((await h.call("/v1/auth/check", { headers: { cookie: busy } })).status).toBe(401);
 		} finally {
 			h.setNow(start);
 		}
