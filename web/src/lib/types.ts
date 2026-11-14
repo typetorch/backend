@@ -20,7 +20,19 @@ export interface Filters {
 	variant?: { experiment: string; variant: string | string[] };
 	sexp?: string | string[];
 	place?: number;
+	/** Audience (player-level, from the players' join rows in the range): ISO country code(s). */
+	country?: string | string[];
+	/** Language code(s) without the region ("en"). */
+	lang?: string | string[];
+	age?: AccountAge | AccountAge[];
+	prem?: boolean;
+	/** Join source(s) (`from` of the join: direct, teleport, ...). */
+	source?: string | string[];
 }
+
+/** The Roblox account-age buckets the framework sends on joins. */
+export const ACCOUNT_AGES = ["<1d", "1-7d", "7-30d", "30-90d", "90-365d", "1-3y", "3y+"] as const;
+export type AccountAge = (typeof ACCOUNT_AGES)[number];
 
 export interface Rate {
 	rate: number;
@@ -98,6 +110,75 @@ export interface RetentionResult {
 	/** How much of today (UTC) is over, 0-1. */
 	todayElapsed?: number;
 	average: Record<string, number | null>;
+}
+
+export type ChurnBucket = "active" | "at_risk" | "lapsing" | "churned";
+
+/** One player of the `churn` query. */
+export interface ChurnPlayer {
+	pid: string;
+	bucket: ChurnBucket;
+	firstPlayed: string;
+	lastPlayed: string;
+	daysSince: number;
+	/** Median days between play days; null with one play day. */
+	usualGap: number | null;
+	playDays: number;
+	/** Play days in the last 14 days, and in the 14 before. */
+	recentDays: number;
+	priorDays: number;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+	/** Owners only: the notification opt-in the backend learned (subscribed / not_subscribed), null when unknown. */
+	optin?: string | null;
+}
+
+/** The `churn` query: churn risk from play patterns. */
+export interface ChurnResult {
+	from: string;
+	to: string;
+	asOf: string;
+	players: number;
+	buckets: { bucket: ChurnBucket; players: number; share: number }[];
+	payers: Record<ChurnBucket, number>;
+	bucket: ChurnBucket | null;
+	list: ChurnPlayer[];
+	total: number;
+	more: number;
+}
+
+/** One cell of the `ltv` query: the cohort's numbers from its join day through day N. */
+export interface LtvCell {
+	/** Robux paid (gross). */
+	robux: number;
+	robuxPerPlayer: number;
+	/** What the creator keeps per player (robuxPerPlayer x creatorShare). */
+	revenuePerPlayer: number;
+	payers: number;
+	payerShare: number;
+	/** Today (UTC), so far. */
+	partial?: true;
+	/** The average row: the new players it is weighted over. */
+	players?: number;
+}
+
+export interface LtvCohort {
+	date: string;
+	size: number;
+	/** offset -> numbers; null while that day hasn't started. */
+	days: Record<string, LtvCell | null>;
+}
+
+/** The `ltv` query: revenue per join-day cohort. */
+export interface LtvResult {
+	from: string;
+	to: string;
+	days: number[];
+	creatorShare: number;
+	cohorts: LtvCohort[];
+	average: Record<string, LtvCell | null>;
+	todayElapsed: number;
 }
 
 export interface FunnelStep {
@@ -1042,6 +1123,8 @@ export interface QueryResults {
 	overview: OverviewResult;
 	roblox: RobloxResult;
 	retention: RetentionResult;
+	ltv: LtvResult;
+	churn: ChurnResult;
 	demographics: DemographicsResult;
 	explain: ExplainResult;
 	funnel: FunnelResult;
@@ -2165,8 +2248,8 @@ export interface RobloxDemographics {
 	source: "roblox";
 	window: { from: string; to: string; days: number; note?: string };
 	metric: "DailyActiveUsers";
-	applied: { filter: "device" | "players"; dimension: "Platform" | "IsNewUser"; values: string[] }[];
-	notApplied: { filter: "device" | "players"; reason: string }[];
+	applied: { filter: "device" | "players" | "country"; dimension: "Platform" | "IsNewUser" | "Country"; values: string[] }[];
+	notApplied: { filter: "device" | "players" | "country"; reason: string }[];
 	breakdowns: Record<RobloxDemographicBreakdown, { rows: RobloxDemographicRow[]; total: number } | { error: string }>;
 	fetchedAt: string;
 	cached: boolean;

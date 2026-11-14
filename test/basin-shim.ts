@@ -14,6 +14,7 @@ export async function basinOver(connection: DuckDBConnection, now: number): Prom
 	await connection.run(`CREATE MACRO json_get_str(j, k) AS CASE WHEN json_type(j, '$."' || k || '"') = 'VARCHAR' THEN json_extract_string(j, '$."' || k || '"') END`);
 	await connection.run(`CREATE MACRO json_get_float(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS DOUBLE)`);
 	await connection.run(`CREATE MACRO json_get_int(j, k) AS TRY_CAST(json_extract(j, '$."' || k || '"') AS BIGINT)`);
+	await connection.run(`CREATE MACRO json_get_bool(j, k) AS CASE WHEN json_type(j, '$."' || k || '"') = 'BOOLEAN' THEN TRY_CAST(json_extract(j, '$."' || k || '"') AS BOOLEAN) END`);
 	await connection.run("CREATE MACRO approx_percentile_cont(x, p) AS quantile_cont(x, p)");
 	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
 		const query = JSON.parse(String(init?.body)).query as string;

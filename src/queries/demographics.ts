@@ -9,7 +9,7 @@
  * (server/roblox-analytics.ts, GET /v1/roblox/demographics).
  */
 import { NOT_STUDIO, defineQuery, eventsTable, playerRows, ratio, str, num, type QueryContext } from "./core.ts";
-import type { NormalizedFilters } from "../sql/filters.ts";
+import { audienceValueSql, type NormalizedFilters } from "../sql/filters.ts";
 
 export const DEMOGRAPHIC_DIMENSIONS = ["country", "language", "accountAge", "premium", "device"] as const;
 export type DemographicDimension = (typeof DEMOGRAPHIC_DIMENSIONS)[number];
@@ -34,17 +34,18 @@ export interface DemographicsResult {
 const MAX_VALUES = 250;
 
 function valueExpr(ctx: QueryContext, d: DemographicDimension): string {
-	const j = (key: string) => ctx.dialect.jsonText("e.props", key);
 	switch (d) {
 		case "country":
-			return `UPPER(${j("country")})`;
-		// "en-us" -> "en": the language without the region, like Creator Hub's Language card.
+			return audienceValueSql(ctx.dialect, "e.props", "country");
 		case "language":
-			return `LOWER(split_part(${j("locale")}, '-', 1))`;
+			return audienceValueSql(ctx.dialect, "e.props", "lang");
 		case "accountAge":
-			return j("age");
-		case "premium":
-			return `LOWER(${j("prem")})`;
+			return audienceValueSql(ctx.dialect, "e.props", "age");
+		// A JSON boolean: Basin's json_get_str reads strings only, so through jsonBool.
+		case "premium": {
+			const b = ctx.dialect.jsonBool("e.props", "prem");
+			return `(CASE WHEN ${b} THEN 'true' WHEN NOT ${b} THEN 'false' END)`;
+		}
 		case "device":
 			return "e.dev";
 	}

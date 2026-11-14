@@ -268,6 +268,28 @@ describe("Roblox demographics", () => {
 		await expect(fresh.demographics({ from: today - 7 * D, to: today })).rejects.toMatchObject({ status: 502 });
 	});
 
+	test("country as Roblox's Country, matched on its code or English name; a country Roblox doesn't report is said, not guessed", async () => {
+		const asked: Record<string, any>[] = [];
+		const fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body));
+			asked.push(body);
+			const dim = body.breakdown[0];
+			const row = (value: string, users: number, displayValue?: string) => ({ breakdowns: [{ dimension: dim, value, ...(displayValue ? { displayValue } : {}) }], dataPoints: [{ time: body.startTime, value: users }] });
+			const values = dim === "Country" ? [row("US", 50, "United States"), row("Brazil", 30), row("Unknown", 1)] : [row("x", 5)];
+			return Response.json({ path: "x", done: true, response: { values } });
+		}) as typeof globalThis.fetch;
+		const ra = new RobloxAnalytics({ apiKey: "k", universeId: UNIVERSE, fetch, clock: () => now, perMinute: 100 });
+		const r = await ra.demographics({ from: today - 7 * D, to: today, country: ["US", "BR"] });
+		const discovery = asked.find((b) => !b.filter);
+		expect(discovery).toMatchObject({ breakdown: ["Country"], limit: 250 });
+		expect(r.applied).toEqual([{ filter: "country", dimension: "Country", values: ["US", "Brazil"] }]);
+		for (const b of asked.filter((x) => x.filter)) expect(b.filter).toEqual([{ dimension: "Country", operation: "In", values: ["US", "Brazil"] }]);
+		const gb = await ra.demographics({ from: today - 7 * D, to: today, country: ["GB"] });
+		expect(gb.applied).toEqual([]);
+		expect(gb.notApplied[0]).toMatchObject({ filter: "country" });
+		expect(gb.notApplied[0]?.reason).toContain("United States");
+	});
+
 	test("the route: filters parsed and checked, 409 without the key", async () => {
 		const h = await harness({});
 		try {
@@ -275,6 +297,8 @@ describe("Roblox demographics", () => {
 			expect((await h.call("/v1/roblox/demographics?art=x", { headers: bearer(ADMIN) })).status).toBe(400);
 			expect((await h.call("/v1/roblox/demographics?from=2026-11-01&to=2026-10-01", { headers: bearer(ADMIN) })).status).toBe(400);
 			expect((await h.call("/v1/roblox/demographics?dev=phone&players=new", { headers: bearer(ADMIN) })).status).toBe(409);
+			expect((await h.call("/v1/roblox/demographics?country=US,br", { headers: bearer(ADMIN) })).status).toBe(409);
+			expect((await h.call("/v1/roblox/demographics?country=USA", { headers: bearer(ADMIN) })).status).toBe(400);
 			expect((await h.call("/v1/roblox/demographics", {})).status).toBe(401);
 		} finally {
 			await h.close();

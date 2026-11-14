@@ -183,7 +183,7 @@ export interface RobloxResult {
  * `c(pid, cday)`: new players whose first session started in the range, with their join day (UTC): the cohort is the
  * first play date, as on Roblox. Studio play tests don't count.
  */
-function cohortCte(ctx: QueryContext, f: NormalizedFilters): string {
+export function cohortCte(ctx: QueryContext, f: NormalizedFilters): string {
 	return `c AS (SELECT e.pid AS pid, ${dayOf("MIN(e.t)")} AS cday FROM ${eventsTable(ctx, f)} e WHERE ${playerRows(f, ctx, `e.newp = TRUE AND ${NOT_STUDIO}`)} GROUP BY e.pid)`;
 }
 

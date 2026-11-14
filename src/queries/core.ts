@@ -87,9 +87,9 @@ export function iso(ms: number): string {
 
 // SQL helpers -------------------------------------------------------------------------------------------------------
 
-/** The filters as a condition on alias `e`. */
+/** The filters as a condition on alias `e` (the audience filters as a semi-join on the join rows of the filter range). */
 export function where(f: NormalizedFilters, ctx: QueryContext, options: WhereOptions = {}): string {
-	return whereSql(f, ctx.dialect, { prefix: "e.", ...options });
+	return whereSql(f, ctx.dialect, { prefix: "e.", table: (from, to) => ctx.table("events", from, to), ...options });
 }
 
 /** The events table for the filter range (plus `extraDaysAfter` for retention windows). */

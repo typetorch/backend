@@ -14,7 +14,8 @@
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
  *   server's own configuration: the settings file, storage, the runtime settings, the access list, the debug audit
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
- *        (experiment-players, funnel-players, monetization-players and monetization-purchases get UserIds and cached Roblox names joined in, erased players left out)
+ *        (experiment-players, funnel-players, monetization-players, monetization-purchases and churn get UserIds and cached Roblox names joined in, erased players left out;
+ *        churn also each player's notification opt-in for owners)
  *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
  *   GET  /v1/storage                bytes and files per part of the data folder
@@ -95,6 +96,7 @@ import { CHANGE_BODY_MAX, EXPERIMENT_NAME, ExperimentChangeInput, parseChange, p
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import type { FunnelPlayersResult } from "../queries/funnel.ts";
 import type { MonetizationPlayersResult, MonetizationPurchasesResult } from "../queries/monetization.ts";
+import type { ChurnResult } from "../queries/churn.ts";
 import type { FeedbackListResult } from "../queries/feedback.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
@@ -1306,17 +1308,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 
 	/**
-	 * GET /v1/roblox/demographics?from&to&dev&players: Creator Hub's Demographics cards from Roblox
-	 * (server/roblox-analytics.ts) over the filter bar's range (its full UTC days, default the last 28), with its device and
-	 * new / returning filters as Roblox's Platform / IsNewUser. The other filters have no Roblox equivalent.
+	 * GET /v1/roblox/demographics?from&to&dev&players&country: Creator Hub's Demographics cards from Roblox
+	 * (server/roblox-analytics.ts) over the filter bar's range (its full UTC days, default the last 28), with its device,
+	 * new / returning and country filters as Roblox's Platform / IsNewUser / Country. The other filters have no Roblox
+	 * equivalent.
 	 */
 	async function robloxDemographics(url: URL, ip: string): Promise<Response> {
-		const allowed = new Set(["from", "to", "dev", "players"]);
+		const allowed = new Set(["from", "to", "dev", "players", "country"]);
 		for (const key of url.searchParams.keys()) {
 			if (!allowed.has(key)) return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
 			if (url.searchParams.getAll(key).length > 1) return json(400, { error: `one ${key}` });
 		}
-		let input: { from: number; to: number; dev?: string[]; players?: "new" | "returning" };
+		let input: { from: number; to: number; dev?: string[]; players?: "new" | "returning"; country?: string[] };
 		try {
 			const p = (k: string) => url.searchParams.get(k) ?? undefined;
 			const raw = (k: string) => {
@@ -1325,11 +1328,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			};
 			const dev = p("dev")?.split(",").filter(Boolean);
 			const players = p("players");
+			const country = p("country")?.split(",").filter(Boolean);
 			const f = normalizeFilters(
-				{ ...(raw("from") !== undefined ? { from: raw("from") as string | number } : {}), ...(raw("to") !== undefined ? { to: raw("to") as string | number } : {}), ...(dev?.length ? { dev: dev as Device[] } : {}), ...(players ? { players: players as "new" | "returning" } : {}) },
+				{
+					...(raw("from") !== undefined ? { from: raw("from") as string | number } : {}),
+					...(raw("to") !== undefined ? { to: raw("to") as string | number } : {}),
+					...(dev?.length ? { dev: dev as Device[] } : {}),
+					...(players ? { players: players as "new" | "returning" } : {}),
+					...(country?.length ? { country } : {}),
+				},
 				{ now: clock(), defaultDays: 28 },
 			);
-			input = { from: f.from, to: f.to, ...(f.dev?.length ? { dev: f.dev } : {}), ...(f.players ? { players: f.players } : {}) };
+			input = { from: f.from, to: f.to, ...(f.dev?.length ? { dev: f.dev } : {}), ...(f.players ? { players: f.players } : {}), ...(f.country?.length ? { country: f.country } : {}) };
 		} catch (error) {
 			return json(400, { error: String((error as Error).message).slice(0, 200) });
 		}
@@ -1378,7 +1388,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
-	async function query(req: Request, name: string): Promise<Response> {
+	/** POST /v1/query/<name>; `owner`: the caller may read owner-only data (the notification opt-in state on `churn`). */
+	async function query(req: Request, name: string, owner = false): Promise<Response> {
 		const warehouse = analyticsOr();
 		if (warehouse instanceof Response) return warehouse;
 		if (!isQueryName(name)) return json(404, { error: `unknown query ${JSON.stringify(name)}` });
@@ -1438,6 +1449,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const found = result as FeedbackListResult;
 				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.rows });
 				result = { ...found, total, rows: players };
+			}
+			if (name === "churn") {
+				// UserIds and names (erased players left out), and for owners each player's notification opt-in as the
+				// backend learned it (subscribed / not_subscribed / null): who a win-back notification can reach.
+				const found = result as ChurnResult;
+				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.list });
+				const optin = owner ? await notify.store.optinOf(players.flatMap((p) => (p.uid !== undefined ? [p.uid] : []))) : undefined;
+				const list = optin ? players.map((p) => ({ ...p, optin: p.uid !== undefined ? (optin.get(p.uid) ?? null) : null })) : players;
+				result = { ...found, total, more: Math.max(0, total - list.length), list };
 			}
 			if (name === "timeline" || name === "player-graph" || name === "player-stats") {
 				const r = result as { pid?: string; uid?: number };
@@ -3034,7 +3054,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			// Live events: every reader sees them and their reports; owners schedule and cancel (`manage`, audited).
 			if (path === "/v1/live-events" || path.startsWith("/v1/live-events/")) return liveEventsRoute(req, path, url, manage);
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
-			if (q) return method === "POST" ? query(req, q[1]) : json(405, { error: "POST only" });
+			if (q) return method === "POST" ? query(req, q[1], gate.principal.role === "admin") : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
 			if (r && method === "GET") return rollups(url, r[1]);
 			return notFound();

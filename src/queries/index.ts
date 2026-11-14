@@ -11,6 +11,8 @@ import { events, players, values } from "./explore.ts";
 import { liveEventLift } from "./live-event-lift.ts";
 import { feedbackList, feedbackSummary } from "./feedback.ts";
 import { deployReport, servers } from "./fleet.ts";
+import { ltv } from "./ltv.ts";
+import { churn } from "./churn.ts";
 import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
 import { flow, playerGraph } from "./graph.ts";
 import { notifyFunnel } from "./notify-funnel.ts";
@@ -27,6 +29,8 @@ export const QUERIES = {
 	overview,
 	roblox,
 	retention,
+	ltv,
+	churn,
 	demographics,
 	explain,
 	funnel,

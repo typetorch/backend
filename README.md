@@ -1010,7 +1010,7 @@ reached it (drop-offs: their last step and when; playtime funnels: their playtim
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
-Roblox, Retention, **Demographics** (who plays: Roblox's age, gender, language, country, platform and OS cards over the filter bar's full UTC days, its device and new / returning filters sent as Roblox's Platform / IsNewUser; and from our join events country, language, device, Roblox account age and Premium, every filter applying), Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
+Roblox, Retention (two tabs over the join-day cohorts: **Players back**, and **Revenue (LTV)**: the `ltv` query's revenue per player, Robux paid per player or payer share at D0 to D30 (`?view=revenue&ltv=revenue|robux|payers`), heat cells, the day in progress orange, a weighted average row; with the Audience filters it answers "did this campaign pay back"), **Demographics** (who plays: Roblox's age, gender, language, country, platform and OS cards over the filter bar's full UTC days, its device, new / returning and country filters sent as Roblox's Platform / IsNewUser / Country (country matched on Roblox's own values: the ISO code or the English name; a country Roblox doesn't report is listed as not applied); and from our join events country, language, device, Roblox account age and Premium, every filter applying), Funnels, Players (the list, with a **Risk** column from `churn`, and under it one player's detail: Roblox profile card, Spending, Playtime,
 Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
@@ -1027,6 +1027,14 @@ with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua 
 on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
 runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,
 Network, Audit).
+
+**Audience.** The filter bar's **Audience** button opens country, language, account age, Premium and join source
+filters (the [audience filters](#programmatic-api): player-level, from the players' join rows in the range; in the URL as
+`country`, `lang`, `age`, `prem`, `source`, so a view of one campaign's players is shareable). Countries and languages
+list the values the `demographics` query saw over the range (named with `Intl.DisplayNames`; asked only once the popover
+opens), account age, Premium and join source the framework's fixed values. The button names what is picked ("United
+States, Premium"). Every page's queries get them; the Demographics page's Roblox cards take the country as Roblox's
+Country, and list the others as not applied.
 
 **Date range.** The filter bar's range: Last 1 hour, Last 6 hours, Today, Last 7 / 30 / 90 days, or Custom (dates). The hour
 presets send an exact instant (`from` = an ISO time on a whole minute); the day presets and custom ranges send dates, as before.
@@ -1210,6 +1218,16 @@ const { servers } = await fleet.servers({ branch: "prod" });
   is exact, e.g. the explorer's "Last 1 hour"), `art`,
   `branch`, `channel`, `dev`, `players` (`"new"` = first-ever sessions, `"returning"`), `variant`
   (`{ experiment, variant }`), `sexp`, `place`. Without `from`, a query covers its default number of days.
+  **Audience filters** (player-level): `country` (ISO codes, `"US"`), `lang` (language codes without the region, `"en"`;
+  join `locale`, framework 2026-11-15 on, so older joins match no language), `age` (Roblox account-age buckets: `<1d`,
+  `1-7d`, `7-30d`, `30-90d`, `90-365d`, `1-3y`, `3y+`), `prem` (`true` / `false`) and `source` (the join's `from`:
+  `direct`, `teleport`, `teleport_game`, `referral`, `share`, `follow`). A player matches when one of their
+  `session` / `join` rows in the range says so (all set audience filters on that one row), and then **all** their rows
+  count: `where()` adds `e.pid IN (SELECT aj.pid FROM <events> aj WHERE <join rows in the range> AND ...)`, the same in
+  DuckDB and Basin. Values are checked strictly (codes, the bucket list, `[a-z0-9_]` sources) before they become SQL
+  literals. Queries over server or fleet rows (`perf-server`, `servers`, `deployReport`, the server parts of
+  `benchmarks` / `realtime`) don't take them, as they don't take `dev`. Over `GET /v1/experiments/<key>/players` they are
+  `country`, `lang`, `age`, `source` (repeatable) and `prem=true|false`.
 - **writeBackendSettings** runs `typetorch backend setup --url <url>` in `gameDir` (the game's `node_modules/@typetorch/cli`,
   0.9+, or `cli: [...]`), with the game key and the admin token in the child's environment (`TYPETORCH_API_KEY`,
   `TYPETORCH_ADMIN_TOKEN`), never on the command line. The CLI checks the address and both keys first (`GET <url>/healthz`,
@@ -1230,6 +1248,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `demographics` | who plays, from join events: country, language (`locale`, framework 2026-11-15 on), device, Roblox account age, Premium; each player once per dimension, `share` of the players with a join | 28 days |
 | `explain` | why a metric moved between two windows ([Explain this change](#explain-this-change)): `metric` (`players`, `dau`, `newPlayers`, `returningPlayers`, `sessions`, `playtime`, `playtimePerPlayer`, `sessionsPerPlayer`, `avgSession`, `d1`, `payerConversion`, `robuxPerPlayer`, `revenuePerPlayer`; default `players`) in the filter range vs `baseline` (`{from, to}`; default the same length right before it), per segment of `dimension` (`device`, `country`, `language`, `accountAge`, `premium`, `source`, `build`, `branch`, `playerType`, or `all`, the default): both windows' players, value and share, and a shift-share split of the change into `rate` and `mix` effects, ranked, the rest past `top` (8, at most 20) folded into one `other` row; `small` when a segment has fewer than `minPlayers` (30) players in a window; `within: {dimension, value}` for one segment only (the drill-down). Every filter applies | 7 days |
 | `retention` | retention by join-day cohort (`days`: up to 31 offsets from 1 to 90, default 1, 3, 7, 14, 30; the explorer asks for every day 1-30; days not over are `null`) | 30 days |
+| `ltv` | revenue per join-day cohort (the `retention` cohorts; every filter applies, so a join source or country filter shows whether a campaign's players paid back): per cohort and `days` offset (default D0 = the join day, 1, 3, 7, 14, 30; up to 12 offsets from 0 to 90), cumulative `robux` paid, `robuxPerPlayer`, `revenuePerPlayer` (x `creatorShare`, 0.7), `payers` and `payerShare` by that day; a day not started is `null`, the day in progress (today, UTC) `partial: true` and out of the `average` (weighted by cohort size; `players` = the new players it covers). Purchases as in `monetization` (server-sent distinct rows, Studio left out), on any device or build | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
 | `funnel-progress` | how far given players got in each funnel (`pids`, 1 to 500; `funnel` for one): furthest step, its place among the funnel's steps in the range, the share and `reachedAt` (when they first logged that step); `funnels` lists each funnel's step names (the Players table's funnel columns, whose cells and header list the steps on hover, focus or tap, and the player detail) | 30 days |
 | `funnel-players` | the players at one funnel step (at most 200, `limit`): `funnel` + `step` (the step's `i`) for a logged funnel, or `measure` (`total` / `first`) + `step` (a threshold in seconds: 30 ... 7200) for a playtime funnel; `mode: "reached"` (default; the same membership as the funnel's "reached": furthest step, or playtime, at least this one) or `"dropped"` (reached the step before but not this one: for logged funnels the previous step anyone logged in the range, none before the first; for playtime the threshold before, 0 before the first). Per player: `at` (logged: when they first logged this step or a later one, or for drop-offs their last step), `lastStep` / `lastStepAt`, `playtimeSeconds` (playtime funnels), `lastAt` (their latest row in the range); `total`, `more`. Logged funnels most recent `at` first, playtime most recently seen first. One SQL statement. Over `POST /v1/query/funnel-players` with `uid` / `name` / `displayName` joined in and erased players left out (every signed-in reader, as the Funnels page) | 30 days |
@@ -1245,6 +1264,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `servers` | game servers from `fleet` heartbeat rows (history; the CLI's live view is the fleet API) | recent |
 | `deployReport` | a deploy's results, errors and servers still below its seq, from `fleet` rows | 2 days |
 | `players` | players seen in the range, most recent first or `sort: "robux"` for top spenders (pid, sessions, events, playtime, `robux` = Robux spent: distinct server-sent purchase rows, 0 for none); `search` = part of a pid | 30 days |
+| `churn` | churn risk per player from play patterns ([Churn risk](#churn-risk)): `buckets` (active / at_risk / lapsing / churned: players, share), `payers` per bucket (a purchase in the range), and `list`: one `bucket`'s players (default `at_risk`; `limit` 100, at most 1,000; the most play days first, then the longest away) or, with `pids` (at most 200), those players' risk; per player `bucket`, `firstPlayed` / `lastPlayed`, `daysSince`, `usualGap`, `playDays`, `recentDays` / `priorDays`; `asOf`, `total`, `more`. The filters choose the players, not their play days. Over `POST /v1/query/churn` with `uid` / `name` / `displayName` joined in, erased players left out, and for owners `optin` (the notification opt-in the backend learned: `subscribed`, `not_subscribed` or null) | 90 days |
 | `values` | the branches, artifacts (newest first), channels and devices seen in the range, for filter pickers | 30 days |
 | `events` | the newest rows, optionally of one `kind` / `name` / `pid` (`limit` up to 1,000); `fleet` rows come without props | 7 days |
 | `benchmarks` | the last `days` (7) full UTC days vs the `days` before, as Creator Hub defines them ([Roblox parity](#roblox-parity)): DAU, MAU (the 30 days ending on the period's last day), new users, average session time, playtime per DAU, D1/D7/D30 (cohorts by first play date, the latest `days` whose day 1 / 7 / 30 is over), payer conversion, ARPPU, ARPDAU, Robux spent and revenue (`creatorShare`, 0.7), qualified first sessions (ours: first sessions reaching `qualifiedMinutes`); each retention rate says whether the events cover its cohort days (`history`: complete, partial or none, with `dataFrom`) | ends at `to` |
@@ -1272,6 +1292,35 @@ count a resent batch twice (only after a hot swap during a request). Graph optio
 true: each node's `events`, its top 5 custom / purchase / currency names, and `steps`, the funnel steps logged in it).
 `player-graph` takes `sid` for one session; it then also returns `path` (the visits in order with the time in each)
 and `ended`. Retention, bounce and "left the game" ignore sessions and days that aren't over yet.
+
+### Churn risk
+
+The `churn` query (`src/queries/churn.ts`, `CHURN_RULES`). The players: everyone with a session row in the range that the
+filters keep. Their play days: the UTC days they started a session in the range, on any device or build (Studio left out).
+As of the range's last day (today for the explorer, which always asks for the last 90 days):
+
+- `daysSince`: days since the last play day (0 = played that day);
+- `usualGap`: the median days between consecutive play days (null with one play day; 1 is used then);
+- `recentDays` / `priorDays`: play days in the last 14 days and in the 14 before.
+
+The first rule that matches:
+
+| Bucket | Rule |
+|---|---|
+| `churned` | `daysSince >= 28` |
+| `lapsing` | `daysSince >= 14`, or `daysSince > 3 x usualGap` |
+| `at_risk` | late for their rhythm: `daysSince >= 2` and `daysSince > 1.5 x usualGap`; or cooling: `priorDays >= 3` and `recentDays <= priorDays / 2` |
+| `active` | everyone else |
+
+So a daily player (or a one-day player) is at risk 2-3 days away and lapsing from 4; a weekly player is active up to 10
+days away, at risk at 11-13 and lapsing from 14. A range bounds what is seen: with 90
+days, a player last seen 90+ days ago isn't counted at all.
+
+The explorer: the **Players** page's **Risk** column (one `churn` lookup of the listed pids) and its **Churn risk**
+section: the four buckets (players, share, payers), one bucket's players (`?risk=at_risk|lapsing|churned|active`; the row
+opens the player), as of today over the last 90 days with the filter bar's other filters (the Audience ones included).
+For owners each player carries the notification opt-in, and the section says how many of the at-risk players are
+subscribed: Export (CSV) gives their UserIds.
 
 ### Explain this change
 

@@ -509,7 +509,7 @@ const ROUTES: Route[] = [
 		tag: "roblox",
 		roles: ["admin", "web"],
 		summary: "Creator Hub's Demographics: daily active users per age group, gender, locale, country, platform and OS (Open Cloud Analytics Query API)",
-		params: [q("from", "unix ms or ISO (default 28 days before to)"), q("to", "unix ms or ISO (default now)"), q("dev", "devices, comma-separated: Roblox's Platform"), q("players", "new or returning: Roblox's IsNewUser")],
+		params: [q("from", "unix ms or ISO (default 28 days before to)"), q("to", "unix ms or ISO (default now)"), q("dev", "devices, comma-separated: Roblox's Platform"), q("players", "new or returning: Roblox's IsNewUser"), q("country", "ISO country codes, comma-separated: Roblox's Country (matched on the code or the English name)")],
 	},
 
 	// Live ----------------------------------------------------------------------------------------------------------------------

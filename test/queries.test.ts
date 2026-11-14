@@ -223,6 +223,64 @@ describe("demographics", () => {
 	});
 });
 
+describe("audience filters (player-level, from join rows)", () => {
+	const index = (pid: string) => Number(pid.slice(1));
+	const joinPids = (days: number) => new Set(inRange(days).filter((e) => e.kind === "session" && e.name === "join" && e.pid).map((e) => e.pid as string));
+	const playersOf = (keep: (i: number) => boolean) => {
+		const joined = joinPids(30);
+		return new Set(playerEvents(inRange(30)).filter((e) => joined.has(e.pid as string) && keep(index(e.pid as string))).map((e) => e.pid));
+	};
+
+	test("country, language, account age, Premium and join source narrow every player's rows", async () => {
+		const all = await store.query("overview");
+		const us = await store.query("overview", { country: "us" });
+		expect(us.players).toBe(playersOf((i) => i % 3 === 0).size);
+		expect(us.players).toBeLessThan(all.players);
+		const usGb = await store.query("overview", { country: ["US", "GB"] });
+		expect(usGb.players).toBe(playersOf((i) => i % 3 !== 2).size);
+		// Language without the region; players without a locale (every 5th) match no language.
+		const pt = await store.query("overview", { lang: "PT" });
+		expect(pt.players).toBe(playersOf((i) => i % 2 === 1 && i % 5 !== 4).size);
+		const old = await store.query("overview", { age: "1-3y" });
+		expect(old.players).toBe(playersOf((i) => i % 2 === 1).size);
+		const prem = await store.query("overview", { prem: true });
+		const notPrem = await store.query("overview", { prem: "false" });
+		expect(prem.players).toBe(playersOf((i) => i % 4 === 0).size);
+		expect(prem.players + notPrem.players).toBe(playersOf(() => true).size);
+		expect((await store.query("overview", { source: "direct" })).players).toBe(playersOf(() => true).size);
+		expect((await store.query("overview", { source: "teleport" })).players).toBe(0);
+		// Together: one join row saying both.
+		const usPrem = await store.query("overview", { country: "US", prem: true });
+		expect(usPrem.players).toBe(playersOf((i) => i % 3 === 0 && i % 4 === 0).size);
+		// Sessions stay whole: every session of a matching player counts.
+		const ref = sessions(inRange(30).filter((e) => e.pid && index(e.pid) % 3 === 0));
+		expect(us.sessions).toBe(ref.size);
+	});
+
+	test("the other queries get them through where(): demographics, retention, monetization", async () => {
+		const us = await store.query("demographics", { country: "US" });
+		expect(us.dimensions.country.map((x) => x.value)).toEqual(["US"]);
+		const br = await store.query("retention", { country: "BR" });
+		const allCohorts = await store.query("retention");
+		expect(br.cohorts.reduce((s, c) => s + c.size, 0)).toBeLessThan(allCohorts.cohorts.reduce((s, c) => s + c.size, 0));
+		const money = await store.query("monetization", { prem: true });
+		const payers = new Set(inRange(30).filter((e) => e.kind === "purchase" && e.pid && index(e.pid) % 4 === 0).map((e) => e.pid));
+		expect(money.totals.payers).toBe(payers.size);
+	});
+
+	test("values are checked: no SQL from input", () => {
+		expect(() => store.render("overview", { country: "US' OR 1=1 --" })).toThrow("two-letter");
+		expect(() => store.render("overview", { lang: "e'n" })).toThrow("language code");
+		expect(() => store.render("overview", { age: "1y" as never })).toThrow("age must be one of");
+		expect(() => store.render("overview", { source: "Direct)" })).toThrow("join source");
+		expect(() => store.render("overview", { prem: "yes" as never })).toThrow("prem must be true or false");
+		const sql = store.render("overview", { country: "gb", age: "<1d" }).statements.totals;
+		expect(sql).toContain("e.pid IN (SELECT aj.pid FROM");
+		expect(sql).toContain("UPPER(json_extract_string(aj.props, '$.\"country\"')) = 'GB'");
+		expect(sql).toContain("= '<1d'");
+	});
+});
+
 describe("funnel", () => {
 	test("lists funnels without a name", async () => {
 		const r = await store.query("funnel");

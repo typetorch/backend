@@ -133,6 +133,8 @@ export interface RobloxFilterInput {
 	to: number;
 	dev?: string[];
 	players?: "new" | "returning";
+	/** ISO country codes (upper case), as Roblox's Country. */
+	country?: string[];
 }
 
 /** The UTC days Roblox is asked for. */
@@ -146,8 +148,8 @@ export interface RobloxWindow {
 
 interface RobloxFilters {
 	filter: { dimension: string; operation: "In"; values: string[] }[];
-	applied: { filter: "device" | "players"; dimension: "Platform" | "IsNewUser"; values: string[] }[];
-	notApplied: { filter: "device" | "players"; reason: string }[];
+	applied: { filter: "device" | "players" | "country"; dimension: "Platform" | "IsNewUser" | "Country"; values: string[] }[];
+	notApplied: { filter: "device" | "players" | "country"; reason: string }[];
 }
 
 /** Days asked at most (Roblox keeps about four years; this keeps a query quick). */
@@ -187,6 +189,18 @@ const DEVICE_WORDS: Record<string, RegExp> = {
 function deviceMatches(device: string, k: { value: string; label: string }): boolean {
 	const re = DEVICE_WORDS[device];
 	return Boolean(re && (re.test(k.value) || re.test(k.label)));
+}
+/** Our ISO country code against Roblox's Country values (undocumented: the code itself or the English name). */
+const COUNTRY_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
+function countryMatches(code: string, k: { value: string; label: string }): boolean {
+	let name: string | undefined;
+	try {
+		name = COUNTRY_NAMES.of(code)?.toLowerCase();
+	} catch {
+		name = undefined;
+	}
+	const said = [k.value.trim().toLowerCase(), k.label.trim().toLowerCase()];
+	return said.includes(code.toLowerCase()) || (name !== undefined && said.includes(name));
 }
 const NEW_USER = /^(true|new|new ?users?|1|yes)$/i;
 const RETURNING_USER = /^(false|returning|returning ?users?|0|no)$/i;
@@ -294,7 +308,7 @@ export class RobloxAnalytics {
 	}
 
 	/** The values Roblox reports for a dimension (DailyActiveUsers broken down by it), cached a day. */
-	private async dimensionValues(dimension: "Platform" | "IsNewUser", window: RobloxWindow): Promise<{ value: string; label: string }[]> {
+	private async dimensionValues(dimension: "Platform" | "IsNewUser" | "Country", window: RobloxWindow): Promise<{ value: string; label: string }[]> {
 		const hit = this.valuesCache.get(dimension);
 		if (hit && hit.expires > this.clock()) return hit.values;
 		if (!this.takeQueries(1)) {
@@ -302,7 +316,7 @@ export class RobloxAnalytics {
 			throw new RobloxAnalyticsError("too many Roblox analytics queries: try again in a minute", 429);
 		}
 		try {
-			const series = await this.query({ metric: "DailyActiveUsers", granularity: "None", startTime: window.from, endTime: window.to, breakdown: [dimension], limit: 20 });
+			const series = await this.query({ metric: "DailyActiveUsers", granularity: "None", startTime: window.from, endTime: window.to, breakdown: [dimension], limit: dimension === "Country" ? DEMOGRAPHIC_LIMIT.Country : 20 });
 			const values = demographicRows(series, dimension).map((r) => ({ value: r.value, label: r.label }));
 			this.valuesCache.set(dimension, { values, expires: this.clock() + DAY_MS });
 			return values;
@@ -332,6 +346,18 @@ export class RobloxAnalytics {
 				filter.push({ dimension: "IsNewUser", operation: "In", values });
 				applied.push({ filter: "players", dimension: "IsNewUser", values });
 			} else notApplied.push({ filter: "players", reason: `Roblox's IsNewUser values (${known.map((k) => k.label).join(", ") || "none reported"}) don't say ${input.players}` });
+		}
+		if (input.country?.length) {
+			const known = await this.dimensionValues("Country", window);
+			const values = known.filter((k) => input.country?.some((c) => countryMatches(c, k))).map((k) => k.value);
+			if (values.length) {
+				filter.push({ dimension: "Country", operation: "In", values });
+				applied.push({ filter: "country", dimension: "Country", values });
+			} else
+				notApplied.push({
+					filter: "country",
+					reason: `none of the ${known.length} countries Roblox reports for the window is ${input.country.join(" / ")}${known.length ? ` (e.g. ${known.slice(0, 3).map((k) => k.label).join(", ")})` : ""}`,
+				});
 		}
 		return { filter, applied, notApplied };
 	}

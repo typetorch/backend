@@ -5,9 +5,11 @@ import { DataTable, type DataColumn } from "@/components/data-table";
 import { ExplainPanel, useExplain } from "@/components/ExplainPanel";
 import { Button } from "@/components/ui/button";
 import { PageHeader, QueryState, Section } from "@/components/common";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtInt, plural } from "@/lib/format";
-import { useAnalytics } from "@/lib/hooks";
+import { useAnalytics, useParam } from "@/lib/hooks";
 import type { RetentionResult } from "@/lib/types";
+import { RetentionLtv } from "./RetentionLtv";
 
 /** Today so far (UTC) as "14:20 of 24h". */
 const elapsedText = (elapsed: number) => {
@@ -155,8 +157,18 @@ function Body({ data }: { data: RetentionResult }) {
 /** Every day from 1 to 30 (hide some under Columns). */
 export const RETENTION_DAYS = Array.from({ length: 30 }, (_, i) => i + 1);
 
-export default function Retention() {
+function PlayersBack() {
 	const q = useAnalytics("retention", { days: RETENTION_DAYS });
+	return (
+		<QueryState query={q} isEmpty={(d) => d.cohorts.length === 0} empty="No new players joined in this range.">
+			{(data) => <Body data={data} />}
+		</QueryState>
+	);
+}
+
+/** Two tabs over the same join-day cohorts: who came back (retention), and what they spent (revenue per cohort, LTV). */
+export default function Retention() {
+	const [tab, setTab] = useParam("view", "players");
 	const [, explain] = useExplain();
 	return (
 		<>
@@ -168,11 +180,20 @@ export default function Retention() {
 						Explain the D1 change
 					</Button>
 				}
-				description="New players by the day they joined, and how many came back on each day from 1 to 30 (D1 = the day after joining). Today (UTC) shows the share back so far in orange; later days show –. Hide days under Columns."
+				description="New players by the day they joined: how many came back on each day from 1 to 30 (D1 = the day after joining), and what they spent by D0 to D30. Today (UTC) shows the value so far in orange; later days show –. Hide days under Columns."
 			/>
-			<QueryState query={q} isEmpty={(d) => d.cohorts.length === 0} empty="No new players joined in this range.">
-				{(data) => <Body data={data} />}
-			</QueryState>
+			<Tabs value={tab === "revenue" ? "revenue" : "players"} onValueChange={setTab}>
+				<TabsList>
+					<TabsTrigger value="players">Players back</TabsTrigger>
+					<TabsTrigger value="revenue">Revenue (LTV)</TabsTrigger>
+				</TabsList>
+				<TabsContent value="players" className="pt-2">
+					<PlayersBack />
+				</TabsContent>
+				<TabsContent value="revenue" className="pt-2">
+					<RetentionLtv />
+				</TabsContent>
+			</Tabs>
 			<ExplainPanel />
 		</>
 	);

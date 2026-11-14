@@ -18,6 +18,8 @@ export interface Dialect {
 	jsonText(column: string, key: string): string;
 	/** A key of a JSON-object string column as DOUBLE (NULL when missing or not a number). */
 	jsonNumber(column: string, key: string): string;
+	/** A key of a JSON-object string column as BOOLEAN (NULL when missing or not a JSON boolean). */
+	jsonBool(column: string, key: string): string;
 	/** The LIMIT clause that ends a statement: `rows` capped at maxRows. */
 	limit(rows: number): string;
 	/** The `p` (0-1) percentile of a numeric expression over a group, NULLs ignored (an aggregate). */
@@ -59,6 +61,11 @@ export const duckdb: Dialect = {
 	jsonNumber(column, key) {
 		return `TRY_CAST(json_extract_string(${column}, ${lit(`$."${assertSafeKey(key)}"`)}) AS DOUBLE)`;
 	},
+	jsonBool(column, key) {
+		// json_extract_string gives a JSON boolean as 'true' / 'false'.
+		const v = `json_extract_string(${column}, ${lit(`$."${assertSafeKey(key)}"`)})`;
+		return `(CASE ${v} WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE END)`;
+	},
 	limit(rows) {
 		return `LIMIT ${int(Math.max(1, Math.floor(rows)))}`;
 	},
@@ -78,6 +85,10 @@ export const basin: Dialect = {
 		// json_get_float may skip integer JSON numbers; fall back to json_get_int.
 		const k = lit(assertSafeKey(key));
 		return `COALESCE(json_get_float(${column}, ${k}), CAST(json_get_int(${column}, ${k}) AS DOUBLE))`;
+	},
+	jsonBool(column, key) {
+		// json_get_str gives NULL for a JSON boolean (it reads strings only). Not checked on a live account.
+		return `json_get_bool(${column}, ${lit(assertSafeKey(key))})`;
 	},
 	limit(rows) {
 		return `LIMIT ${int(Math.min(10_000, Math.max(1, Math.floor(rows))))}`;

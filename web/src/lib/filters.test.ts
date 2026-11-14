@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeFilterCount, describeRange, readFilters, toApiFilters, windowBucketMs, writeFilters } from "./filters";
+import { activeFilterCount, audienceFilterCount, describeRange, readFilters, toApiFilters, windowBucketMs, writeFilters } from "./filters";
 
 const NOW = Date.UTC(2026, 9, 5, 18, 0, 0);
 
@@ -76,5 +76,26 @@ describe("3 days and since the last prod deploy", () => {
 		// The release time is looked up, never written to the URL.
 		expect(writeFilters({ range: "deploy", sinceMs: since }, new URLSearchParams()).toString()).toBe("range=deploy");
 		expect(describeRange({ range: "deploy", sinceMs: since })).toBe("since the last prod deploy (2026-10-04 09:30 UTC)");
+	});
+});
+
+describe("audience filters", () => {
+	it("read from the URL with the backend's checks, written back, and sent as the server's filters", () => {
+		const s = readFilters(new URLSearchParams("country=us&lang=PT&age=1-3y&prem=true&source=teleport_game"));
+		expect(s).toEqual({ range: "30d", country: "US", lang: "pt", age: "1-3y", prem: "true", source: "teleport_game" });
+		// Junk is dropped here, not sent to be refused.
+		expect(readFilters(new URLSearchParams("country=USA&lang=e1&age=2y&prem=yes&source=Bad%20One"))).toEqual({ range: "30d" });
+		expect(readFilters(writeFilters(s, new URLSearchParams()))).toEqual(s);
+		expect(writeFilters({ range: "30d", age: "<1d" }, new URLSearchParams("pid=abc")).toString()).toBe("pid=abc&age=%3C1d");
+		expect(toApiFilters({ range: "7d", country: "BR", prem: "false", lang: "en", age: "3y+", source: "direct" }, NOW)).toEqual({
+			from: "2026-09-29",
+			country: "BR",
+			prem: false,
+			lang: "en",
+			age: "3y+",
+			source: "direct",
+		});
+		expect(activeFilterCount({ range: "7d", country: "US", prem: "true" })).toBe(2);
+		expect(audienceFilterCount({ range: "7d", dev: "phone", source: "direct" })).toBe(1);
 	});
 });

@@ -251,7 +251,7 @@ export function createApi(options: ApiOptions = {}) {
 		 * before (the backend asks Open Cloud's Analytics Query API; 409 while the key lacks universe.analytics:read).
 		 */
 		robloxAcquisition: (days: number, signal?: AbortSignal) => get<RobloxAcquisition>(`/v1/roblox/analytics/acquisition${qs({ days })}`, signal),
-		robloxDemographics: (params: { from?: string; to?: string; dev?: string; players?: string }, signal?: AbortSignal) => get<RobloxDemographics>(`/v1/roblox/demographics${qs(params)}`, signal),
+		robloxDemographics: (params: { from?: string; to?: string; dev?: string; players?: string; country?: string }, signal?: AbortSignal) => get<RobloxDemographics>(`/v1/roblox/demographics${qs(params)}`, signal),
 		robloxServerLogs: (job: string, params: { search?: string; order?: "asc" | "desc"; pageToken?: string; placeId?: number; placeVersion?: number } = {}, signal?: AbortSignal) =>
 			get<RobloxServerLogs>(`/v1/roblox/servers/${encodeURIComponent(job)}/logs${qs(params)}`, signal),
 		fleetServers: (branch?: string, signal?: AbortSignal) => get<FleetServers>(`/v1/fleet/servers${qs({ branch })}`, signal),
