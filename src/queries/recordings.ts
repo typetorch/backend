@@ -27,6 +27,7 @@ import {
 	RECORDING_LAYERS,
 	addRecordingLayers,
 	assignSamples,
+	zoneMapsOf,
 	boundsOf,
 	classifyEnding,
 	firstActionStats,
@@ -498,11 +499,16 @@ export interface Prepared {
 }
 
 const MAX_POINTS_PER_MAP = 60_000;
+/** Points whose zone named their map: at least this many (and 5% of the map's points) and a map's area comes from them alone. */
+const MIN_CONFIRMED_POINTS = 50;
 
 /** Map assignment for the sessions (and positioned cells), each map's frame, strays moved to NO_MAP. */
 export function prepareMaps(loaded: readonly LoadedSession[], sources: MapSources, positionedRows: Row[], grid: number): Prepared {
 	const names = new MapNames();
-	const sessions = loaded.map((s) => ({ ...s, maps: assignSamples(s.track, s.events, sources, names.of) }));
+	const sessions = loaded.map((s) => {
+		const { maps, confirmed } = assignSamples(s.track, s.events, sources, names.of);
+		return { ...s, maps, confirmed };
+	});
 	const positioned: PositionedCell[] = positionedRows.map((r) => ({
 		map: strOrNull(r.map) || NO_MAP,
 		kind: str(r.kind),
@@ -518,12 +524,19 @@ export function prepareMaps(loaded: readonly LoadedSession[], sources: MapSource
 		const points = names.names.map(() => new PointSet());
 		const totals = names.names.map(() => 0);
 		for (const s of sessions) for (let i = 0; i < s.maps.length; i++) if (!Number.isNaN(s.track.x[i])) totals[s.maps[i]]++;
-		const strides = totals.map((n) => Math.max(1, Math.ceil(n / MAX_POINTS_PER_MAP)));
+		// A map with enough points whose zone named it takes its area from those alone: the rest may be players elsewhere
+		// (the lobby's shop) while the server's latest map event still names it.
+		const confirmedTotals = names.names.map(() => 0);
+		for (const s of sessions) for (let i = 0; i < s.maps.length; i++) if (s.confirmed[i] && !Number.isNaN(s.track.x[i])) confirmedTotals[s.maps[i]]++;
+		const onlyConfirmed = totals.map((n, m) => m !== 0 && confirmedTotals[m] >= Math.max(MIN_CONFIRMED_POINTS, n * 0.05));
+		const counted = totals.map((n, m) => (onlyConfirmed[m] ? confirmedTotals[m] : n));
+		const strides = counted.map((n) => Math.max(1, Math.ceil(n / MAX_POINTS_PER_MAP)));
 		const seen = names.names.map(() => 0);
 		for (const s of sessions) {
 			for (let i = 0; i < s.maps.length; i++) {
 				if (Number.isNaN(s.track.x[i])) continue;
 				const m = s.maps[i];
+				if (onlyConfirmed[m] && !s.confirmed[i]) continue;
 				if (seen[m]++ % strides[m] === 0) points[m].add(s.track.x[i], s.track.z[i], strides[m]);
 			}
 		}
@@ -570,7 +583,9 @@ export function prepareMaps(loaded: readonly LoadedSession[], sources: MapSource
 }
 
 function sourcesFrom(rows: Rows): MapSources {
-	return { byJob: timelines(rows.jobMaps), byPid: timelines(rows.pidMaps) };
+	const byJob = timelines(rows.jobMaps);
+	const byPid = timelines(rows.pidMaps);
+	return { byJob, byPid, zoneMaps: zoneMapsOf(byJob, byPid) };
 }
 
 /** The common first phase: the session list, sampled, decoded, with events and maps. */
