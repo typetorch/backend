@@ -85,6 +85,9 @@ export interface RetentionCohort {
 	size: number;
 	kept: Record<string, number | null>;
 	keptPlayers: Record<string, number | null>;
+	/** The day in progress (today, UTC), so far. Only that offset. */
+	partial?: Record<string, number>;
+	partialPlayers?: Record<string, number>;
 }
 
 export interface RetentionResult {
@@ -92,6 +95,8 @@ export interface RetentionResult {
 	to: string;
 	days: number[];
 	cohorts: RetentionCohort[];
+	/** How much of today (UTC) is over, 0-1. */
+	todayElapsed?: number;
 	average: Record<string, number | null>;
 }
 

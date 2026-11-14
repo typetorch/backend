@@ -165,6 +165,31 @@ describe("roblox numbers and retention", () => {
 		expect(r.average["1"]).toBe(Math.round((ref.kept / ref.of) * 10_000) / 10_000);
 	});
 
+	test("retention: today (UTC) so far as partial, only on the offset that lands on today, not in the average", async () => {
+		const r = await store.query("retention", {}, { days: [1, 2] });
+		const ref = reference(1);
+		let seen = 0;
+		const today = new Map<string, Set<number>>();
+		for (const e of fx.events) if (e.pid && day(e.t) === TODAY) (today.get(e.pid) ?? today.set(e.pid, new Set()).get(e.pid))?.add(TODAY);
+		for (const c of r.cohorts) {
+			const cday = Math.floor(Date.parse(c.date) / DAY);
+			for (const d of [1, 2]) {
+				if (cday + d !== TODAY) {
+					expect(c.partial[d]).toBeUndefined();
+					continue;
+				}
+				seen++;
+				expect(c.kept[d]).toBeNull();
+				const back = [...ref.cohort].filter(([pid, cd]) => cd === cday && today.has(pid)).length;
+				expect(c.partialPlayers[d]).toBe(back);
+				expect(c.partial[d]).toBe(Math.round((back / c.size) * 10_000) / 10_000);
+			}
+		}
+		expect(seen).toBeGreaterThan(0);
+		expect(r.todayElapsed).toBeGreaterThanOrEqual(0);
+		expect(r.todayElapsed).toBeLessThan(1);
+	});
+
 	test("retention: every day from 1 to 30 (the Retention page's columns); more than 31 offsets refused", async () => {
 		const all = Array.from({ length: 30 }, (_, i) => i + 1);
 		const r = await store.query("retention", {}, { days: all });
