@@ -5,7 +5,7 @@ import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import { AuthProvider } from "@/lib/auth";
-import type { AuthInfo, GraphData, PlayerErrors, PlayerProfile, PlayerStatsResult, PlayersResult, TimelineResult } from "@/lib/types";
+import type { AuthInfo, FeedbackListResult, FeedbackRow, GraphData, PlayerErrors, PlayerProfile, PlayerStatsResult, PlayersResult, TimelineResult } from "@/lib/types";
 import Players from "@/pages/Players";
 import { bucketLabel } from "./SeriesView";
 
@@ -388,5 +388,62 @@ describe("Players page: the Errors view (player -> errors)", () => {
 		const region = await detail();
 		expect(await within(region).findByText("No errors from this player in this range.")).toBeTruthy();
 		expect(within(region).queryByRole("table", { name: "Errors this player hit" })).toBeNull();
+	});
+});
+
+describe("the player detail's Feedback view (plans/32)", () => {
+	const feedbackRow = (o: Partial<FeedbackRow>): FeedbackRow => ({
+		t: Date.parse("2026-10-07T10:00:00.000Z"),
+		at: "2026-10-07T10:00:00.000Z",
+		pid: ALPHA,
+		sid: "s1",
+		dev: "phone",
+		state: null,
+		scale: "faces5",
+		type: "scale",
+		steps: 5,
+		r: 5,
+		norm: 1,
+		label: "GREAT",
+		text: "best game",
+		len: 9,
+		topic: null,
+		ctx: null,
+		play_s: 30,
+		legacy: false,
+		...o,
+	});
+	function withFeedback(result: FeedbackListResult) {
+		const asked: Record<string, unknown>[] = [];
+		const base = vi.mocked(api.query).getMockImplementation() as (...a: unknown[]) => unknown;
+		vi.spyOn(api, "query").mockImplementation((async (name: string, filters: unknown, options: Record<string, unknown> = {}) => {
+			if (name === "feedback-list") {
+				asked.push(options);
+				return result;
+			}
+			return base(name, filters, options);
+		}) as typeof api.query);
+		return asked;
+	}
+
+	it("lists the player's feedback (feedback-list by pid), each rating in its scale's shape, no player column", async () => {
+		const asked = withFeedback({ total: 2, offset: 0, more: false, rows: [feedbackRow({}), feedbackRow({ scale: "thumbs", type: "thumbs", steps: 2, r: 0, norm: 0, label: null, text: null, len: 0 })] });
+		mount(`?pid=${ALPHA}`);
+		const region = await detail();
+		fireEvent.click(viewButton(region, "Feedback"));
+		const list = await within(region).findByRole("list", { name: "This player's feedback" });
+		expect(asked.at(-1)).toMatchObject({ pid: ALPHA, limit: 100 });
+		expect(within(list).getByRole("img", { name: "GREAT (5 of 5)" })).toBeTruthy();
+		expect(within(list).getByRole("img", { name: "Thumbs down" })).toBeTruthy();
+		expect(within(list).getByText("best game")).toBeTruthy();
+		expect(within(list).queryByRole("link")).toBeNull();
+		await waitFor(() => expect(location).toContain("view=feedback"));
+	});
+
+	it("says so when the player sent none", async () => {
+		withFeedback({ total: 0, offset: 0, more: false, rows: [] });
+		mount(`?pid=${ALPHA}&view=feedback`);
+		const region = await detail();
+		expect(await within(region).findByText("No feedback from this player in this range.")).toBeTruthy();
 	});
 });
