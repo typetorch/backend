@@ -599,6 +599,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
+| `GET /v1/roblox/demographics?from&to&dev&players` | admin, web | Creator Hub's Demographics from Roblox: daily active users per age group, gender, locale, country, platform and OS over the range's full UTC days; device / players as Roblox's Platform / IsNewUser (matched on the values Roblox reports; `applied`, `notApplied` say what happened) |
 | `GET /v1/roblox/analytics/acquisition?days=7` | admin, web | Roblox's own play-through rate, impressions and qualified plays ([Roblox acquisition numbers](#roblox-acquisition-numbers), Open Cloud) |
 | `GET /v1/players/by-uid/<uid>/events`, `GET /v1/players/by-uid/<uid>/summary` | admin, `players:read` key | one player's support rows / summary ([API keys](#named-api-keys-and-roles)); audited |
 | `GET /v1/admin/keys`, `POST /v1/admin/keys`, `DELETE /v1/admin/keys/<id>` | admin | [named API keys](#named-api-keys-and-roles): list (built-ins too, `?all=1` with revoked), create (the key once), revoke |
@@ -949,11 +950,11 @@ reached it (drop-offs: their last step and when; playtime funnels: their playtim
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
-Roblox, Retention, Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
+Roblox, Retention, **Demographics** (who plays: Roblox's age, gender, language, country, platform and OS cards over the filter bar's full UTC days, its device and new / returning filters sent as Roblox's Platform / IsNewUser; and from our join events country, language, device, Roblox account age and Premium, every filter applying), Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
 Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
-Events, Funnels, Flow, Retention, First session, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
+Events, Funnels, Flow, Retention, Demographics, First session, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
 Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
 TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
 name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. **Ctrl+K**
@@ -1149,6 +1150,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 |---|---|---|
 | `overview` | players, new players, sessions, playtime, in total and per day; windows of a day or less also per step (`bucketMs`: 1 min up to an hour, 5 min up to 6 h, else 1 h; `buckets`, by the time a session started) | 30 days |
 | `roblox` | first-play bounce (first session < 60 s), qualified plays (sessions >= 5 min), D1/D7, playtime and play days per user, payer conversion, Robux per user and per payer | 30 days |
+| `demographics` | who plays, from join events: country, language (`locale`, framework 2026-11-15 on), device, Roblox account age, Premium; each player once per dimension, `share` of the players with a join | 28 days |
 | `retention` | retention by join-day cohort (`days`: up to 31 offsets from 1 to 90, default 1, 3, 7, 14, 30; the explorer asks for every day 1-30; days not over are `null`) | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
 | `funnel-progress` | how far given players got in each funnel (`pids`, 1 to 500; `funnel` for one): furthest step, its place among the funnel's steps in the range, the share and `reachedAt` (when they first logged that step); `funnels` lists each funnel's step names (the Players table's funnel columns, whose cells and header list the steps on hover, focus or tap, and the player detail) | 30 days |

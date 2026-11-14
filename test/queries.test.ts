@@ -201,6 +201,28 @@ describe("roblox numbers and retention", () => {
 	});
 });
 
+describe("demographics", () => {
+	test("each player once per dimension, shares of the players with a join; language without the region; the players filter applies", async () => {
+		const r = await store.query("demographics");
+		const joins = inRange(28).filter((e) => e.kind === "session" && e.name === "join" && e.pid);
+		const pids = new Set(joins.map((e) => e.pid as string));
+		expect(r.players).toBe(pids.size);
+		for (const d of ["country", "language", "accountAge", "premium", "device"] as const) {
+			expect(r.dimensions[d].reduce((s, x) => s + x.players, 0)).toBe(pids.size);
+		}
+		const index = (pid: string) => Number(pid.slice(1));
+		const us = [...pids].filter((p) => index(p) % 3 === 0).length;
+		expect(r.dimensions.country.find((x) => x.value === "US")).toEqual({ value: "US", players: us, share: Math.round((us / pids.size) * 10_000) / 10_000 });
+		expect(new Set(r.dimensions.language.map((x) => x.value))).toEqual(new Set(["en", "pt", null]));
+		expect(r.dimensions.language.find((x) => x.value === null)?.players).toBe([...pids].filter((p) => index(p) % 5 === 4).length);
+		expect(r.dimensions.premium.find((x) => x.value === "true")?.players).toBe([...pids].filter((p) => index(p) % 4 === 0).length);
+		const fresh = await store.query("demographics", { players: "new" });
+		expect(fresh.players).toBe(new Set(joins.filter((e) => e.newp).map((e) => e.pid)).size);
+		const phones = await store.query("demographics", { dev: "phone" });
+		expect(phones.dimensions.device.map((x) => x.value)).toEqual(["phone"]);
+	});
+});
+
 describe("funnel", () => {
 	test("lists funnels without a name", async () => {
 		const r = await store.query("funnel");

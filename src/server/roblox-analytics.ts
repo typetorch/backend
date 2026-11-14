@@ -12,10 +12,10 @@
  * The genre benchmarks (50th / 90th) aren't in the API; the user still copies those from Creator Hub.
  *
  * Roblox allows 30 queries a minute per key owner. A refresh is 6 queries (plus polls of a slow one), the answer is
- * kept `ttlMs` (1 h: the data is daily), one refresh runs at a time, and at most `perMinute` (default 12) queries
+ * kept `ttlMs` (1 h: the data is daily), one refresh runs at a time, and at most `perMinute` (default 20) queries
  * leave the server a minute. The key goes only into `x-api-key` (opencloud.ts), never into an answer or a log line.
  */
-import { ANALYTICS_READ_SCOPE, OpenCloudError, queryAnalyticsMetric, type AnalyticsSeries } from "../opencloud.ts";
+import { ANALYTICS_READ_SCOPE, OpenCloudError, queryAnalyticsMetric, type AnalyticsQuery, type AnalyticsSeries } from "../opencloud.ts";
 import { RateLimiter } from "./http.ts";
 
 const DAY_MS = 86_400_000;
@@ -86,7 +86,7 @@ export interface RobloxAnalyticsOptions {
 	universeId?: number;
 	fetch?: typeof fetch;
 	clock?: () => number;
-	/** Analytics queries a minute at most (default 12, well under Roblox's 30 shared by every use of the key). */
+	/** Analytics queries a minute at most (default 20, under Roblox's 30 shared by every use of the key). */
 	perMinute?: number;
 	ttlMs?: number;
 	/** Per Open Cloud call (default 10 s). */
@@ -110,15 +110,111 @@ interface Entry {
 	expires: number;
 }
 
+/** Creator Hub's Demographics cards: DailyActiveUsers over the window, one breakdown per card. */
+export const DEMOGRAPHIC_BREAKDOWNS = ["AgeGroupV2", "Gender", "Locale", "Country", "Platform", "OperatingSystem"] as const;
+export type DemographicBreakdown = (typeof DEMOGRAPHIC_BREAKDOWNS)[number];
+/** Series asked per card (Roblox ranks them by value): every country the map could show. */
+const DEMOGRAPHIC_LIMIT: Record<DemographicBreakdown, number> = { AgeGroupV2: 20, Gender: 10, Locale: 50, Country: 250, Platform: 20, OperatingSystem: 20 };
+
+export interface RobloxDemographicRow {
+	/** The value as Roblox sent it (what a filter would use). */
+	value: string;
+	/** Roblox's display name, or the value. */
+	label: string;
+	/** Daily active users over the window, as Roblox counts them at one bucket for the whole window. */
+	users: number;
+	/** Of the card's total. */
+	share: number;
+}
+
+/** The filter bar's range and the filters Roblox can take. */
+export interface RobloxFilterInput {
+	from: number;
+	to: number;
+	dev?: string[];
+	players?: "new" | "returning";
+}
+
+/** The UTC days Roblox is asked for. */
+export interface RobloxWindow {
+	from: string;
+	to: string;
+	days: number;
+	/** Why it differs from the range asked, if it does. */
+	note?: string;
+}
+
+interface RobloxFilters {
+	filter: { dimension: string; operation: "In"; values: string[] }[];
+	applied: { filter: "device" | "players"; dimension: "Platform" | "IsNewUser"; values: string[] }[];
+	notApplied: { filter: "device" | "players"; reason: string }[];
+}
+
+/** Days asked at most (Roblox keeps about four years; this keeps a query quick). */
+export const ROBLOX_MAX_DAYS = 400;
+
+/**
+ * The full UTC days inside [from, to) that are over (Roblox's numbers are daily; today has none yet). A range without
+ * one (the last hour, today) becomes the last full day it touches; a longer one than ROBLOX_MAX_DAYS keeps its end.
+ */
+export function robloxWindow(from: number, to: number, now: number): RobloxWindow {
+	const today = Math.floor(now / DAY_MS) * DAY_MS;
+	let end = Math.min(Math.floor(to / DAY_MS) * DAY_MS, today);
+	let start = Math.ceil(from / DAY_MS) * DAY_MS;
+	let note: string | undefined;
+	if (start >= end) {
+		end = Math.min(Math.ceil(to / DAY_MS) * DAY_MS, today);
+		start = end - DAY_MS;
+		note = "Roblox's numbers are daily and the range has no full UTC day that is over: the last full day instead";
+	} else if (end < Math.ceil(to / DAY_MS) * DAY_MS) {
+		note = "Roblox's numbers are daily: only the range's full UTC days that are over";
+	}
+	if (end - start > ROBLOX_MAX_DAYS * DAY_MS) {
+		start = end - ROBLOX_MAX_DAYS * DAY_MS;
+		note = `at most the last ${ROBLOX_MAX_DAYS} days`;
+	}
+	return { from: new Date(start).toISOString(), to: new Date(end).toISOString(), days: Math.round((end - start) / DAY_MS), ...(note ? { note } : {}) };
+}
+
+/** Our device names against Roblox's Platform values (undocumented: matched on the value or its display name). */
+const DEVICE_WORDS: Record<string, RegExp> = {
+	desktop: /desktop|computer|\bpc\b/i,
+	phone: /phone/i,
+	tablet: /tablet/i,
+	console: /console|xbox|playstation/i,
+	vr: /\bvr\b|virtual/i,
+};
+function deviceMatches(device: string, k: { value: string; label: string }): boolean {
+	const re = DEVICE_WORDS[device];
+	return Boolean(re && (re.test(k.value) || re.test(k.label)));
+}
+const NEW_USER = /^(true|new|new ?users?|1|yes)$/i;
+const RETURNING_USER = /^(false|returning|returning ?users?|0|no)$/i;
+
+export interface RobloxDemographicsResult {
+	window: RobloxWindow;
+	metric: "DailyActiveUsers";
+	/** The filter bar's filters sent to Roblox, as Roblox's dimension values. */
+	applied: RobloxFilters["applied"];
+	/** Filters Roblox can take that matched nothing (the page lists the ones Roblox can't take at all itself). */
+	notApplied: RobloxFilters["notApplied"];
+	/** Per breakdown, most users first; a card Roblox refused carries `error` instead. */
+	breakdowns: Record<DemographicBreakdown, { rows: RobloxDemographicRow[]; total: number } | { error: string }>;
+	fetchedAt: string;
+}
+
 export class RobloxAnalytics {
 	private readonly cache = new Map<string, Entry>();
+	private readonly demographicsCache = new Map<string, { value: RobloxDemographicsResult; expires: number }>();
+	private readonly demographicsInFlight = new Map<string, Promise<RobloxDemographicsResult & { cached: boolean }>>();
+	private readonly valuesCache = new Map<string, { values: { value: string; label: string }[]; expires: number }>();
 	private readonly inFlight = new Map<string, Promise<AcquisitionResult & { cached: boolean }>>();
 	private readonly limiter: RateLimiter;
 	private readonly clock: () => number;
 
 	constructor(private readonly o: RobloxAnalyticsOptions) {
 		this.clock = o.clock ?? Date.now;
-		this.limiter = new RateLimiter(o.perMinute ?? 12, this.clock);
+		this.limiter = new RateLimiter(o.perMinute ?? 20, this.clock);
 	}
 
 	get configured(): boolean {
@@ -155,6 +251,134 @@ export class RobloxAnalytics {
 			.finally(() => this.inFlight.delete(key));
 		this.inFlight.set(key, lookup);
 		return lookup;
+	}
+
+	/**
+	 * Creator Hub's Demographics over the filter bar's range (its full UTC days, see robloxWindow): DailyActiveUsers per
+	 * age group, gender, locale, country, platform and OS (one query each, a single bucket for the window). The device
+	 * and new / returning filters become Roblox's Platform / IsNewUser filters, matched against the values Roblox itself
+	 * reports (they aren't documented); a filter that matches nothing is reported, not guessed. A card Roblox refuses
+	 * carries its error; a refused key fails the whole answer.
+	 */
+	async demographics(input: RobloxFilterInput): Promise<RobloxDemographicsResult & { cached: boolean }> {
+		if (!this.o.apiKey || !this.o.universeId) throw new RobloxAnalyticsError(OFF_MESSAGE, 409);
+		const window = robloxWindow(input.from, input.to, this.clock());
+		const filters = await this.robloxFilters(input, window);
+		const key = JSON.stringify([window.from, window.to, filters.filter]);
+		const hit = this.demographicsCache.get(key);
+		if (hit && hit.expires > this.clock()) return { ...hit.value, cached: true };
+		const pending = this.demographicsInFlight.get(key);
+		if (pending) return pending;
+		if (!this.takeQueries(DEMOGRAPHIC_BREAKDOWNS.length)) {
+			if (hit) return { ...hit.value, cached: true };
+			throw new RobloxAnalyticsError("too many Roblox analytics queries: try again in a minute", 429);
+		}
+		const lookup = this.loadDemographics(window, filters)
+			.then((value) => {
+				this.demographicsCache.set(key, { value, expires: this.clock() + (this.o.ttlMs ?? 3_600_000) });
+				while (this.demographicsCache.size > 16) this.demographicsCache.delete(this.demographicsCache.keys().next().value as string);
+				return { ...value, cached: false };
+			})
+			.catch((error: unknown) => {
+				throw toAnalyticsError(error);
+			})
+			.finally(() => this.demographicsInFlight.delete(key));
+		this.demographicsInFlight.set(key, lookup);
+		return lookup;
+	}
+
+	/** `n` queries from the per-minute budget, or none (false) when they don't all fit. */
+	private takeQueries(n: number): boolean {
+		for (let i = 0; i < n; i++) if (!this.limiter.take("roblox")) return false;
+		return true;
+	}
+
+	/** The values Roblox reports for a dimension (DailyActiveUsers broken down by it), cached a day. */
+	private async dimensionValues(dimension: "Platform" | "IsNewUser", window: RobloxWindow): Promise<{ value: string; label: string }[]> {
+		const hit = this.valuesCache.get(dimension);
+		if (hit && hit.expires > this.clock()) return hit.values;
+		if (!this.takeQueries(1)) {
+			if (hit) return hit.values;
+			throw new RobloxAnalyticsError("too many Roblox analytics queries: try again in a minute", 429);
+		}
+		try {
+			const series = await this.query({ metric: "DailyActiveUsers", granularity: "None", startTime: window.from, endTime: window.to, breakdown: [dimension], limit: 20 });
+			const values = demographicRows(series, dimension).map((r) => ({ value: r.value, label: r.label }));
+			this.valuesCache.set(dimension, { values, expires: this.clock() + DAY_MS });
+			return values;
+		} catch (error) {
+			throw toAnalyticsError(error);
+		}
+	}
+
+	/** The filter bar's device / players as Roblox filters, and what couldn't be applied and why. */
+	private async robloxFilters(input: RobloxFilterInput, window: RobloxWindow): Promise<RobloxFilters> {
+		const filter: RobloxFilters["filter"] = [];
+		const applied: RobloxFilters["applied"] = [];
+		const notApplied: RobloxFilters["notApplied"] = [];
+		if (input.dev?.length) {
+			const known = await this.dimensionValues("Platform", window);
+			const values = known.filter((k) => input.dev?.some((d) => deviceMatches(d, k))).map((k) => k.value);
+			if (values.length) {
+				filter.push({ dimension: "Platform", operation: "In", values });
+				applied.push({ filter: "device", dimension: "Platform", values });
+			} else notApplied.push({ filter: "device", reason: `none of Roblox's platforms (${known.map((k) => k.label).join(", ") || "none reported"}) is ${input.dev.join(" / ")}` });
+		}
+		if (input.players) {
+			const known = await this.dimensionValues("IsNewUser", window);
+			const want = input.players === "new" ? NEW_USER : RETURNING_USER;
+			const values = known.filter((k) => want.test(k.value) || want.test(k.label)).map((k) => k.value);
+			if (values.length) {
+				filter.push({ dimension: "IsNewUser", operation: "In", values });
+				applied.push({ filter: "players", dimension: "IsNewUser", values });
+			} else notApplied.push({ filter: "players", reason: `Roblox's IsNewUser values (${known.map((k) => k.label).join(", ") || "none reported"}) don't say ${input.players}` });
+		}
+		return { filter, applied, notApplied };
+	}
+
+	private query(query: AnalyticsQuery): Promise<AnalyticsSeries[]> {
+		return queryAnalyticsMetric({
+			apiKey: this.o.apiKey as string,
+			universeId: this.o.universeId as number,
+			...(this.o.fetch ? { fetch: this.o.fetch } : {}),
+			timeoutMs: this.o.timeoutMs ?? 10_000,
+			attempts: 2,
+			pollMs: this.o.pollMs ?? 1000,
+			query,
+		});
+	}
+
+	private async loadDemographics(window: RobloxWindow, filters: RobloxFilters): Promise<RobloxDemographicsResult> {
+		const cards = await Promise.all(
+			DEMOGRAPHIC_BREAKDOWNS.map(async (dimension) => {
+				try {
+					const series = await this.query({
+						metric: "DailyActiveUsers",
+						granularity: "None",
+						startTime: window.from,
+						endTime: window.to,
+						breakdown: [dimension],
+						limit: DEMOGRAPHIC_LIMIT[dimension],
+						...(filters.filter.length ? { filter: filters.filter } : {}),
+					});
+					return [dimension, { rows: demographicRows(series, dimension) }] as const;
+				} catch (error) {
+					// The key itself refused: every card would say so; fail the answer once.
+					if (error instanceof OpenCloudError && (error.status === 401 || error.status === 403)) throw error;
+					return [dimension, { error: toAnalyticsError(error).message.slice(0, 300) }] as const;
+				}
+			}),
+		);
+		const breakdowns = {} as RobloxDemographicsResult["breakdowns"];
+		for (const [dimension, card] of cards) {
+			if ("error" in card) {
+				breakdowns[dimension] = { error: card.error };
+				continue;
+			}
+			const total = card.rows.reduce((a, r) => a + r.users, 0);
+			breakdowns[dimension] = { rows: card.rows.map((r) => ({ ...r, share: total > 0 ? round(r.users / total, 6) : 0 })), total };
+		}
+		return { window, metric: "DailyActiveUsers", applied: filters.applied, notApplied: filters.notApplied, breakdowns, fetchedAt: new Date(this.clock()).toISOString() };
 	}
 
 	private async load(days: number, end: number): Promise<AcquisitionResult> {
@@ -209,6 +433,20 @@ export class RobloxAnalytics {
 			fetchedAt: new Date(this.clock()).toISOString(),
 		};
 	}
+}
+
+/** One row per breakdown value: its points summed (a single bucket at granularity None), most users first. */
+function demographicRows(series: AnalyticsSeries[], dimension: string): RobloxDemographicRow[] {
+	const byValue = new Map<string, RobloxDemographicRow>();
+	for (const s of series) {
+		const b = s.breakdowns.find((x) => x.dimension === dimension);
+		if (!b) continue;
+		const users = s.dataPoints.reduce((a, p) => a + (p.value !== null && p.value >= 0 ? p.value : 0), 0);
+		const row = byValue.get(b.value) ?? { value: b.value.slice(0, 80), label: (b.displayValue ?? b.value).slice(0, 80), users: 0, share: 0 };
+		row.users += users;
+		byValue.set(b.value, row);
+	}
+	return [...byValue.values()].filter((r) => r.users > 0).sort((a, b) => b.users - a.users || a.value.localeCompare(b.value));
 }
 
 const dayOf = (time: string) => new Date(Date.parse(time)).toISOString().slice(0, 10);

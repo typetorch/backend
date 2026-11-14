@@ -999,6 +999,7 @@ export interface QueryResults {
 	overview: OverviewResult;
 	roblox: RobloxResult;
 	retention: RetentionResult;
+	demographics: DemographicsResult;
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;
 	"playtime-funnel": PlaytimeFunnelResult;
@@ -2066,6 +2067,44 @@ export interface RobloxAcquisitionSource {
 	impressions: number;
 	qualifiedPlays: number;
 	rate: number | null;
+}
+
+export type DemographicDimension = "country" | "language" | "accountAge" | "premium" | "device";
+
+export interface DemographicRow {
+	/** ISO country code, language code, account-age bucket, "true"/"false", device; null = the join didn't say. */
+	value: string | null;
+	players: number;
+	share: number;
+}
+
+/** The `demographics` query: who plays, from our own join events. */
+export interface DemographicsResult {
+	from: string;
+	to: string;
+	players: number;
+	dimensions: Record<DemographicDimension, DemographicRow[]>;
+}
+
+export type RobloxDemographicBreakdown = "AgeGroupV2" | "Gender" | "Locale" | "Country" | "Platform" | "OperatingSystem";
+
+export interface RobloxDemographicRow {
+	value: string;
+	label: string;
+	users: number;
+	share: number;
+}
+
+/** GET /v1/roblox/demographics: Creator Hub's Demographics cards (DailyActiveUsers per breakdown). */
+export interface RobloxDemographics {
+	source: "roblox";
+	window: { from: string; to: string; days: number; note?: string };
+	metric: "DailyActiveUsers";
+	applied: { filter: "device" | "players"; dimension: "Platform" | "IsNewUser"; values: string[] }[];
+	notApplied: { filter: "device" | "players"; reason: string }[];
+	breakdowns: Record<RobloxDemographicBreakdown, { rows: RobloxDemographicRow[]; total: number } | { error: string }>;
+	fetchedAt: string;
+	cached: boolean;
 }
 
 export interface RobloxAcquisition {

@@ -94,7 +94,7 @@ import type { MonetizationPlayersResult, MonetizationPurchasesResult } from "../
 import type { FeedbackListResult } from "../queries/feedback.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
-import { rollupDays } from "../sql/filters.ts";
+import { normalizeFilters, rollupDays } from "../sql/filters.ts";
 import { dataLayout, dayFiles, pathLit } from "../duckdb/layout.ts";
 import { DataFolderLocked } from "../duckdb/lock.ts";
 import { openSqlite } from "../fleet/db.ts";
@@ -129,7 +129,7 @@ import { meterSqlite, parseStatsWindow, ServerMetrics, STATS_WINDOWS } from "./m
 import { INTENTS_BODY_MAX, NotifyService, SMALL_BODY_MAX, parseOptinCursor, type OptinUser, type Reply } from "../notify/routes.ts";
 import { OPTIN_STATES, type OptinCursor, type OptinState } from "../notify/store.ts";
 import { CONFIG_BODY_MAX } from "../notify/config.ts";
-import type { EventRow } from "../schema.ts";
+import type { Device, EventRow } from "../schema.ts";
 import { DOCS_CSP, SWAGGER_INIT, llmsTxt, openApiSpec, swaggerPage } from "./openapi.ts";
 import { OAuthError, RobloxOAuth } from "./roblox-oauth.ts";
 import { CentralLogin } from "./central-login.ts";
@@ -1220,6 +1220,44 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!analyticsLimiter.take(ip)) return tooMany(analyticsLimiter.retryAfter(ip));
 		try {
 			return json(200, { source: "roblox", ...(await robloxAnalytics.acquisition(days)) });
+		} catch (error) {
+			if (error instanceof RobloxAnalyticsError) return error.status === 429 ? tooMany(60) : json(error.status, { error: error.message });
+			return json(502, { error: "Roblox analytics failed" });
+		}
+	}
+
+	/**
+	 * GET /v1/roblox/demographics?from&to&dev&players: Creator Hub's Demographics cards from Roblox
+	 * (server/roblox-analytics.ts) over the filter bar's range (its full UTC days, default the last 28), with its device and
+	 * new / returning filters as Roblox's Platform / IsNewUser. The other filters have no Roblox equivalent.
+	 */
+	async function robloxDemographics(url: URL, ip: string): Promise<Response> {
+		const allowed = new Set(["from", "to", "dev", "players"]);
+		for (const key of url.searchParams.keys()) {
+			if (!allowed.has(key)) return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
+			if (url.searchParams.getAll(key).length > 1) return json(400, { error: `one ${key}` });
+		}
+		let input: { from: number; to: number; dev?: string[]; players?: "new" | "returning" };
+		try {
+			const p = (k: string) => url.searchParams.get(k) ?? undefined;
+			const raw = (k: string) => {
+				const v = p(k);
+				return v !== undefined && /^\d{12,14}$/.test(v) ? Number(v) : v;
+			};
+			const dev = p("dev")?.split(",").filter(Boolean);
+			const players = p("players");
+			const f = normalizeFilters(
+				{ ...(raw("from") !== undefined ? { from: raw("from") as string | number } : {}), ...(raw("to") !== undefined ? { to: raw("to") as string | number } : {}), ...(dev?.length ? { dev: dev as Device[] } : {}), ...(players ? { players: players as "new" | "returning" } : {}) },
+				{ now: clock(), defaultDays: 28 },
+			);
+			input = { from: f.from, to: f.to, ...(f.dev?.length ? { dev: f.dev } : {}), ...(f.players ? { players: f.players } : {}) };
+		} catch (error) {
+			return json(400, { error: String((error as Error).message).slice(0, 200) });
+		}
+		if (!robloxAnalytics.configured) return json(409, { error: ANALYTICS_OFF });
+		if (!analyticsLimiter.take(ip)) return tooMany(analyticsLimiter.retryAfter(ip));
+		try {
+			return json(200, { source: "roblox", ...(await robloxAnalytics.demographics(input)) });
 		} catch (error) {
 			if (error instanceof RobloxAnalyticsError) return error.status === 429 ? tooMany(60) : json(error.status, { error: error.message });
 			return json(502, { error: "Roblox analytics failed" });
@@ -2608,6 +2646,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/analytics/acquisition") return method === "GET" ? acquisition(url, ip) : json(405, { error: "GET only" });
+			if (path === "/v1/roblox/demographics") return method === "GET" ? robloxDemographics(url, ip) : json(405, { error: "GET only" });
 			const logs = /^\/v1\/roblox\/servers\/([^/]+)\/logs$/.exec(path);
 			if (logs) return method === "GET" ? serverLogs(logs[1] as string, url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
