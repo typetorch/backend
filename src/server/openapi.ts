@@ -329,6 +329,17 @@ const ROUTES: Route[] = [
 		summary: "The players in one experiment",
 		params: [p("key", "the experiment"), q("variant", "one variant"), q("limit", "at most 200", int()), q("from", TIME), q("to", TIME), q("window", "e.g. 7d")],
 	},
+	{
+		method: "post",
+		path: "/v1/experiments/{key}/change",
+		tag: "analytics",
+		roles: ["admin"],
+		summary: "Prepare an experiment change: the signed CLI command that applies it",
+		description:
+			"`{ action: start | stop | split | settle | clear, weights?, variant?, variants? }` -> `{ command, dryRun, effect, notes }`. Audited. Applies nothing: the split lives in the game's signed settings, which only the owners' keys sign (`typetorch experiment ...`).",
+		params: [p("key", "the experiment")],
+		body: obj(),
+	},
 	{ method: "get", path: "/v1/storage", tag: "analytics", roles: ["admin"], summary: "What the data folder holds" },
 	{ method: "get", path: "/v1/settings", tag: "analytics", roles: ["admin"], summary: "Live dials from data/settings.json" },
 

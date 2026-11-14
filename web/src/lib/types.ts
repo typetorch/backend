@@ -270,6 +270,43 @@ export interface Comparison {
 	sure: number;
 	method: string;
 	words: string;
+	/** The test's own p-value, and Holm-corrected over the variants (what `sure` and `words` use). Older servers: absent. */
+	pValue?: number;
+	pAdjusted?: number;
+	/** Smallest difference these group sizes find 80% of the time (absolute, the metric's unit); Infinity serializes as null. */
+	mde?: number | null;
+	mdeLift?: number | null;
+	needed?: { control: number; variant: number } | null;
+	/** Days more at the range's traffic until it can tell (0: it can now); null when it can't be told. */
+	days?: number | null;
+}
+
+/** The sample ratio check of one experiment (the `experiment` query, player scope). */
+export interface AssignmentCheck {
+	variants: { variant: string; index: number | null; players: number }[];
+	order: "game" | "names";
+	variantCount: number | null;
+	weights: number[] | null;
+	weightsFrom: "settings" | "even" | null;
+	srm: { expected: number[]; chi2: number | null; df: number; pValue: number; enough: boolean; mismatch: boolean } | null;
+	note?: string;
+}
+
+/** POST /v1/experiments/<key>/change: the signed CLI command that applies the change (nothing is applied by the server). */
+export interface ExperimentChangeRequest {
+	action: "start" | "stop" | "split" | "settle" | "clear";
+	weights?: number[];
+	variant?: string;
+	variants?: string[];
+}
+
+export interface PreparedExperimentChange {
+	experiment: string;
+	action: ExperimentChangeRequest["action"];
+	command: string;
+	dryRun: string;
+	effect: string;
+	notes: string[];
 }
 
 export type ExperimentResult =
@@ -281,6 +318,10 @@ export type ExperimentResult =
 			variants: VariantStats[];
 			comparisons: Comparison[];
 			mixedPlayers: number;
+			/** Players the settings forced (left out of the numbers). Older servers: absent. */
+			forcedPlayers?: number;
+			assignment?: AssignmentCheck | null;
+			rangeDays?: number;
 	  };
 
 /** One experiment's override, as the server's settings file has it (GET /v1/experiments). */

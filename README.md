@@ -612,6 +612,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/saved-queries`, `GET /v1/saved-queries/<id>` | admin, web | the Query page's saved queries (see [Saved queries](#saved-queries)) |
 | `POST /v1/saved-queries`, `PATCH /v1/saved-queries/<id>`, `DELETE /v1/saved-queries/<id>` | admin | save, change (name, SQL, chart, pinned), delete one |
 | `GET /v1/experiments/<key>/players` | admin, web | the players in one experiment: variant, random or forced, assigned / first / last seen |
+| `POST /v1/experiments/<key>/change` | admin | prepare a start / stop / split / settle / clear: checked, audited (`experiment.prepare`), answered with the signed `typetorch experiment ...` command and its `--dry-run`; applies nothing (the signing keys never reach this server) |
 | `GET /v1/experiments` | admin, web | the experiment overrides from `data/settings.json` (`active`, `weights`, `variant` per experiment; nothing else from the file): `{ source: "settings-file" \| "none" \| "unreadable", experiments }` |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
 | `GET /v1/roblox/products` | admin, web | game pass and developer product names, Robux prices and icons for the explorer's product tooltips, looked up by the server |
@@ -747,7 +748,9 @@ URL only as `set` / `not set`; lists such as viewers and the allow list as added
 guards), test alerts, the owner list (`access.owners`: seq, added, removed) and the signing keys, trusted browsers
 (`device.trust`, `device.revoke`), alert acks (`alert.ack`), erasure (`erasure`: counts only, never a pid or a UserId; the
 Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), remote debug watches and
-commands, the CLI's release starts and marks (`deploy.start`, `deploy.mark`, by the API key), and any other write by a
+commands, the CLI's release starts and marks (`deploy.start`, `deploy.mark`, by the API key), experiment changes prepared
+on the Experiments page (`experiment.prepare`: the experiment, the change and the CLI command; a refused body as
+`failed`), and any other write by a
 signed-in caller under `<METHOD> <route>` (a write the web role tried is recorded as `refused`).
 
 Each entry has the time, the actor (`admin token`, `roblox user <id> (<name>)`, `typetorch.dev user <id> (<name>)`,
@@ -953,6 +956,46 @@ this server's `data/settings.json` copy (`GET /v1/experiments`); without an over
 (an even split over the variants its rows declare) applies, and says so when it doesn't know the variants. The live
 record is the game's signed settings in its DataStore, which this server does not read.
 
+#### Results you can trust
+
+Per player, the results of one experiment (the `experiment` query) now:
+
+- **Leave forced players out.** A player with an `experiment` row marked `forced` in the range (settled for everyone, or
+  forced for them with `typetorch experiment force` or the in-game dev panel) didn't get a random variant, so they are
+  not in the numbers; `forcedPlayers` counts them.
+- **Check the split (sample ratio mismatch).** The random assignments per variant (the `experiment` rows, forced players
+  out) against the intended split: the override's weights (the page passes them as the `weights` option when this
+  server knows them) or an even split over the variants the game declares. A chi-square goodness-of-fit test; below
+  p = 0.001 (with at least 5 players expected per variant) the page shows a loud "don't trust these numbers" warning: a
+  variant that crashes or loses its events, a bug in when the game asks, bots, or a split changed inside the range.
+  Uneven weights are in the game's variant order: rows from framework 0.7.1+ carry each variant's position (`vi`), so
+  the check knows it; for older rows only an even split is checked. A variant nobody got counts as 0.
+- **Correct for more than two variants.** Each variant is compared with the control; with several, `sure` and the plain
+  words use Holm-corrected p-values per metric (`pAdjusted`; the test's own is `pValue`), so three variants don't get
+  three chances at a lucky "95% sure".
+- **Say what the traffic can find.** Per comparison: `mde` / `mdeLift`, the smallest true difference these group sizes
+  find 80% of the time at 5% (Bonferroni over the variants); `needed`, the players per group for the observed
+  difference; and `days`, how long at the range's traffic until it is sure (0 = now, null = no difference to find).
+
+#### Running an experiment from the page (owners)
+
+Owners get a **Run it** panel under the results: Start (resume), Stop, Clear override, Change split (one weight per
+variant, in the game's order when the rows carry it) and Settle (everyone gets one variant). The split lives in the
+game's **signed** settings record (plans/20): servers only apply a record the game's two prod keys signed, and those
+keys stay on the owners' machines. This server never holds them and never writes settings, so it cannot apply the
+change itself. Instead `POST /v1/experiments/<key>/change` (owners; `{ action: start | stop | split | settle | clear,
+weights?, variant?, variants? }`) checks the change, records it in the audit log (`experiment.prepare`, with the
+command), and answers the exact CLI command that applies it, plus its `--dry-run` twin:
+
+```sh
+typetorch experiment weights onboarding 3,1 --variants short,long   # run in the game's folder (CLI 0.9+)
+```
+
+The CLI reads the record, verifies it with your keys, changes the one experiment, signs it with both keys, writes it
+and pings servers, which apply it within seconds (no deploy). Names and variants are shell-quoted; a variant can't start
+with `-`; `--variants` (the CLI's count and name check) is left out when a name holds a comma. Viewers see no controls,
+and the route answers them 403.
+
 The **Funnels** page does it for funnel steps: a step (click, or Enter / Space) of a logged funnel or of the built-in
 playtime funnels, in one funnel or either side of the compare view, opens a side sheet
 (`?stepFunnel=<funnel>&step=<step>&stepMode=dropped`, under the page's range and filters) with the players who reached it
@@ -1105,7 +1148,7 @@ Props the queries read (SCHEMA.md "Event catalog"; each can be overridden by a q
 | `funnel` (`name` = funnel id; `step(funnel, index, name?)`) | `i` (the index), `step` (the name) |
 | `purchase` (`name` = kind, default `product`) | `robux`, `product` |
 | `currency` (`name` = currency) | `delta` |
-| `experiment` (`name` = experiment) | `variant` |
+| `experiment` (`name` = experiment) | `variant`, `variants` (how many the game declares), `vi` (the variant's 1-based position in the game's list; framework 0.7.1+), `forced` (true when the settings or a dev override chose it) |
 | `fleet` `heartbeat` (no pid; `job` = JobId) | the kernel's fleet status: `t` server type, `b` `c` `a` `n` `m`, `s` `u` (unix s), `p`, `pv` (place version), `x` (1 = A/B pin), `v`, `q`, `g`, `h`, `e`, `sv`. `k` is never read |
 | `fleet` `deploy_report` | `s` `b` `a` `j` `r` `e` `d` `t` `g` `k` `p` |
 
@@ -1173,7 +1216,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `player-graph` | one player's node graph (all sessions, or one with `sid`): states as nodes with what happened in them, moves as edges with counts and time | 90 days |
 | `player-stats` | one player (by `pid`, or `uid`): Robux, purchases, sessions and playtime per UTC day (for a range up to a day per hour, up to 6 hours per 5 minutes, up to an hour per minute: `window.bucket`; dense, sessions count where they start), totals (avg / median session, playtime per day, active days, first / last seen), each session (`sessions`, default 1,000, at most 5,000) and each purchase (`purchases`, default 500, at most 2,000), newest first, with `...Truncated` flags. The range is cut to its last 400 days (`window.clamped`). Server-sent purchases only, like the revenue queries | 30 days |
 | `flow` | the merged flow graph for a filter (where most go next, where they quit) | 7 days |
-| `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means); per player (`exp`), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
+| `experiment` | per-variant numbers and "how sure" (two-proportion test; bootstrap or Welch for means; Holm-corrected over several variants), the minimum detectable effect and days to significance per comparison; per player (`exp`, forced players left out, with the sample ratio check `assignment` against `weights` or an even split), or per server (`sexp`: each pinned artifact vs `(unpinned)` servers) | 30 days |
 | `experiment-players` | the players in one `experiment` (at most 200, `limit`; one `variant` or all): per player and variant, `how` (`random`, `forced` from the row's `forced` prop, or `unknown` when the window holds only `exp` stamps), `assignedAt`, `firstAt` / `lastAt`, `events`, `mixed` (seen in two variants); `variants` (players and forced per variant), `total`, `more`. Most recently seen first. Over HTTP as `GET /v1/experiments/<key>/players?variant=&limit=&from=&to=` (or `window=7d`; the filters as repeatable params, the filter bar's variant filter as `inExperiment` + `inVariant`), with `uid` / `name` / `displayName` joined in and erased players left out | 30 days |
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
 | `top-events` | the most logged names per kind | 7 days |

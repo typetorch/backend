@@ -3,8 +3,21 @@
  * control variant and said in plain words ("B keeps more players: 95% sure").
  */
 import { PROP_KEYS } from "../schema.ts";
-import { assertSafeKey, lit } from "../sql/dialect.ts";
-import { bootstrapMeans, twoProportion, verdict, welch, type TestResult } from "../stats.ts";
+import { assertSafeKey, DAY_MS, lit } from "../sql/dialect.ts";
+import {
+	ALPHA,
+	bootstrapMeans,
+	daysToReach,
+	holm,
+	minimumDetectableEffect,
+	neededPlayers,
+	sampleRatio,
+	twoProportion,
+	verdict,
+	welch,
+	type SampleRatioCheck,
+	type TestResult,
+} from "../stats.ts";
 import { dayOf, defineQuery, eventsTable, intOption, iso, num, playerRows, ratio, round, SERVER_PURCHASE, str, where } from "./core.ts";
 
 /** The group of servers that run no experiment pin (`sexp` = ""). */
@@ -27,7 +40,15 @@ export interface ExperimentOptions {
 	maxValues: number;
 	robuxKey: string;
 	variantKey: string;
+	/**
+	 * The intended split (relative weights in the game's variant order, as the settings' `weights`) for the sample ratio
+	 * check; without it, the game's even split.
+	 */
+	weights?: number[];
 }
+
+/** The most variants the framework allows (isVariantList). */
+const VARIANTS_MAX = 16;
 
 export interface VariantStats {
 	variant: string;
@@ -51,6 +72,48 @@ export interface Comparison {
 	method: TestResult["method"];
 	/** The plain sentence, e.g. "B keeps more players: 95% sure". */
 	words: string;
+	/** The test's own two-sided p-value. */
+	pValue: number;
+	/**
+	 * Holm-corrected over the variants compared with the control for this metric (= pValue with one variant). `sure`
+	 * and `words` use it, so three variants don't get three chances at a lucky "95% sure".
+	 */
+	pAdjusted: number;
+	/**
+	 * The smallest true difference (absolute, in the metric's unit) these group sizes find 80% of the time at 5%
+	 * (Bonferroni over the variants); Infinity without players.
+	 */
+	mde: number;
+	/** mde relative to the control's value; null when the control's value is 0. */
+	mdeLift: number | null;
+	/** Players each group needs for the observed difference to be found 80% of the time; null without a difference. */
+	needed: { control: number; variant: number } | null;
+	/**
+	 * Days more at the range's traffic until both groups have `needed` (0: they have), or null when it can't be told
+	 * (no difference, no traffic).
+	 */
+	days: number | null;
+}
+
+/** The assignment check of one experiment: the players each variant got against the split it should have. */
+export interface AssignmentCheck {
+	/**
+	 * Players assigned at random per variant (from the `experiment` rows in the range; forced players left out), with
+	 * the variant's position in the game's list (`vi` on the rows, framework 0.7.1+) when known. A variant the game
+	 * declares but nobody got is listed with 0 players.
+	 */
+	variants: { variant: string; index: number | null; players: number }[];
+	/** "game": in the game's variant order (every row carried `vi`); "names": by name (older frameworks). */
+	order: "game" | "names";
+	/** The number of variants the game declares (the rows' `variants`), when known. */
+	variantCount: number | null;
+	/** The split checked against: the given weights or an even split; null when there is nothing to check. */
+	weights: number[] | null;
+	weightsFrom: "settings" | "even" | null;
+	/** The chi-square check; null when it can't be run (see `note`). */
+	srm: SampleRatioCheck | null;
+	/** Why the check didn't run, or what to keep in mind. */
+	note?: string;
 }
 
 export type ExperimentResult =
@@ -70,6 +133,12 @@ export type ExperimentResult =
 			comparisons: Comparison[];
 			/** Players seen in more than one variant (left out of the numbers). */
 			mixedPlayers: number;
+			/** Players the settings forced into a variant (for everyone, or for them): left out of the numbers. Player scope. */
+			forcedPlayers: number;
+			/** The sample ratio check (player scope; null for servers). */
+			assignment: AssignmentCheck | null;
+			/** Days in the range (for the traffic behind `days`). */
+			rangeDays: number;
 	  };
 
 export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
@@ -87,6 +156,20 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 		};
 		if (input.experiment) out.experiment = assertSafeKey(input.experiment, "experiment");
 		if (input.control) out.control = String(input.control).slice(0, 128);
+		const given: unknown = input.weights;
+		if (given !== undefined && given !== null && given !== "") {
+			const raw = typeof given === "string" ? given.split(",").map((w) => Number(w)) : given;
+			if (
+				!Array.isArray(raw) ||
+				raw.length < 1 ||
+				raw.length > VARIANTS_MAX ||
+				raw.some((w) => typeof w !== "number" || !Number.isFinite(w) || w < 0) ||
+				!raw.some((w) => (w as number) > 0)
+			) {
+				throw new Error(`weights must be 1-${VARIANTS_MAX} numbers >= 0, at least one above 0`);
+			}
+			out.weights = raw as number[];
+		}
 		return out;
 	},
 	statements(ctx, f, o) {
@@ -104,10 +187,20 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 		const variantExpr =
 			o.scope === "server" ? `CASE WHEN e.sexp IS NULL OR e.sexp = '' THEN ${lit(SERVER_CONTROL)} ELSE e.sexp END` : d.jsonText("e.exp", o.experiment as string);
 		const serverPrefix = o.scope === "server" && o.experiment ? ` AND (e.sexp IS NULL OR e.sexp = '' OR e.sexp = ${lit(o.experiment)})` : "";
+		const player = o.scope === "player";
+		// Player scope: players the settings forced (an `experiment` row with forced = true in the range) are not a random
+		// sample of anything, so they are left out of the comparison and of the assignment check.
+		const isAssign = player ? `e.kind = 'experiment' AND e.name = ${lit(o.experiment as string)}` : "";
+		const forced = player
+			? `fp AS (SELECT DISTINCT e.pid AS pid FROM ${table} e WHERE ${where(f, ctx)} AND ${isAssign} AND ${d.jsonText("e.props", "forced")} = 'true'), `
+			: "";
 		const base =
+			forced +
 			`ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.kind AS kind, e.props AS props, e.src AS esrc, ${variantExpr} AS variant FROM ${table} e WHERE ${playerRows(f, ctx)}${serverPrefix}), ` +
 			`pe AS (SELECT pid, sid, t, kind, props, esrc, variant FROM ev WHERE variant IS NOT NULL AND variant <> ''), ` +
-			`pv AS (SELECT pid, MIN(variant) AS variant, COUNT(DISTINCT variant) AS nvar FROM pe GROUP BY pid), ` +
+			(player
+				? `pv AS (SELECT pe.pid AS pid, MIN(pe.variant) AS variant, COUNT(DISTINCT pe.variant) AS nvar FROM pe LEFT JOIN fp ON fp.pid = pe.pid WHERE fp.pid IS NULL GROUP BY pe.pid), `
+				: `pv AS (SELECT pid, MIN(variant) AS variant, COUNT(DISTINCT variant) AS nvar FROM pe GROUP BY pid), `) +
 			`s AS (SELECT sid, MIN(pid) AS pid, MAX(t) - MIN(t) AS len FROM pe GROUP BY sid), ` +
 			`sp AS (SELECT pid, SUM(len) AS playtime, COUNT(*) AS sessions FROM s GROUP BY pid), ` +
 			`dp AS (SELECT pid, COUNT(DISTINCT day) AS days FROM (SELECT pid, ${dayOf("t")} AS day FROM pe) dd GROUP BY pid), ` +
@@ -122,10 +215,19 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 				`AVG(sessions) AS sessions_mean, VAR_SAMP(sessions) AS sessions_var FROM pp GROUP BY variant ORDER BY variant ${lim(1000)}`,
 			mixed: `WITH ${base} SELECT COUNT(*) AS mixed FROM pv WHERE nvar > 1 ${lim(1)}`,
 		};
+		if (player) {
+			statements.forced = `WITH ${forced.slice(0, -2)} SELECT COUNT(*) AS forced FROM fp ${lim(1)}`;
+			// Random assignments per variant: the `experiment` rows (one per session that got the variant), forced players out.
+			statements.assign =
+				`WITH ${forced}x AS (SELECT e.pid AS pid, ${d.jsonText("e.props", o.variantKey)} AS variant, ${d.jsonNumber("e.props", "vi")} AS vi, ` +
+				`${d.jsonNumber("e.props", "variants")} AS nvar FROM ${table} e WHERE ${where(f, ctx)} AND ${isAssign} AND e.pid IS NOT NULL AND e.pid <> '') ` +
+				`SELECT x.variant AS variant, MIN(x.vi) AS vi, MAX(x.vi) AS vimax, COUNT(*) AS nrows, COUNT(x.vi) AS nvi, MAX(x.nvar) AS nvar, COUNT(DISTINCT x.pid) AS players ` +
+				`FROM x LEFT JOIN fp ON fp.pid = x.pid WHERE fp.pid IS NULL AND x.variant IS NOT NULL AND x.variant <> '' GROUP BY x.variant ORDER BY x.variant ${lim(1000)}`;
+		}
 		if (o.maxValues > 0) statements.values = `WITH ${base} SELECT variant, playtime, robux, sessions FROM pp ${lim(o.maxValues)}`;
 		return statements;
 	},
-	shape(rows, _ctx, _f, o) {
+	shape(rows, _ctx, f, o) {
 		if (rows.list) {
 			return { experiment: null, experiments: rows.list.map((r) => ({
 					experiment: str(r.experiment),
@@ -135,6 +237,7 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 					variantCount: r.nvar === null || r.nvar === undefined ? null : num(r.nvar),
 				})) };
 		}
+		const rangeDays = Math.max(0, (f.to - f.from) / DAY_MS);
 		const variants = rows.variants.map((r) => ({
 			row: r,
 			stats: {
@@ -157,45 +260,67 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 		const comparisons: Comparison[] = [];
 		const base = variants.find((v) => v.stats.variant === control);
 		if (base) {
-			for (const v of variants) {
-				if (v.stats.variant === control) continue;
-				const minPlayers = Math.min(base.stats.players, v.stats.players);
-				const add = (metric: Comparison["metric"], test: TestResult) =>
-					comparisons.push({
-						variant: v.stats.variant,
-						metric,
-						control: round(test.a, 4),
-						value: round(test.b, 4),
-						diff: round(test.diff, 4),
-						lift: test.lift === null ? null : round(test.lift, 4),
-						sure: round(test.sure, 4),
-						method: test.method,
-						words: verdict(v.stats.variant, metric, test, minPlayers),
-					});
-				add("returned", twoProportion(base.stats.returned.count, base.stats.players, v.stats.returned.count, v.stats.players));
-				add("payers", twoProportion(base.stats.payers.count, base.stats.players, v.stats.payers.count, v.stats.players));
+			const others = variants.filter((v) => v.stats.variant !== control);
+			// Planning (MDE, players needed) at a Bonferroni alpha: the conservative side of the Holm correction below.
+			const alpha = ALPHA / Math.max(1, others.length);
+			const tests: { v: (typeof variants)[number]; metric: Comparison["metric"]; test: TestResult; varA: number; varB: number }[] = [];
+			for (const v of others) {
+				const proportion = (metric: "returned" | "payers") => {
+					const a = base.stats[metric];
+					const b = v.stats[metric];
+					tests.push({ v, metric, test: twoProportion(a.count, base.stats.players, b.count, v.stats.players), varA: a.rate * (1 - a.rate), varB: b.rate * (1 - b.rate) });
+				};
+				proportion("returned");
+				proportion("payers");
 				for (const [metric, key, scale] of [
 					["playtime", "playtime", 60_000],
 					["robux", "robux", 1],
 					["sessions", "sessions", 1],
 				] as const) {
-					let test: TestResult;
-					if (values) {
-						test = bootstrapMeans(valuesOf(control as string, key).map((x) => x / scale), valuesOf(v.stats.variant, key).map((x) => x / scale));
-					} else {
-						const a = base.row;
-						const b = v.row;
-						test = welch(
-							num(a[`${key}_mean`]) / scale,
-							num(a[`${key}_var`]) / (scale * scale),
-							base.stats.players,
-							num(b[`${key}_mean`]) / scale,
-							num(b[`${key}_var`]) / (scale * scale),
-							v.stats.players,
-						);
-					}
-					add(metric, test);
+					const a = base.row;
+					const b = v.row;
+					const varA = num(a[`${key}_var`]) / (scale * scale);
+					const varB = num(b[`${key}_var`]) / (scale * scale);
+					const test = values
+						? bootstrapMeans(valuesOf(control as string, key).map((x) => x / scale), valuesOf(v.stats.variant, key).map((x) => x / scale))
+						: welch(num(a[`${key}_mean`]) / scale, varA, base.stats.players, num(b[`${key}_mean`]) / scale, varB, v.stats.players);
+					tests.push({ v, metric, test, varA, varB });
 				}
+			}
+			// Holm over the variants, per metric.
+			const adjusted = new Map<(typeof tests)[number], number>();
+			for (const metric of new Set(tests.map((t) => t.metric))) {
+				const family = tests.filter((t) => t.metric === metric);
+				holm(family.map((t) => t.test.pValue)).forEach((p, i) => adjusted.set(family[i], p));
+			}
+			for (const t of tests) {
+				const { v, metric, test } = t;
+				const pAdjusted = adjusted.get(t) ?? test.pValue;
+				const shown: TestResult = { ...test, pValue: pAdjusted, sure: 1 - pAdjusted };
+				const nA = base.stats.players;
+				const nB = v.stats.players;
+				const mde = minimumDetectableEffect(t.varA, nA, t.varA, nB, alpha);
+				const needed = neededPlayers(t.varA, t.varB, test.diff, nA > 0 ? nB / nA : 1, alpha);
+				comparisons.push({
+					variant: v.stats.variant,
+					metric,
+					control: round(test.a, 4),
+					value: round(test.b, 4),
+					diff: round(test.diff, 4),
+					lift: test.lift === null ? null : round(test.lift, 4),
+					sure: round(shown.sure, 4),
+					method: test.method,
+					words: verdict(v.stats.variant, metric, shown, Math.min(nA, nB)),
+					pValue: round(test.pValue, 6),
+					pAdjusted: round(pAdjusted, 6),
+					mde: Number.isFinite(mde) ? round(mde, 4) : Infinity,
+					mdeLift: test.a === 0 || !Number.isFinite(mde) ? null : round(mde / Math.abs(test.a), 4),
+					needed: needed ? { control: needed.a, variant: needed.b } : null,
+					days: pAdjusted < ALPHA ? 0 : (() => {
+						const days = daysToReach(needed, { a: nA, b: nB }, rangeDays);
+						return days === null ? null : round(days, 1);
+					})(),
+				});
 			}
 		}
 		return {
@@ -205,9 +330,76 @@ export const experiment = defineQuery<ExperimentOptions, ExperimentResult>({
 			variants: variants.map((v) => v.stats),
 			comparisons,
 			mixedPlayers: num(rows.mixed[0]?.mixed),
+			forcedPlayers: rows.forced ? num(rows.forced[0]?.forced) : 0,
+			assignment: rows.assign ? assignmentCheck(rows.assign, o.weights) : null,
+			rangeDays: round(rangeDays, 2),
 		};
 	},
 });
+
+/**
+ * The sample ratio check from the `assign` rows (per variant: players, the variant's `vi` and the declared count). The
+ * game's order is known when every row carried `vi` and each variant had one position; else the variants are listed by
+ * name and only an even split can be checked (uneven weights are in the game's order, which isn't known then).
+ */
+export function assignmentCheck(rows: Record<string, unknown>[], weights: number[] | undefined): AssignmentCheck {
+	const seen = rows.map((r) => ({
+		variant: str(r.variant),
+		vi: r.vi === null || r.vi === undefined ? null : num(r.vi),
+		vimax: r.vimax === null || r.vimax === undefined ? null : num(r.vimax),
+		withIndex: num(r.nvi) === num(r.nrows),
+		players: num(r.players),
+		nvar: r.nvar === null || r.nvar === undefined ? null : num(r.nvar),
+	}));
+	const declared = seen.reduce<number | null>((m, r) => (r.nvar === null ? m : Math.max(m ?? 0, r.nvar)), null);
+	const count = Math.max(declared ?? 0, seen.length);
+	const indices = seen.map((r) => r.vi);
+	const gameOrder =
+		seen.length > 0 &&
+		seen.every((r) => r.withIndex && r.vi !== null && r.vi === r.vimax && r.vi >= 1 && r.vi <= count && r.vi % 1 === 0) &&
+		new Set(indices).size === seen.length;
+	let list: AssignmentCheck["variants"];
+	if (gameOrder) {
+		list = Array.from({ length: count }, (_, i) => {
+			const found = seen.find((r) => r.vi === i + 1);
+			return { variant: found ? found.variant : `(variant ${i + 1})`, index: i + 1, players: found ? found.players : 0 };
+		});
+	} else {
+		list = seen.map((r) => ({ variant: r.variant, index: null, players: r.players }));
+		for (let i = seen.length; i < count; i++) list.push({ variant: `(unseen ${i - seen.length + 1})`, index: null, players: 0 });
+	}
+	const order = gameOrder ? "game" : "names";
+	const out = (rest: Pick<AssignmentCheck, "weights" | "weightsFrom" | "srm"> & { note?: string }): AssignmentCheck => ({
+		variants: list,
+		order,
+		variantCount: declared,
+		...rest,
+	});
+	if (list.length < 2) return out({ weights: null, weightsFrom: null, srm: null, note: "Needs players in at least two variants." });
+	const even = !weights || weights.every((w) => w === weights[0]);
+	if (!even && weights.length !== list.length) {
+		return out({ weights: null, weightsFrom: null, srm: null, note: `The settings' ${weights.length} weights don't fit the ${list.length} variants (the game ignores them and splits evenly).` });
+	}
+	if (!even && !gameOrder) {
+		return out({
+			weights: null,
+			weightsFrom: null,
+			srm: null,
+			note: "Uneven weights are in the game's variant order, which these rows don't carry (framework 0.7.1+ adds it): the split can't be checked.",
+		});
+	}
+	const used = even ? list.map(() => 1) : (weights as number[]);
+	const srm = sampleRatio(
+		list.map((v) => v.players),
+		used,
+	);
+	return out({
+		weights: used,
+		weightsFrom: even && !weights ? "even" : "settings",
+		srm,
+		...(srm.mismatch ? { note: "If the split changed in this range, pick a range after the change: players assigned under the old split count against the new one." } : {}),
+	});
+}
 
 /** Most players one experiment -> players read lists (the route's cap). */
 export const EXPERIMENT_PLAYERS_MAX = 200;

@@ -1,25 +1,33 @@
 /**
- * Experiments: per-variant numbers and how sure each difference is, and every experiment with its state and weights
- * (read-only, from the overrides the server knows). A row of the experiments list or of the variants table (click, or
+ * Experiments: per-variant numbers and how sure each difference is (each variant against the control, Holm-corrected
+ * over the variants), whether players landed where the split says (sample ratio check, a loud warning when not), what
+ * the traffic can detect and how long until it can tell, and every experiment with its state and weights. Owners can
+ * start, stop, re-split, settle or clear one: the split lives in the game's signed settings, so the page hands them the
+ * exact `typetorch experiment ...` command (signed on their machine; the server never holds the keys). A row of the experiments list or of the variants table (click, or
  * Enter / Space) opens the players in it in a side sheet (`?assigned=<experiment>&assignedVariant=`, shareable), under
  * the filter bar's range and filters, each linking to their Players page.
  */
-import { useQuery } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Copy, TriangleAlert } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { UserIdLink } from "@/components/Identity";
 import { PlayerPageLink } from "@/components/PlayerLink";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
+import { isReadOnly, useAuth } from "@/lib/auth";
 import { describeRange } from "@/lib/filters";
 import { fmtAgo, fmtInt, fmtNum, fmtPct, fmtTime, plural, shortId } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
-import type { ExperimentOverride, ExperimentOverrides, ExperimentPlayer, ExperimentResult } from "@/lib/types";
+import type { AssignmentCheck, ExperimentChangeRequest, ExperimentOverride, ExperimentOverrides, ExperimentPlayer, ExperimentResult, PreparedExperimentChange } from "@/lib/types";
 
 type Results = Extract<ExperimentResult, { variants: unknown }>;
 type Variant = Results["variants"][number];
@@ -85,8 +93,83 @@ const COMPARISON_COLUMNS: DataColumn<Comparison>[] = [
 		cell: (c) => (c.lift === null ? "–" : `${c.lift > 0 ? "+" : ""}${fmtPct(c.lift)}`),
 		format: (_v, c) => (c.lift === null ? "" : `${c.lift > 0 ? "+" : ""}${fmtPct(c.lift)}`),
 	},
-	{ id: "sure", header: "Sure", accessor: (c) => c.sure, cell: (c) => <span title={c.method}>{fmtPct(c.sure, 0)}</span>, format: (_v, c) => fmtPct(c.sure, 0) },
+	{
+		id: "sure",
+		header: "Sure",
+		accessor: (c) => c.sure,
+		cell: (c) => (
+			<span title={`${c.method}${c.pValue !== undefined && c.pAdjusted !== undefined && c.pAdjusted !== c.pValue ? `; p ${fmtNum(c.pValue, 4)}, corrected ${fmtNum(c.pAdjusted, 4)}` : ""}`}>{fmtPct(c.sure, 0)}</span>
+		),
+		format: (_v, c) => fmtPct(c.sure, 0),
+	},
+	{
+		id: "mde",
+		header: "Can detect",
+		title: "The smallest true difference these group sizes find 80% of the time (5%, corrected over the variants)",
+		accessor: (c) => c.mdeLift ?? null,
+		cell: (c) => mdeText(c),
+		format: (_v, c) => mdeText(c),
+	},
+	{
+		id: "days",
+		header: "Time to tell",
+		title: "At the range's traffic: days more until the observed difference would be sure (or now)",
+		accessor: (c) => c.days ?? null,
+		cell: (c) => daysText(c.days),
+		format: (_v, c) => daysText(c.days),
+	},
 ];
+
+/** "±12% (±0.4 min)": the minimum detectable effect, relative when the control's value isn't 0. */
+export function mdeText(c: Comparison): string {
+	if (c.mde === undefined) return "–";
+	if (c.mde === null || !Number.isFinite(c.mde)) return "no players";
+	const absolute = `±${fmtMetric(c.metric, c.mde)}`;
+	return c.mdeLift === null || c.mdeLift === undefined ? absolute : `±${fmtPct(c.mdeLift, 0)} (${absolute})`;
+}
+
+/** "now", "~3 days", "over a year" or "–". */
+export function daysText(days: number | null | undefined): string {
+	if (days === null || days === undefined) return "–";
+	if (days === 0) return "now";
+	if (days > 365) return "over a year";
+	return days < 1 ? "under a day" : `~${fmtInt(Math.ceil(days))} days`;
+}
+
+/**
+ * The sample ratio check: a loud warning when players didn't land where the split says (the numbers can't be trusted),
+ * else one quiet line. Each variant's players against the share it should get.
+ */
+export function SampleRatio({ check }: { check: AssignmentCheck }) {
+	const srm = check.srm;
+	const total = check.variants.reduce((s, v) => s + v.players, 0);
+	const weightTotal = (check.weights ?? []).reduce((s, w) => s + w, 0);
+	const rows = check.variants.map((v, i) => `${v.variant} ${fmtInt(v.players)} (${fmtPct(total ? v.players / total : 0, 1)}${check.weights && weightTotal ? `, should be ${fmtPct(check.weights[i] / weightTotal, 1)}` : ""})`);
+	const split = check.weightsFrom === "settings" ? "the settings' weights" : "an even split";
+	if (srm?.mismatch) {
+		return (
+			<Alert variant="destructive">
+				<TriangleAlert />
+				<AlertTitle>Sample ratio mismatch: don't trust these numbers</AlertTitle>
+				<AlertDescription>
+					<p>
+						Players didn't land where {split} says: {rows.join(", ")}. Chi-square p = {srm.pValue < 0.0001 ? srm.pValue.toExponential(1) : fmtNum(srm.pValue, 4)} (a fair split
+						gets this less than 1 time in 1000). Look for a variant that crashes or loses its events, a bug in when the game asks for the variant, bots, or a split changed in this range.
+					</p>
+					{check.note ? <p>{check.note}</p> : null}
+				</AlertDescription>
+			</Alert>
+		);
+	}
+	return (
+		<p className="text-xs text-muted-foreground" data-testid="srm-line">
+			{srm
+				? `Split check: ${srm.enough ? `players per variant fit ${split} (p = ${fmtNum(srm.pValue, 3)})` : "too few players to check the split yet"}. ${rows.join(", ")}.`
+				: `Split check: ${check.note ?? "not run."}`}
+			{srm && check.note ? ` ${check.note}` : ""}
+		</p>
+	);
+}
 
 /** The side sheet's URL state: `assigned` (the experiment) and `assignedVariant`, set together. */
 function useAssigned(): { experiment: string; variant: string; open(experiment: string, variant?: string): void; setVariant(variant: string): void; close(): void } {
@@ -142,7 +225,13 @@ function ResultsView({ data, onOpenVariant, selectedVariant }: { data: Results; 
 						: {})}
 				/>
 			</Section>
-			<Section title="How sure" description="Each variant against the control: two-proportion test for shares, bootstrap (or Welch) for averages.">
+			{data.assignment ? <SampleRatio check={data.assignment} /> : null}
+			<Section
+				title="How sure"
+				description={`Each variant against the control: two-proportion test for shares, bootstrap (or Welch) for averages.${
+					data.variants.length > 2 ? ` With ${data.variants.length - 1} variants against the control, "sure" is Holm-corrected so more variants don't mean more lucky wins.` : ""
+				}${data.forcedPlayers ? ` ${plural(data.forcedPlayers, "forced player")} left out (they didn't get a random variant).` : ""} Can detect and time to tell assume 80% power at the range's traffic.`}
+			>
 				{data.comparisons.length ? (
 					<DataTable id="experiment-comparisons" label="Comparisons with the control" columns={COMPARISON_COLUMNS} data={data.comparisons} rowId={(c) => `${c.variant}-${c.metric}`} />
 				) : (
@@ -396,7 +485,11 @@ function PlayerScope() {
 	const { state } = useFilters();
 	const names = list.data && list.data.experiment === null ? [...new Set(list.data.experiments.map((e) => e.experiment))] : [];
 	const name = picked || names[0] || "";
-	const results = useAnalytics("experiment", { experiment: name, scope: "player" }, { enabled: Boolean(name) });
+	const override = overrides.data?.experiments[name];
+	// The intended split for the sample ratio check: the override's weights while it runs on them.
+	const weights = override && override.active !== false && !override.variant && override.weights?.length ? override.weights : undefined;
+	const results = useAnalytics("experiment", { experiment: name, scope: "player", ...(weights ? { weights } : {}) }, { enabled: Boolean(name) });
+	const owner = !isReadOnly(useAuth());
 	const rows = useMemo(() => (list.data && list.data.experiment === null ? experimentRows(list.data.experiments, overrides.data) : []), [list.data, overrides.data]);
 	const range = describeRange(state);
 	return (
@@ -422,7 +515,10 @@ function PlayerScope() {
 						<QueryState query={results}>
 							{(data) =>
 								data.experiment === null ? null : (
-									<ResultsView data={data} onOpenVariant={(v) => assigned.open(data.experiment as string, v)} selectedVariant={assigned.experiment === data.experiment ? assigned.variant : undefined} />
+									<>
+										<ResultsView data={data} onOpenVariant={(v) => assigned.open(data.experiment as string, v)} selectedVariant={assigned.experiment === data.experiment ? assigned.variant : undefined} />
+										{owner ? <ExperimentControl key={data.experiment} experiment={data.experiment} variants={gameVariants(data)} override={override} /> : null}
+									</>
 								)
 							}
 						</QueryState>
@@ -458,6 +554,150 @@ function PlayerScope() {
 				</SheetContent>
 			</Sheet>
 		</>
+	);
+}
+
+/**
+ * The experiment's variants for the controls: in the game's order when the rows carry it (`known`), else by name (then
+ * weights are labelled by position: only the game knows its order).
+ */
+export function gameVariants(data: Results): { names: string[]; known: boolean } {
+	const check = data.assignment;
+	if (check && check.order === "game" && check.variants.every((v) => v.index !== null && !v.variant.startsWith("("))) return { names: check.variants.map((v) => v.variant), known: true };
+	return { names: data.variants.map((v) => v.variant).sort(), known: false };
+}
+
+const ACTION_LABEL: Record<ExperimentChangeRequest["action"], string> = { start: "Start", stop: "Stop", split: "Change split", settle: "Settle", clear: "Clear" };
+
+/** A command in a box with a copy button. */
+function CommandBox({ label, command }: { label: string; command: string }) {
+	const [copied, setCopied] = useState(false);
+	return (
+		<div className="space-y-1">
+			<div className="text-xs text-muted-foreground">{label}</div>
+			<div className="flex items-start gap-2">
+				<pre className="min-w-0 flex-1 overflow-x-auto rounded-md border bg-muted px-2 py-1.5 font-mono text-xs" aria-label={label}>
+					{command}
+				</pre>
+				<Button
+					size="sm"
+					variant="outline"
+					aria-label={`Copy: ${label}`}
+					onClick={async () => {
+						try {
+							await navigator.clipboard?.writeText(command);
+							setCopied(true);
+						} catch {
+							setCopied(false);
+						}
+					}}
+				>
+					<Copy /> {copied ? "Copied" : "Copy"}
+				</Button>
+			</div>
+		</div>
+	);
+}
+
+/**
+ * Owners: start, stop, re-split, settle or clear the experiment. The split is in the game's signed settings and the
+ * signing keys stay on the owners' machines, so this prepares the change (checked and audited by the server) and hands
+ * over the exact command that applies it.
+ */
+export function ExperimentControl({ experiment, variants, override }: { experiment: string; variants: { names: string[]; known: boolean }; override?: ExperimentOverride }) {
+	const count = variants.names.length;
+	const [weights, setWeights] = useState<string[]>(() =>
+		Array.from({ length: count }, (_, i) => String(override?.weights && override.weights.length === count ? override.weights[i] : 1)),
+	);
+	const [settleOn, setSettleOn] = useState(variants.names[0] ?? "");
+	const prepare = useMutation({ mutationFn: (change: ExperimentChangeRequest) => api.experimentChange(experiment, change) });
+	const label = (i: number) => (variants.known ? variants.names[i] : `variant ${i + 1}`) + (i === 0 ? " (control)" : "");
+	const parsed = weights.map((w) => Number(w));
+	const weightsOk = parsed.length > 0 && parsed.every((w) => Number.isFinite(w) && w >= 0) && parsed.some((w) => w > 0) && weights.every((w) => w.trim() !== "");
+	const run = (change: ExperimentChangeRequest) => prepare.mutate(change);
+	const listed = variants.known ? { variants: variants.names } : {};
+	const prepared: PreparedExperimentChange | undefined = prepare.data;
+	return (
+		<Section
+			title="Run it"
+			description="Start, stop, change the split or settle on a winner. The split lives in the game's signed settings and only your keys sign them (they never reach this server), so this gives you the command to run in the game's folder; servers apply it within seconds, no deploy."
+		>
+			<div className="space-y-4">
+				<div className="flex flex-wrap items-center gap-2">
+					<Button size="sm" variant="outline" onClick={() => run({ action: "start" })} disabled={prepare.isPending}>
+						Start
+					</Button>
+					<Button size="sm" variant="outline" onClick={() => run({ action: "stop" })} disabled={prepare.isPending}>
+						Stop
+					</Button>
+					<Button size="sm" variant="outline" onClick={() => run({ action: "clear" })} disabled={prepare.isPending}>
+						Clear override
+					</Button>
+				</div>
+				{count > 0 ? (
+					<div className="space-y-2">
+						<div className="text-sm font-medium">Split</div>
+						<div className="flex flex-wrap items-end gap-3">
+							{weights.map((w, i) => (
+								<label key={i} className="space-y-1 text-xs">
+									<span className="block text-muted-foreground">{label(i)}</span>
+									<Input
+										className="h-8 w-24"
+										inputMode="decimal"
+										aria-label={`Weight of ${label(i)}`}
+										value={w}
+										onChange={(e) => setWeights((list) => list.map((x, j) => (j === i ? e.target.value : x)))}
+									/>
+								</label>
+							))}
+							<Button size="sm" onClick={() => run({ action: "split", weights: parsed, ...listed })} disabled={!weightsOk || prepare.isPending}>
+								Change split
+							</Button>
+						</div>
+						{variants.known ? null : (
+							<p className="text-xs text-muted-foreground">These rows don't carry the game's variant order (framework 0.7.1+ adds it): weights go in the order the game lists its variants.</p>
+						)}
+					</div>
+				) : null}
+				{count > 0 ? (
+					<div className="flex flex-wrap items-end gap-2">
+						<label className="space-y-1 text-xs">
+							<span className="block text-muted-foreground">Everyone gets</span>
+							<Select value={settleOn} onValueChange={setSettleOn}>
+								<SelectTrigger size="sm" className="w-44" aria-label="Variant to settle on">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{variants.names.map((n) => (
+										<SelectItem key={n} value={n}>
+											{n}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</label>
+						<Button size="sm" variant="outline" onClick={() => run({ action: "settle", variant: settleOn, variants: variants.names })} disabled={!settleOn || prepare.isPending}>
+							Settle
+						</Button>
+					</div>
+				) : null}
+				{prepare.isError ? <p className="text-sm text-destructive">{(prepare.error as Error).message}</p> : null}
+				{prepared ? (
+					<div className="space-y-2 rounded-lg border p-3" data-testid="prepared-change">
+						<div className="text-sm font-medium">
+							{ACTION_LABEL[prepared.action]} {prepared.experiment}: {prepared.effect}
+						</div>
+						<CommandBox label="Run in the game's folder" command={prepared.command} />
+						<CommandBox label="See the change first (writes nothing)" command={prepared.dryRun} />
+						{prepared.notes.map((n) => (
+							<p key={n} className="text-xs text-muted-foreground">
+								{n}
+							</p>
+						))}
+					</div>
+				) : null}
+			</div>
+		</Section>
 	);
 }
 

@@ -19,8 +19,10 @@ import type {
 	ErrorList,
 	ErrorPlayers,
 	PlayerErrors,
+	ExperimentChangeRequest,
 	ExperimentOverrides,
 	ExperimentPlayers,
+	PreparedExperimentChange,
 	Filters,
 	FleetAlert,
 	FleetReports,
@@ -217,6 +219,9 @@ export function createApi(options: ApiOptions = {}) {
 		/** The experiment overrides the server knows (weights, active, forced variant; read-only). */
 		experimentOverrides: (signal?: AbortSignal) => get<ExperimentOverrides>("/v1/experiments", signal),
 		/** The players in one experiment (at most 200; one variant or all), under the filter bar's range and filters. */
+		/** Owners: the checked change and the signed `typetorch experiment ...` command that applies it (audited; applies nothing). */
+		experimentChange: (experiment: string, change: ExperimentChangeRequest, signal?: AbortSignal) =>
+			post<PreparedExperimentChange>(`/v1/experiments/${encodeURIComponent(experiment)}/change`, change, signal),
 		experimentPlayers: (experiment: string, filters: Filters = {}, options: { variant?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<ExperimentPlayers>(`/v1/experiments/${encodeURIComponent(experiment)}/players${experimentPlayerQuery(filters, options)}`, signal),
 		/** The live SSE stream's URL (EventSource sends the session cookie; the dev proxy adds the token). */
