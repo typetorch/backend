@@ -1,0 +1,409 @@
+/**
+ * The 2D / 3D map renderer (plans/33), three.js, no React. One instanced mesh per (shape, look) so thousands of parts
+ * draw in a handful of calls; rendering happens on demand (a camera move, a change), never in a loop.
+ *
+ *   - 3D: a perspective camera with orbit controls (left drag turns, right drag pans, the wheel zooms) and fly keys
+ *     (W A S D move, Q E down / up, Shift faster) while the canvas has focus.
+ *   - 2D: the same scene from straight above through an orthographic camera (north, -Z, up); left or right drag pans,
+ *     the wheel zooms toward the cursor. Vector geometry redrawn at the device's pixel ratio: crisp at any zoom.
+ *   - The Y band: two clipping planes hide geometry above and below it (walls are cut like a floor plan); layer marks
+ *     outside the band are left out.
+ *   - Parts: solid (transparency < 0.5), glassy (< 0.95, see-through), invisible (>= 0.95; drawn faint only when asked,
+ *     never dropped). MeshParts and unions are their boxes; `tintMeshes` paints them violet so they stand out.
+ *   - Layers (world coordinates): points (fixed-size dots), paths (lines), heat cells (flat squares at the cell's height,
+ *     colored by count on a log scale).
+ * Shapes follow Roblox's: a cylinder's axis is the part's X; a wedge's slope faces -Z (its tall face is +Z); the corner
+ * wedge's peak is over its (+X, -Z) corner (not checked against Studio).
+ */
+import * as THREE from "three";
+import { MapControls } from "three/addons/controls/MapControls.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { FLAGS, heatColor, type Bounds, type MapGeometry, type MapLayer, type Vec3 } from "@/lib/maps";
+
+export type MapMode = "2d" | "3d";
+
+export interface SceneOptions {
+	mode: MapMode;
+	offset: Vec3;
+	band: [number, number] | null;
+	showInvisible: boolean;
+	tintMeshes: boolean;
+}
+
+const MESH_TINT = new THREE.Color("#9b5de5");
+const INVISIBLE_COLOR = new THREE.Color("#ff6b6b");
+
+function wedgeGeometry(): THREE.BufferGeometry {
+	const A = [-0.5, -0.5, -0.5], B = [0.5, -0.5, -0.5], C = [0.5, -0.5, 0.5], D = [-0.5, -0.5, 0.5], E = [-0.5, 0.5, 0.5], F = [0.5, 0.5, 0.5];
+	return triangles([A, C, B, A, D, C, D, F, C, D, E, F, A, B, F, A, F, E, A, E, D, B, C, F]);
+}
+
+function cornerWedgeGeometry(): THREE.BufferGeometry {
+	const A = [-0.5, -0.5, -0.5], B = [0.5, -0.5, -0.5], C = [0.5, -0.5, 0.5], D = [-0.5, -0.5, 0.5], P = [0.5, 0.5, -0.5];
+	return triangles([A, C, B, A, D, C, B, C, P, A, B, P, A, P, D, D, P, C]);
+}
+
+function triangles(vertices: number[][]): THREE.BufferGeometry {
+	const g = new THREE.BufferGeometry();
+	g.setAttribute("position", new THREE.Float32BufferAttribute(vertices.flat(), 3));
+	g.computeVertexNormals();
+	return g;
+}
+
+function shapeGeometries(): THREE.BufferGeometry[] {
+	const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 20);
+	cylinder.rotateZ(-Math.PI / 2);
+	return [new THREE.SphereGeometry(0.5, 18, 12), new THREE.BoxGeometry(1, 1, 1), cylinder, wedgeGeometry(), cornerWedgeGeometry()];
+}
+
+type Look = "solid" | "glassy" | "invisible";
+
+export class MapRenderer {
+	readonly renderer: THREE.WebGLRenderer;
+	private readonly scene = new THREE.Scene();
+	private readonly world = new THREE.Group();
+	private readonly parts = new THREE.Group();
+	private readonly marks = new THREE.Group();
+	private readonly perspective = new THREE.PerspectiveCamera(50, 1, 0.5, 20_000);
+	private readonly ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 50_000);
+	private controls: OrbitControls | MapControls;
+	private readonly shapes = shapeGeometries();
+	private readonly clip = [new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6)];
+	private readonly materials: Record<Look, THREE.MeshLambertMaterial>;
+	private grid: THREE.GridHelper | null = null;
+	private geometry: MapGeometry | null = null;
+	private bounds: Bounds | null = null;
+	private layers: MapLayer[] = [];
+	private options: SceneOptions = { mode: "3d", offset: [0, 0, 0], band: null, showInvisible: false, tintMeshes: false };
+	private readonly keys = new Set<string>();
+	private flying = 0;
+	private disposed = false;
+	private frame = 0;
+	private readonly resize: ResizeObserver;
+
+	constructor(private readonly host: HTMLElement) {
+		this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+		this.renderer.localClippingEnabled = true;
+		this.renderer.domElement.tabIndex = 0;
+		this.renderer.domElement.style.outline = "none";
+		host.appendChild(this.renderer.domElement);
+		const base = { clippingPlanes: this.clip, side: THREE.DoubleSide } as const;
+		this.materials = {
+			solid: new THREE.MeshLambertMaterial({ ...base }),
+			glassy: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.35, depthWrite: false }),
+			invisible: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.12, depthWrite: false }),
+		};
+		this.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
+		const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+		sun.position.set(0.4, 1, 0.25);
+		this.scene.add(sun);
+		this.world.add(this.parts);
+		this.scene.add(this.world, this.marks);
+		this.ortho.up.set(0, 0, -1);
+		this.controls = this.makeControls("3d");
+		this.resize = new ResizeObserver(() => this.fitSize());
+		this.resize.observe(host);
+		this.renderer.domElement.addEventListener("keydown", this.onKey);
+		this.renderer.domElement.addEventListener("keyup", this.onKey);
+		this.renderer.domElement.addEventListener("blur", () => this.keys.clear());
+		this.fitSize();
+	}
+
+	private makeControls(mode: MapMode): OrbitControls | MapControls {
+		const dom = this.renderer.domElement;
+		if (mode === "2d") {
+			const c = new MapControls(this.ortho, dom);
+			c.enableRotate = false;
+			c.screenSpacePanning = true;
+			c.zoomToCursor = true;
+			c.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+			c.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
+			c.minZoom = 0.02;
+			c.maxZoom = 400;
+			c.addEventListener("change", () => this.render());
+			return c;
+		}
+		const c = new OrbitControls(this.perspective, dom);
+		c.enableDamping = false;
+		c.screenSpacePanning = true;
+		c.addEventListener("change", () => this.render());
+		return c;
+	}
+
+	private get camera(): THREE.Camera {
+		return this.options.mode === "2d" ? this.ortho : this.perspective;
+	}
+
+	/** The map's parts (null: none), its bounds (the camera fits them), the layers and the view options. */
+	update(geometry: MapGeometry | null, bounds: Bounds | null, layers: MapLayer[], options: SceneOptions): void {
+		const geometryChanged = geometry !== this.geometry;
+		const modeChanged = options.mode !== this.options.mode;
+		const offsetChanged = options.offset.some((v, i) => v !== this.options.offset[i]);
+		const looksChanged = options.showInvisible !== this.options.showInvisible || options.tintMeshes !== this.options.tintMeshes;
+		this.geometry = geometry;
+		this.bounds = bounds;
+		this.layers = layers;
+		this.options = { ...options };
+		this.world.position.set(...options.offset);
+		if (geometryChanged || looksChanged) this.buildParts();
+		this.applyBand();
+		this.buildMarks();
+		if (modeChanged) {
+			this.controls.dispose();
+			this.controls = this.makeControls(options.mode);
+		}
+		if (geometryChanged || modeChanged || offsetChanged) this.fit();
+		this.buildGrid();
+		this.render();
+	}
+
+	private buildParts(): void {
+		for (const child of [...this.parts.children]) {
+			this.parts.remove(child);
+			(child as THREE.InstancedMesh).dispose();
+		}
+		const g = this.geometry;
+		if (!g) return;
+		const buckets = new Map<string, number[]>();
+		for (let i = 0; i < g.count; i++) {
+			const t = (g.transparency[i] as number) / 255;
+			const look: Look = (g.flags[i] as number) & FLAGS.invisible ? "invisible" : t >= 0.5 ? "glassy" : "solid";
+			if (look === "invisible" && !this.options.showInvisible) continue;
+			const key = `${Math.min(g.shape[i] as number, 4)}:${look}`;
+			let list = buckets.get(key);
+			if (!list) buckets.set(key, (list = []));
+			list.push(i);
+		}
+		const m = new THREE.Matrix4();
+		const p = new THREE.Vector3();
+		const q = new THREE.Quaternion();
+		const s = new THREE.Vector3();
+		const color = new THREE.Color();
+		for (const [key, list] of buckets) {
+			const [shape, look] = key.split(":") as [string, Look];
+			const mesh = new THREE.InstancedMesh(this.shapes[Number(shape)] as THREE.BufferGeometry, this.materials[look], list.length);
+			list.forEach((i, k) => {
+				p.set(g.position[i * 3] as number, g.position[i * 3 + 1] as number, g.position[i * 3 + 2] as number);
+				q.set(g.rotation[i * 4] as number, g.rotation[i * 4 + 1] as number, g.rotation[i * 4 + 2] as number, g.rotation[i * 4 + 3] as number);
+				if (q.lengthSq() < 1e-6) q.identity();
+				else q.normalize();
+				s.set(Math.max(0.05, Math.abs(g.size[i * 3] as number)), Math.max(0.05, Math.abs(g.size[i * 3 + 1] as number)), Math.max(0.05, Math.abs(g.size[i * 3 + 2] as number)));
+				if (Number(shape) === 0) s.setScalar(Math.min(s.x, s.y, s.z));
+				mesh.setMatrixAt(k, m.compose(p, q, s));
+				if (look === "invisible") color.copy(INVISIBLE_COLOR);
+				else {
+					color.setRGB((g.color[i * 3] as number) / 255, (g.color[i * 3 + 1] as number) / 255, (g.color[i * 3 + 2] as number) / 255, THREE.SRGBColorSpace);
+					if (this.options.tintMeshes && (g.flags[i] as number) & (FLAGS.mesh | FLAGS.union)) color.lerp(MESH_TINT, 0.7);
+				}
+				mesh.setColorAt(k, color);
+			});
+			mesh.instanceMatrix.needsUpdate = true;
+			if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+			mesh.computeBoundingSphere();
+			this.parts.add(mesh);
+		}
+	}
+
+	private applyBand(): void {
+		const band = this.options.band;
+		const [top, bottom] = this.clip as [THREE.Plane, THREE.Plane];
+		top.constant = band ? band[1] : 1e6;
+		bottom.constant = band ? -band[0] : 1e6;
+	}
+
+	private inBand(y: number | null | undefined): boolean {
+		const band = this.options.band;
+		return !band || y === null || y === undefined || (y >= band[0] - 3 && y <= band[1] + 3);
+	}
+
+	private buildMarks(): void {
+		for (const child of [...this.marks.children]) {
+			this.marks.remove(child);
+			const o = child as THREE.Mesh;
+			o.geometry?.dispose();
+			(o.material as THREE.Material)?.dispose();
+		}
+		const flat = this.options.mode === "2d";
+		const floorY = this.options.band ? this.options.band[0] : this.bounds ? this.bounds.min[1] + this.options.offset[1] : 0;
+		let order = 10;
+		for (const layer of this.layers) {
+			const color = new THREE.Color(layer.color);
+			const cells = (layer.cells ?? []).filter((c) => this.inBand(c.y));
+			if (cells.length) {
+				const size = layer.cellSize ?? 1;
+				const plane = new THREE.PlaneGeometry(1, 1);
+				plane.rotateX(-Math.PI / 2);
+				const mesh = new THREE.InstancedMesh(plane, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.8, depthTest: !flat, depthWrite: false, side: THREE.DoubleSide }), cells.length);
+				const max = Math.max(...cells.map((c) => c.n));
+				const m = new THREE.Matrix4();
+				const heat = new THREE.Color();
+				cells.forEach((c, k) => {
+					const y = (c.y ?? floorY + 3) - 2.8;
+					m.makeScale(size, 1, size).setPosition(c.x + size / 2, y, c.z + size / 2);
+					mesh.setMatrixAt(k, m);
+					const [r, g, b] = heatColor(Math.log1p(c.n) / Math.log1p(max));
+					mesh.setColorAt(k, heat.setRGB(r, g, b));
+				});
+				mesh.renderOrder = order++;
+				this.marks.add(mesh);
+			}
+			const points = (layer.points ?? []).filter((p) => this.inBand(p.y));
+			if (points.length && !cells.length) {
+				const g = new THREE.BufferGeometry();
+				g.setAttribute("position", new THREE.Float32BufferAttribute(points.flatMap((p) => [p.x, p.y, p.z]), 3));
+				const dots = new THREE.Points(g, new THREE.PointsMaterial({ color, size: 7, sizeAttenuation: false, depthTest: !flat }));
+				dots.renderOrder = order++;
+				this.marks.add(dots);
+			}
+			for (const path of layer.paths ?? []) {
+				const kept = path.filter((p) => this.inBand(p.y));
+				if (kept.length < 2) continue;
+				const g = new THREE.BufferGeometry().setFromPoints(kept.map((p) => new THREE.Vector3(p.x, p.y, p.z)));
+				const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: !flat }));
+				line.renderOrder = order++;
+				this.marks.add(line);
+			}
+		}
+	}
+
+	private buildGrid(): void {
+		if (this.grid) {
+			this.scene.remove(this.grid);
+			this.grid.dispose();
+			this.grid = null;
+		}
+		const b = this.bounds;
+		if (!b) return;
+		const o = this.options.offset;
+		const span = Math.max(b.max[0] - b.min[0], b.max[2] - b.min[2], 16);
+		const step = span > 1500 ? 64 : span > 400 ? 16 : 8;
+		const size = Math.ceil((span * 1.2) / step) * step;
+		this.grid = new THREE.GridHelper(size, size / step, 0x888888, 0x888888);
+		const material = this.grid.material as THREE.Material;
+		material.transparent = true;
+		material.opacity = 0.18;
+		material.depthWrite = false;
+		const y = this.options.band ? this.options.band[0] : b.min[1] + o[1];
+		this.grid.position.set((b.min[0] + b.max[0]) / 2 + o[0], y - 0.05, (b.min[2] + b.max[2]) / 2 + o[2]);
+		this.scene.add(this.grid);
+	}
+
+	/** Points the camera at the whole map. */
+	fit(): void {
+		const b = this.bounds;
+		const o = this.options.offset;
+		const center = b ? new THREE.Vector3((b.min[0] + b.max[0]) / 2 + o[0], (b.min[1] + b.max[1]) / 2 + o[1], (b.min[2] + b.max[2]) / 2 + o[2]) : new THREE.Vector3();
+		const spanX = b ? b.max[0] - b.min[0] : 100;
+		const spanZ = b ? b.max[2] - b.min[2] : 100;
+		const radius = Math.max(spanX, spanZ, 20) / 2;
+		const topY = (b ? b.max[1] + o[1] : 100) + 1000;
+		if (this.options.mode === "2d") {
+			this.ortho.position.set(center.x, topY, center.z);
+			this.ortho.lookAt(center.x, center.y, center.z);
+			const { width, height } = this.size();
+			const aspect = width / height;
+			const halfH = Math.max(spanZ / 2, spanX / 2 / aspect) * 1.08;
+			this.ortho.left = -halfH * aspect;
+			this.ortho.right = halfH * aspect;
+			this.ortho.top = halfH;
+			this.ortho.bottom = -halfH;
+			this.ortho.zoom = 1;
+			this.ortho.far = topY - (b ? b.min[1] + o[1] : -100) + 2000;
+			this.ortho.updateProjectionMatrix();
+		} else {
+			this.perspective.position.set(center.x + radius * 0.9, center.y + radius * 1.1, center.z + radius * 1.3);
+			this.perspective.far = Math.max(20_000, radius * 20);
+			this.perspective.updateProjectionMatrix();
+		}
+		this.controls.target.copy(center);
+		this.controls.update();
+	}
+
+	private size(): { width: number; height: number } {
+		return { width: Math.max(1, this.host.clientWidth), height: Math.max(1, this.host.clientHeight) };
+	}
+
+	private fitSize(): void {
+		const { width, height } = this.size();
+		this.renderer.setSize(width, height, false);
+		this.renderer.domElement.style.width = "100%";
+		this.renderer.domElement.style.height = "100%";
+		this.perspective.aspect = width / height;
+		this.perspective.updateProjectionMatrix();
+		const halfH = (this.ortho.top - this.ortho.bottom) / 2;
+		this.ortho.left = -halfH * (width / height);
+		this.ortho.right = halfH * (width / height);
+		this.ortho.updateProjectionMatrix();
+		this.render();
+	}
+
+	render(): void {
+		if (this.disposed || this.frame) return;
+		this.frame = requestAnimationFrame(() => {
+			this.frame = 0;
+			if (!this.disposed) this.renderer.render(this.scene, this.camera);
+		});
+	}
+
+	/** World x / z under a point of the canvas (2D only; null in 3D). */
+	worldAt(clientX: number, clientY: number): { x: number; z: number } | null {
+		if (this.options.mode !== "2d") return null;
+		const rect = this.renderer.domElement.getBoundingClientRect();
+		const v = new THREE.Vector3(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1, 0).unproject(this.ortho);
+		return { x: v.x, z: v.z };
+	}
+
+	private readonly onKey = (event: KeyboardEvent): void => {
+		const key = event.key.toLowerCase();
+		if (!"wasdqe".includes(key) && key !== "shift") return;
+		if (this.options.mode !== "3d") return;
+		if (event.type === "keydown") this.keys.add(key);
+		else this.keys.delete(key);
+		event.preventDefault();
+		if (this.keys.size && !this.flying) this.fly(performance.now());
+	};
+
+	private fly(last: number): void {
+		this.flying = requestAnimationFrame((now) => {
+			this.flying = 0;
+			if (this.disposed || !this.keys.size || this.options.mode !== "3d") return;
+			const dt = Math.min(0.05, (now - last) / 1000);
+			const forward = new THREE.Vector3();
+			this.perspective.getWorldDirection(forward);
+			const right = new THREE.Vector3().crossVectors(forward, this.perspective.up).normalize();
+			const move = new THREE.Vector3();
+			if (this.keys.has("w")) move.add(forward);
+			if (this.keys.has("s")) move.sub(forward);
+			if (this.keys.has("d")) move.add(right);
+			if (this.keys.has("a")) move.sub(right);
+			if (this.keys.has("e")) move.y += 1;
+			if (this.keys.has("q")) move.y -= 1;
+			const distance = this.perspective.position.distanceTo(this.controls.target);
+			move.normalize().multiplyScalar(Math.max(20, distance * 0.6) * dt * (this.keys.has("shift") ? 3 : 1));
+			this.perspective.position.add(move);
+			this.controls.target.add(move);
+			this.controls.update();
+			this.fly(now);
+		});
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		cancelAnimationFrame(this.frame);
+		cancelAnimationFrame(this.flying);
+		this.resize.disconnect();
+		this.controls.dispose();
+		this.renderer.domElement.removeEventListener("keydown", this.onKey);
+		this.renderer.domElement.removeEventListener("keyup", this.onKey);
+		this.geometry = null;
+		this.layers = [];
+		this.buildParts();
+		this.buildMarks();
+		for (const s of this.shapes) s.dispose();
+		for (const m of Object.values(this.materials)) m.dispose();
+		this.grid?.dispose();
+		this.renderer.dispose();
+		this.renderer.domElement.remove();
+	}
+}
