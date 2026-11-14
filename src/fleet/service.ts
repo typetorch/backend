@@ -1542,6 +1542,13 @@ export class FleetService {
 		};
 	}
 
+	/** Plans/33: the newest place version (`pv`) a server of the place reported since `since` (unix ms), or null. */
+	async latestPlaceVersion(placeId: number, since: number): Promise<number | null> {
+		const rows = await this.db.all<{ v: number | null }>("SELECT MAX(place_version) AS v FROM servers WHERE place_id = ? AND last_seen >= ? AND place_version > 0", [placeId, since]);
+		const v = rows[0]?.v;
+		return typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null;
+	}
+
 	/** The PlaceId of the server heard from last (open or not), or null while no heartbeat carried one. */
 	async latestPlaceId(): Promise<number | null> {
 		const rows = await this.db.all<{ place_id: number | null }>("SELECT place_id FROM servers WHERE place_id IS NOT NULL AND place_id > 0 ORDER BY last_seen DESC LIMIT 1");

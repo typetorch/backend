@@ -158,6 +158,9 @@ import { Warehouse } from "./warehouse.ts";
 import { LiveEventError, LiveEventStore, signCommands, signedViewOf, syncOf, type SignedView } from "./live-events.ts";
 import { AFTER_DAYS_MAX, WEEKS_MAX, buildLiftReport, planLiftWindows, type LiftReport } from "./live-event-lift.ts";
 import { getDataStoreEntry } from "../opencloud.ts";
+import { MapStore } from "../maps/store.ts";
+import { MapsRoutes } from "./maps.ts";
+import type { MapPositionsResult } from "../queries/maps.ts";
 import type { LiveEventLiftResult } from "../queries/live-event-lift.ts";
 import { GeoIpUpdater } from "./geoip.ts";
 
@@ -177,6 +180,8 @@ export interface AppOptions {
 	reportSleep?: (ms: number) => Promise<void>;
 	/** Reads the data disk's free and total bytes (server/disk.ts; tests pass a fake). */
 	diskUsage?: (path: string) => DiskUsage | null;
+	/** The map export's waits (tests pass fast ones; maps/store.ts). */
+	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
 }
 
 /**
@@ -212,6 +217,8 @@ export interface App {
 	readonly audit: AuditLog;
 	/** Local backups and the download (server/backup.ts). */
 	readonly backups: Backups;
+	/** Exported map geometry and the export (plans/33; maps/store.ts). */
+	readonly maps: MapStore;
 	/** The data disk's free space and its warning level (server/disk.ts). */
 	readonly disk: DiskWatch;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
@@ -590,6 +597,27 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// The sidebar's place card: name, live players and icon (server/roblox-place.ts: fixed hosts, no credentials, 60 s cache).
 	const robloxPlace = new RobloxPlace({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const placeLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
+	// Plans/33: exported map geometry (data/maps) and the read-only Luau Execution export (OPENCLOUD_API_KEY).
+	const maps = new MapStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...options.mapExport });
+	const mapsRoutes = new MapsRoutes({
+		store: maps,
+		clock,
+		log,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+		openCloud: () => (config.openCloudKey && config.universeId ? { apiKey: config.openCloudKey, universeId: config.universeId } : null),
+		placeId: async () => {
+			if (config.universeId) {
+				const { place } = await robloxPlace.get({ universeId: config.universeId });
+				if (place.placeId) return place.placeId;
+			}
+			return fleet ? await fleet.latestPlaceId() : null;
+		},
+		fleetPlaceVersion: async (placeId, since) => (fleet ? await fleet.latestPlaceVersion(placeId, since) : null),
+		positions: async (days) => {
+			if (!config.parts.has("analytics") || !warehouse) return null;
+			return (await warehouse.query("map-positions", { from: new Date(clock() - days * DAY_MS).toISOString() }, { cell: 2, maxCells: 10_000 })) as MapPositionsResult;
+		},
+	});
 	// Product tooltips: names, prices and icons of game passes and developer products (server/roblox-products.ts: fixed
 	// hosts, no credentials, 1 h cache, a cap on Roblox calls), and a per-IP cap on the requests.
 	const robloxProducts = new RobloxProducts({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
@@ -2923,6 +2951,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const profile = /^\/v1\/identity\/([^/]+)\/profile$/.exec(path);
 			if (profile) return method === "GET" ? playerProfile(profile[1], ip) : json(405, { error: "GET only" });
 			if (path === "/v1/place") return method === "GET" ? placeCard(ip) : json(405, { error: "GET only" });
+			if (path === "/v1/maps" || path.startsWith("/v1/maps/")) {
+				return mapsRoutes.handle(req, path, {
+					manage: () => {
+						const admin = manage();
+						return admin instanceof Response ? admin : actorOf(admin).who;
+					},
+					owner: gate.principal.role === "admin",
+					note: (n) => noteAudit(req, n),
+					auditDone: (outcome, details) => auditNow({ actor: { kind: "system", label: "map export" }, role: "none", via: "none", ip: "", action: "maps.export.done", outcome, details }),
+				});
+			}
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/analytics/acquisition") return method === "GET" ? acquisition(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/demographics") return method === "GET" ? robloxDemographics(url, ip) : json(405, { error: "GET only" });
@@ -3317,6 +3356,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		...(backendAlerts ? { backendAlerts } : {}),
 		audit,
 		backups,
+		maps,
 		disk,
 		backupTick,
 		diskTick,

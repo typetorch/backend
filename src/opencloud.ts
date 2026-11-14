@@ -10,6 +10,9 @@
  *     Scope universe:read.
  *   - Analytics Query API (v1): Creator Hub's acquisition numbers (impressions, play-through rate; server/roblox-analytics.ts).
  *     Scope universe.analytics:read.
+ *   - Luau Execution (v2): the map export's read-only task with binary output (maps/export.ts). Scope
+ *     universe.place.luau-execution-session:read + :write. The place's version list (Assets API, asset:read) says when
+ *     the maps are out of date.
  */
 export const OPEN_CLOUD = "https://apis.roblox.com";
 
@@ -33,7 +36,7 @@ export interface OpenCloudOptions {
 	attempts?: number;
 }
 
-async function call(options: OpenCloudOptions, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown; text: string }> {
+async function call(options: OpenCloudOptions, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown; text: string; headers?: Headers }> {
 	if (!options.apiKey) throw new Error("an Open Cloud API key is required");
 	const doFetch = options.fetch ?? fetch;
 	const headers: Record<string, string> = { "x-api-key": options.apiKey };
@@ -60,7 +63,7 @@ async function call(options: OpenCloudOptions, method: string, path: string, bod
 				await new Promise((done) => setTimeout(done, 500 * attempt));
 				continue;
 			}
-			return { status: response.status, body: parsed, text };
+			return { status: response.status, body: parsed, text, headers: response.headers };
 		} catch (error) {
 			lastError = error;
 			if (attempt >= attempts) break;
@@ -240,4 +243,131 @@ export async function queryAnalyticsMetric(
 			});
 		return { breakdowns, dataPoints };
 	});
+}
+
+// Luau Execution (v2) ---------------------------------------------------------------------------------------------------
+
+export const LUAU_EXECUTION_SCOPE = "universe.place.luau-execution-session:read and :write";
+
+export interface LuauTask {
+	state: string;
+	results: unknown[];
+	error?: unknown;
+	/** The task's resource path (it names the place version it ran on). */
+	path?: string;
+	/** With binaryOutput: a presigned URI of the task's buffer (valid about 15 minutes). */
+	binaryOutputUri?: string;
+}
+
+/**
+ * Runs a Luau script in a headless server of the place and waits for it (ported from the CLI's `runLuau`): `POST
+ * /cloud/v2/universes/{u}/places/{p}[/versions/{v}]/luau-execution-session-tasks`, then polls the task every `pollMs`
+ * until it leaves QUEUED / PROCESSING. Creating a task is rate-limited by Roblox (5 a minute per key owner, 10 open tasks
+ * per place): a 429 waits (Retry-After, else `retryDelayMs` x the attempt) and tries again, up to 5 times; nothing
+ * else about the creation is retried (a task must not be created twice). A task still running a minute past its timeout
+ * throws. `onState` hears each state ("creating", "rate limited", "QUEUED", "PROCESSING").
+ */
+export async function runLuauTask(
+	options: OpenCloudOptions & {
+		universeId: number;
+		placeId: number;
+		version?: number;
+		script: string;
+		timeoutSeconds?: number;
+		binaryOutput?: boolean;
+		pollMs?: number;
+		retryDelayMs?: number;
+		sleep?: (ms: number) => Promise<void>;
+		now?: () => number;
+		onState?: (state: string) => void;
+	},
+): Promise<LuauTask> {
+	const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+	const now = options.now ?? Date.now;
+	const timeoutSeconds = options.timeoutSeconds ?? 120;
+	const path = `/cloud/v2/universes/${options.universeId}/places/${options.placeId}${options.version !== undefined ? `/versions/${options.version}` : ""}/luau-execution-session-tasks`;
+	const body = { script: options.script, timeout: `${timeoutSeconds}s`, ...(options.binaryOutput ? { enableBinaryOutput: true } : {}) };
+	let task: Record<string, unknown> = {};
+	for (let attempt = 1; ; attempt++) {
+		options.onState?.("creating");
+		const response = await call(options, "POST", path, body);
+		if (response.status >= 200 && response.status < 300) {
+			task = record(response.body);
+			break;
+		}
+		if (response.status !== 429 || attempt >= 5) fail("POST", path, response.status, response.text, LUAU_EXECUTION_SCOPE);
+		const after = Number(response.headers?.get("retry-after"));
+		const wait = Number.isFinite(after) && after > 0 ? Math.min(after * 1000, 60_000) : (options.retryDelayMs ?? 12_000) * attempt;
+		options.onState?.(`rate limited, waiting ${Math.round(wait / 1000)} s`);
+		await sleep(wait);
+	}
+	const taskPath = typeof task.path === "string" ? task.path : "";
+	if (!/^universes\/\d+\/places\/\d+\/(versions\/\d+\/)?(luau-execution-sessions\/[A-Za-z0-9-]+\/tasks|luau-execution-session-tasks)\/[A-Za-z0-9-]+$/.test(taskPath)) {
+		throw new OpenCloudError(`POST ${path} -> no task path to poll`, 502);
+	}
+	const started = now();
+	while (task.state === "QUEUED" || task.state === "PROCESSING") {
+		options.onState?.(String(task.state));
+		if ((now() - started) / 1000 > timeoutSeconds + 60) throw new OpenCloudError(`Luau Execution task still ${String(task.state)} past its timeout`, 504);
+		await sleep(options.pollMs ?? 1500);
+		const response = await call(options, "GET", `/cloud/v2/${taskPath}`);
+		if (response.status < 200 || response.status >= 300) fail("GET", "/cloud/v2/<task>", response.status, response.text, LUAU_EXECUTION_SCOPE);
+		task = record(response.body);
+	}
+	const output = record(task.output);
+	return {
+		state: String(task.state ?? ""),
+		results: Array.isArray(output.results) ? output.results : [],
+		...(task.error !== undefined ? { error: task.error } : {}),
+		path: taskPath,
+		...(typeof task.binaryOutputUri === "string" ? { binaryOutputUri: task.binaryOutputUri } : {}),
+	};
+}
+
+/**
+ * Downloads a task's binary output from its presigned URI (https only). The API key goes only to apis.roblox.com,
+ * never to another host; the URI (it carries a signature) is never logged or put in an error. Bodies over `maxBytes`
+ * are refused. 429 / 5xx / no answer: 3 tries.
+ */
+export async function downloadBinaryOutput(options: { uri: string; apiKey: string; fetch?: typeof fetch; timeoutMs?: number; maxBytes?: number; sleep?: (ms: number) => Promise<void> }): Promise<Uint8Array> {
+	const url = new URL(options.uri);
+	if (url.protocol !== "https:") throw new OpenCloudError(`refusing a binary output URI that isn't https (${url.protocol}//${url.hostname})`, 0);
+	const headers: Record<string, string> = url.hostname === "apis.roblox.com" ? { "x-api-key": options.apiKey } : {};
+	const doFetch = options.fetch ?? fetch;
+	const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+	const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
+	let last = "";
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		try {
+			const response = await doFetch(url, { headers, redirect: "error", signal: AbortSignal.timeout(options.timeoutMs ?? 120_000) });
+			if (response.ok) {
+				const declared = Number(response.headers.get("content-length"));
+				if (Number.isFinite(declared) && declared > maxBytes) throw new OpenCloudError(`the task's binary output is ${declared} bytes (at most ${maxBytes})`, 413);
+				const bytes = new Uint8Array(await response.arrayBuffer());
+				if (bytes.byteLength > maxBytes) throw new OpenCloudError(`the task's binary output is ${bytes.byteLength} bytes (at most ${maxBytes})`, 413);
+				return bytes;
+			}
+			last = `${response.status}`;
+			if (response.status !== 429 && response.status < 500) break;
+		} catch (error) {
+			if (error instanceof OpenCloudError) throw error;
+			last = String((error as Error)?.message ?? error).replace(/https?:\/\/\S+/g, "<uri>");
+		}
+		if (attempt < 3) await sleep(500 * attempt);
+	}
+	throw new OpenCloudError(`downloading the task's binary output from ${url.hostname} failed: ${last}`, 502);
+}
+
+/**
+ * The newest version number of a place (Assets API version list: `GET /assets/v1/assets/{placeId}/versions?maxPageSize=1`,
+ * scope asset:read on the place). Throws OpenCloudError when the key can't read it.
+ */
+export async function latestPlaceVersion(options: OpenCloudOptions & { placeId: number }): Promise<number> {
+	const path = `/assets/v1/assets/${options.placeId}/versions?maxPageSize=1`;
+	const response = await call(options, "GET", path);
+	if (response.status < 200 || response.status >= 300) fail("GET", path.split("?")[0] as string, response.status, response.text, "asset:read");
+	const first = record((record(response.body).assetVersions as unknown[] | undefined)?.[0]);
+	const version = typeof first.path === "string" ? Number(first.path.split("/").pop()) : Number.NaN;
+	if (!Number.isSafeInteger(version) || version <= 0) throw new OpenCloudError(`GET ${path} -> no version in the answer`, 502);
+	return version;
 }

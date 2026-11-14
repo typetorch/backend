@@ -477,6 +477,44 @@ const ROUTES: Route[] = [
 	{ method: "get", path: "/v1/fleet/debug/audit", tag: "fleet", roles: ["admin"], summary: "Remote debug audit list" },
 
 	// Roblox ------------------------------------------------------------------------------------------------------------------
+	// Maps (plans/33) ------------------------------------------------------------------------------------------------------
+	{
+		method: "get",
+		path: "/v1/maps",
+		tag: "maps",
+		roles: ["admin", "web"],
+		summary: "Exported maps: bounds, part counts, place version, alignment, the export's state, out of date",
+	},
+	{
+		method: "post",
+		path: "/v1/maps/export",
+		tag: "maps",
+		roles: ["admin"],
+		summary: "Export the maps' geometry (a read-only Luau Execution task; one at a time)",
+		description: "Map names come from the events' `map` prop; `names` adds more. Needs OPENCLOUD_API_KEY (universe.place.luau-execution-session:read and :write) and TYPETORCH_UNIVERSE_ID.",
+		body: obj({ names: arr(str(), "extra map names (at most 50)") }),
+		ok: { status: 202, description: "the export started" },
+	},
+	{
+		method: "get",
+		path: "/v1/maps/{name}/geometry",
+		tag: "maps",
+		roles: ["admin", "web"],
+		summary: "One map's geometry (binary TTMP, README \"Maps\"), with an ETag",
+		params: [p("name", "the map name as the events spell it (case and punctuation ignored), or (lobby)")],
+		ok: { status: 200, description: "the map's parts", contentType: "application/octet-stream" },
+	},
+	{
+		method: "put",
+		path: "/v1/maps/{name}/override",
+		tag: "maps",
+		roles: ["admin"],
+		summary: "A map's manual override: the model path and/or an offset",
+		params: [p("name", "the map name")],
+		body: obj({ path: str("an instance path, e.g. ReplicatedStorage.assets.maps.Mall"), offset: arr({ type: "number" }, "[x, y, z] studs") }),
+	},
+	{ method: "delete", path: "/v1/maps/{name}/override", tag: "maps", roles: ["admin"], summary: "Remove a map's override", params: [p("name", "the map name")] },
+
 	{ method: "get", path: "/v1/place", tag: "roblox", roles: ["admin", "web"], summary: "The game's name, live players and icon" },
 	{
 		method: "get",
@@ -567,6 +605,7 @@ const TAGS = [
 	["errors", "Error logs"],
 	["fleet", "Live game servers, deploy reports, alerts, remote debug"],
 	["roblox", "Lookups at Roblox, done by the server"],
+	["maps", "Exported map geometry for the 2D and 3D maps (plans/33)"],
 	["notify", "Experience notifications (plans/29): intents from game servers, the queue and sends for owners"],
 	["live", "The event bus"],
 	["admin", "Managing this server (owners)"],
