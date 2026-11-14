@@ -1077,6 +1077,18 @@ days before it; a custom range without a start date has nothing to compare and t
 dashed previous-period line, step by step. Errors compares the three count tiles with the window before. Performance adds a tile
 per metric (the picked percentile now vs before) and, without a grouping, the previous period as a dashed line on each chart.
 
+**Explain this change.** With **vs previous period** on, each Overview tile with a change chip (Players, New players,
+Returning, Sessions, Playtime, Avg session, Playtime per player) gets a **Why?** button, and the Retention page an **Explain the
+D1 change** button. Both open a side panel (`explain=<metric>` in the URL) running the [`explain`](#explain-this-change) query on
+the filter bar's range against the same period the chips compare with, under the same filters. It leads with a plain-language
+headline ("D1 fell 4.1 points; 72% of it is phones (rate) and 15% is a bigger share of join source teleport (mix)": the biggest
+effect, then the biggest of the other kind from another dimension), both periods' values, a picker of the dimensions (the one
+whose trusted segment explains the most first), a diverging bar chart of each segment's rate and mix effects, and a table of the
+segments with players, both values, the effects and their share of the change (small segments marked "few players"). A metric
+picker switches the metric (DAU, sessions per player, payer conversion, Robux per player, ...). Clicking a segment's name splits
+that segment by the other dimensions (one level; **All players** goes back). Code: `web/src/components/ExplainPanel.tsx`,
+`web/src/lib/explain.ts`.
+
 ## Row format
 
 Two row kinds, flat JSON, one object per row, as the framework writes them (`framework/src/analytics/SCHEMA.md`, the
@@ -1164,6 +1176,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `overview` | players, new players, sessions, playtime, in total and per day; windows of a day or less also per step (`bucketMs`: 1 min up to an hour, 5 min up to 6 h, else 1 h; `buckets`, by the time a session started) | 30 days |
 | `roblox` | first-play bounce (first session < 60 s), qualified plays (sessions >= 5 min), D1/D7, playtime and play days per user, payer conversion, Robux per user and per payer | 30 days |
 | `demographics` | who plays, from join events: country, language (`locale`, framework 2026-11-15 on), device, Roblox account age, Premium; each player once per dimension, `share` of the players with a join | 28 days |
+| `explain` | why a metric moved between two windows ([Explain this change](#explain-this-change)): `metric` (`players`, `dau`, `newPlayers`, `returningPlayers`, `sessions`, `playtime`, `playtimePerPlayer`, `sessionsPerPlayer`, `avgSession`, `d1`, `payerConversion`, `robuxPerPlayer`, `revenuePerPlayer`; default `players`) in the filter range vs `baseline` (`{from, to}`; default the same length right before it), per segment of `dimension` (`device`, `country`, `language`, `accountAge`, `premium`, `source`, `build`, `branch`, `playerType`, or `all`, the default): both windows' players, value and share, and a shift-share split of the change into `rate` and `mix` effects, ranked, the rest past `top` (8, at most 20) folded into one `other` row; `small` when a segment has fewer than `minPlayers` (30) players in a window; `within: {dimension, value}` for one segment only (the drill-down). Every filter applies | 7 days |
 | `retention` | retention by join-day cohort (`days`: up to 31 offsets from 1 to 90, default 1, 3, 7, 14, 30; the explorer asks for every day 1-30; days not over are `null`) | 30 days |
 | `funnel` | a funnel step by step: reached, share of start, from the step before, median time from the start; without a name, the list | 30 days |
 | `funnel-progress` | how far given players got in each funnel (`pids`, 1 to 500; `funnel` for one): furthest step, its place among the funnel's steps in the range, the share and `reachedAt` (when they first logged that step); `funnels` lists each funnel's step names (the Players table's funnel columns, whose cells and header list the steps on hover, focus or tap, and the player detail) | 30 days |
@@ -1207,6 +1220,49 @@ count a resent batch twice (only after a hot swap during a request). Graph optio
 true: each node's `events`, its top 5 custom / purchase / currency names, and `steps`, the funnel steps logged in it).
 `player-graph` takes `sid` for one session; it then also returns `path` (the visits in order with the time in each)
 and `ended`. Retention, bounce and "left the game" ignore sessions and days that aren't over yet.
+
+### Explain this change
+
+The `explain` query (`src/queries/explain.ts`) says which segments moved a metric between two windows: the current one is
+the filter range, the baseline the same length right before it (or `baseline`; the windows must not overlap, each at most
+400 days). Every filter of the filter bar applies to both.
+
+**Segments.** Each player belongs to one segment per dimension and window, the way `demographics` does it: the highest
+value their rows in that window carry. From the join events (`session` / `join`, Studio left out): `country` (upper case),
+`language` (`locale` without its region, lower case; joins before the framework sent `locale` have none), `accountAge`
+(`age`), `premium` (`prem`), `source` (the join source, `from`). From the rows: `device` (`dev`), `build` (`art`), `branch`.
+`playerType`: `new` when one of their sessions in the window was their first-ever (`newp`), else `returning`. A player
+with no value (no join in the window, e.g. a session that began before it) is in the `null` segment ("Not sent").
+
+**Metrics.** Each is a population of players per window with a numerator (and for ratios a denominator) per player, the
+same numbers as the queries behind the tiles:
+
+| Metric | Kind | Population, value |
+|---|---|---|
+| `players` | count | players with a session row in the window (`overview`'s Players) |
+| `dau` | count | player-days (distinct UTC days a player started a session) / the UTC days the window touches |
+| `newPlayers`, `returningPlayers` | count | players with a first-ever session in the window / without one (`overview`) |
+| `sessions` | count | sessions (one `sid`, cut to the window) |
+| `playtime` | count | hours, each session first to last event (`overview`) |
+| `playtimePerPlayer`, `sessionsPerPlayer` | ratio | playtime (minutes) or sessions, per player (players with a session row) |
+| `avgSession` | ratio | playtime (minutes) / sessions; the shares are of sessions |
+| `d1` | ratio | new players by their first newp row's UTC day (Studio left out), only cohorts whose day 1 is over (before today, UTC), back = a session started the day after with no segment filter (`roblox` / `retention`'s D1) |
+| `payerConversion` | ratio | players with a purchase / players with any row (`monetization`; distinct server-sent purchase rows) |
+| `robuxPerPlayer` | ratio | Robux paid (gross) / players with any row |
+| `revenuePerPlayer` | ratio | the same x `creatorShare` (0.7: net, what the creator keeps) |
+
+**The split.** A ratio is R = sum_i s_i r_i, with s_i the segment's share of the population and r_i its own value. Per
+segment, `rate` = (r1 - r0) x (s0 + s1) / 2 (the segment itself got better or worse) and `mix` = (s1 - s0) x ((r0 + r1) / 2
+- (R0 + R1) / 2) (its share of players changed; a bigger share only helps when it is above average). A segment missing from
+one window takes its value from the other (all mix). Rate and mix of every segment add up to R1 - R0 exactly (the test has a
+hand-checked case). For counts a segment's contribution is its own change, given as `rate` (`mix` = 0). `shareOfChange` =
+(rate + mix) / the change. Segments are ranked by |rate + mix|; past `top` they fold into one `other` row whose effects are
+the sum of theirs, so the totals stay exact. The dimensions overlap (each player is in one segment of every dimension), so
+shares add up to 100% within a dimension, never across them.
+
+**Too small to trust.** A segment with fewer than `minPlayers` (default 30) players in either window is still shown, with
+`small: true` ("few players" in the explorer): with so few players one or two of them move its value a lot. The explorer's
+headline skips small segments unless nothing else explains the change, and then says "few players".
 
 ### Roblox parity
 

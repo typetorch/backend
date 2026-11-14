@@ -1002,6 +1002,7 @@ export interface QueryResults {
 	roblox: RobloxResult;
 	retention: RetentionResult;
 	demographics: DemographicsResult;
+	explain: ExplainResult;
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;
 	"playtime-funnel": PlaytimeFunnelResult;
@@ -2277,4 +2278,59 @@ export interface NotifyUserOpen {
 	t: number;
 	sid: string;
 	jd: Record<string, unknown> | null;
+}
+
+// Explain this change (the `explain` query) ---------------------------------------------------------------------------------
+
+export type ExplainDimension = "device" | "country" | "language" | "accountAge" | "premium" | "source" | "build" | "branch" | "playerType";
+export type ExplainMetric =
+	| "players"
+	| "dau"
+	| "newPlayers"
+	| "returningPlayers"
+	| "sessions"
+	| "playtime"
+	| "playtimePerPlayer"
+	| "sessionsPerPlayer"
+	| "avgSession"
+	| "d1"
+	| "payerConversion"
+	| "robuxPerPlayer"
+	| "revenuePerPlayer";
+export type ExplainUnit = "players" | "sessions" | "hours" | "minutes" | "share" | "robux" | "number";
+
+export interface ExplainWithin {
+	dimension: ExplainDimension;
+	value: string | null;
+}
+
+export interface ExplainSegment {
+	/** null = not sent (or the `other` row). */
+	value: string | null;
+	other?: true;
+	segments?: number;
+	baseline: { players: number; value: number | null; share: number };
+	current: { players: number; value: number | null; share: number };
+	contribution: number;
+	/** The segment itself got better or worse (counts: its whole change). */
+	rate: number;
+	/** Its share of players changed (0 for counts). */
+	mix: number;
+	shareOfChange: number | null;
+	/** Fewer than minPlayers in a window: shown, not to be trusted. */
+	small: boolean;
+}
+
+/** The `explain` query: a metric in two windows, split by segment into rate and mix effects. */
+export interface ExplainResult {
+	metric: ExplainMetric;
+	kind: "ratio" | "count";
+	unit: ExplainUnit;
+	within: ExplainWithin | null;
+	minPlayers: number;
+	current: { from: string; to: string; value: number; players: number };
+	baseline: { from: string; to: string; value: number; players: number };
+	change: number;
+	relative: number | null;
+	dimensions: { dimension: ExplainDimension; segments: ExplainSegment[]; total: number }[];
 }
