@@ -31,6 +31,8 @@ const OPTIONS: Partial<Record<QueryName, object>> = {
 	deployReport: { maxAgeSeconds: 150 },
 	players: { search: "p00" },
 	events: { kind: "zone", name: "enter", limit: 50 },
+	// Player p0000's recorded first session (test/recordings.test.ts has a richer game).
+	"recording-replay": { sid: "s1" },
 };
 
 let instance: DuckDBInstance;

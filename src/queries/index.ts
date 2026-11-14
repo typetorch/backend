@@ -22,6 +22,7 @@ import { notifyQueue } from "./notify-queue.ts";
 import { monetization, monetizationPlayers, monetizationPurchases } from "./monetization.ts";
 import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
+import { firstAction, quitAutopsy, recordingLayers, recordingReplay, recordingSessions } from "./recordings.ts";
 import { playerEvents, playerSummary } from "./player-support.ts";
 import { perfClient, perfCompare, perfServer } from "./perf.ts";
 
@@ -46,6 +47,11 @@ export const QUERIES = {
 	experiment,
 	"experiment-players": experimentPlayers,
 	confusion,
+	"recording-layers": recordingLayers,
+	"recording-sessions": recordingSessions,
+	"recording-replay": recordingReplay,
+	"quit-autopsy": quitAutopsy,
+	"first-action": firstAction,
 	"top-events": topEvents,
 	servers,
 	deployReport,
