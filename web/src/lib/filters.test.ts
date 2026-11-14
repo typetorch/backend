@@ -60,3 +60,21 @@ describe("filters", () => {
 		expect(activeFilterCount({ range: "7d", branch: "dev", exp: "e" })).toBe(1);
 	});
 });
+
+describe("3 days and since the last prod deploy", () => {
+	it("3 days is today and the 2 before", () => {
+		expect(toApiFilters({ range: "3d" }, NOW)).toEqual({ from: "2026-10-03" });
+		expect(readFilters(new URLSearchParams("range=3d")).range).toBe("3d");
+		expect(describeRange({ range: "3d" })).toBe("last 3 days (UTC)");
+	});
+
+	it("deploy starts at the release's minute; today while it isn't known", () => {
+		const since = Date.UTC(2026, 9, 4, 9, 30, 25);
+		expect(toApiFilters({ range: "deploy", sinceMs: since, dev: "phone" }, NOW)).toEqual({ from: "2026-10-04T09:30:00.000Z", dev: "phone" });
+		expect(toApiFilters({ range: "deploy" }, NOW)).toEqual({ from: "2026-10-05" });
+		expect(readFilters(new URLSearchParams("range=deploy")).range).toBe("deploy");
+		// The release time is looked up, never written to the URL.
+		expect(writeFilters({ range: "deploy", sinceMs: since }, new URLSearchParams()).toString()).toBe("range=deploy");
+		expect(describeRange({ range: "deploy", sinceMs: since })).toBe("since the last prod deploy (2026-10-04 09:30 UTC)");
+	});
+});

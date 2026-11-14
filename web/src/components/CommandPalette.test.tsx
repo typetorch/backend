@@ -85,12 +85,12 @@ describe("command palette", () => {
 		const input = await screen.findByRole("combobox", NAME);
 		fireEvent.change(input, { target: { value: "last days" } });
 		const titles = screen.getAllByRole("option").map((o) => o.textContent);
-		expect(titles.slice(0, 3)).toEqual(expect.arrayContaining(["Last 7 days", "Last 30 days", "Last 90 days"]));
+		expect(titles.slice(0, 4)).toEqual(expect.arrayContaining(["Last 3 days", "Last 7 days", "Last 30 days", "Last 90 days"]));
 		fireEvent.keyDown(input, { key: "ArrowDown" });
 		const second = screen.getAllByRole("option")[1];
 		expect(second.getAttribute("aria-selected")).toBe("true");
 		fireEvent.keyDown(input, { key: "Enter" });
-		const range = { "Last 7 days": "7d", "Last 30 days": "", "Last 90 days": "90d" }[second.textContent as string];
+		const range = { "Last 3 days": "3d", "Last 7 days": "7d", "Last 30 days": "", "Last 90 days": "90d" }[second.textContent as string];
 		await waitFor(() => expect(where()).toBe(range ? `/players?range=${range}` : "/players"));
 	});
 
