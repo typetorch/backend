@@ -41,6 +41,8 @@ import type {
 	PlaceCardInfo,
 	RobloxAcquisition,
 	RobloxDemographics,
+	ErrorDropRules,
+	DropPreview,
 	RobloxProductInfo,
 	RobloxServerLogs,
 	PlayerProfile,
@@ -254,6 +256,8 @@ export function createApi(options: ApiOptions = {}) {
 				`/v1/fleet/reports${params.seq || params.artifact ? qs(params) : `?latest${params.branch ? `&branch=${encodeURIComponent(params.branch)}` : ""}`}`,
 				signal,
 			),
+		errorDropRules: (signal?: AbortSignal) => get<ErrorDropRules>("/v1/errors/drop-rules", signal),
+		previewDropRule: (expr: string, signal?: AbortSignal) => post<DropPreview>("/v1/errors/drop-rules/preview", { expr }, signal),
 		/** Runtime settings: values, sources, bounds and the audit list (the webhook only as set / not set). */
 		settings: (signal?: AbortSignal) => get<SettingsView>("/v1/admin/settings", signal),
 		/** Saves a partial change: { key: value }, or { key: null } to go back to the environment. Answers the new view. */

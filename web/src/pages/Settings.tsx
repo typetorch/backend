@@ -400,6 +400,17 @@ function SettingsForm({ data }: { data: SettingsView }) {
 					</ToggleGroup>
 				);
 			}
+			case "dropRules": {
+				const rules = Array.isArray(shown) ? (shown as { on: boolean }[]) : [];
+				return (
+					<span className="text-sm text-muted-foreground">
+						{rules.length ? `${rules.filter((r) => r.on).length} on, ${rules.length} in all` : "None"} ·{" "}
+						<a href="/errors?drop=1" className="underline underline-offset-2">
+							edit on the Errors page
+						</a>
+					</span>
+				);
+			}
 			case "kindSwitches": {
 				// Per kind on / off lives on the Notifications page; here only which kinds are off.
 				const off = Object.entries((shown ?? {}) as Record<string, boolean>).filter(([, v]) => v === false).map(([k]) => k);

@@ -433,6 +433,8 @@ export type PlaceCardInfo =
 			universeId: number | null;
 			name: string | null;
 			playing: number | null;
+			/** "fleet": Roblox gave no count (it hides the game from the server's region), so it's the sum of our servers' heartbeats. */
+			playingFrom?: "fleet";
 			/** An https icon on *.rbxcdn.com. */
 			icon: string | null;
 			/** https://www.roblox.com/games/<placeId>, or null while the PlaceId isn't known. */
@@ -1888,7 +1890,28 @@ export interface SavedQueryInput {
 
 /** "dashboard" = saved on the Settings page; "env" = the environment; "default" = neither (the built-in default). */
 export type SettingSource = "env" | "dashboard" | "default";
-export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number" | "alertRules" | "kindSwitches" | "names";
+export type SettingKind = "secret" | "choice" | "levels" | "ips" | "users" | "switch" | "number" | "alertRules" | "kindSwitches" | "names" | "dropRules";
+
+/** One error drop rule (backend src/errors/drop-rules.ts). */
+export interface ErrorDropRule {
+	id: string;
+	expr: string;
+	note?: string;
+	on: boolean;
+}
+
+/** GET /v1/errors/drop-rules. */
+export interface ErrorDropRules {
+	rules: (ErrorDropRule & { error?: string })[];
+	counts: Record<string, { items: number; occurrences: number; lastAt: number | null }>;
+	since: string;
+	source: "env" | "dashboard" | "default";
+}
+
+/** POST /v1/errors/drop-rules/preview. */
+export type DropPreview =
+	| { ok: false; error: string }
+	| { ok: true; days: number; kinds: number; matchedKinds: number; matchedOccurrences: number; allOccurrences: number; matches: { fp: string; template: string; realm: string; lastAt: string; occurrences: number }[] };
 
 /** One threshold of a backend alert rule (or a general value: repeatMinutes, perHour). */
 export interface AlertParamDef {

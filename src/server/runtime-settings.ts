@@ -20,6 +20,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { dirname, join } from "node:path";
 import { BACKEND_ALERTS_ENV, checkAlertSettings, defaultAlertSettings, rulesMeta, type BackendAlertSettings } from "../alerts/rules.ts";
 import { isHttpsUrl, parseUserIds, type ServerConfig } from "./config.ts";
+import { checkDropRules, DROP_RULES_MAX, type ErrorDropRule } from "../errors/drop-rules.ts";
 import { ipAllowed, parseIpRules, type IpRule } from "./ipfilter.ts";
 
 export const RUNTIME_SETTINGS_FILE = "runtime-settings.json";
@@ -58,6 +59,8 @@ export interface RuntimeValues {
 	errorKeepDays: number;
 	errorMaxKinds: number;
 	errorRowsPerDay: number;
+	/** Error drop rules (src/errors/drop-rules.ts): matching error logs are dropped at ingest, never stored. */
+	errorDropRules: ErrorDropRule[];
 	/** The backend alert rules (src/alerts/rules.ts): on/off, levels and thresholds. */
 	backendAlerts: BackendAlertSettings;
 	/** Days of audit log entries kept (server/audit.ts). */
@@ -111,7 +114,8 @@ export type SettingDef =
 	| (BaseDef & { kind: "number"; min: number; max: number; unit: string; zero?: string })
 	| (BaseDef & { kind: "alertRules" })
 	| (BaseDef & { kind: "kindSwitches"; maxEntries: number })
-	| (BaseDef & { kind: "names"; maxEntries: number });
+	| (BaseDef & { kind: "names"; maxEntries: number })
+	| (BaseDef & { kind: "dropRules"; maxEntries: number });
 
 /** The editable settings, in the order the Settings page shows them. Bounds apply to values saved from the dashboard. */
 export const SETTINGS: readonly SettingDef[] = [
@@ -131,6 +135,7 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "errorKeepDays", env: "TYPETORCH_ERROR_KEEP_DAYS", group: "retention", kind: "number", min: 1, max: 3650, unit: "days", label: "Error log history", help: "Days of error counts kept (pruned hourly)." },
 	{ key: "errorMaxKinds", env: "TYPETORCH_ERROR_MAX_KINDS", group: "retention", kind: "number", min: 100, max: 1_000_000, unit: "kinds", label: "Error kinds stored", help: "Past it, new kinds are dropped and counted." },
 	{ key: "errorRowsPerDay", env: "TYPETORCH_ERROR_ROWS_PER_DAY", group: "retention", kind: "number", min: 10_000, max: 1_000_000_000, unit: "rows / day", label: "Error rows per day", help: "New error count and player rows per UTC day; past it they are dropped and counted." },
+	{ key: "errorDropRules", env: "TYPETORCH_ERROR_DROP_RULES", group: "retention", kind: "dropRules", maxEntries: DROP_RULES_MAX, label: "Error drop rules", help: "Filter expressions: error logs a rule matches are dropped when they arrive and never stored (asset / mesh load failures and other noise). Edit them on the Errors page, with a preview of what each would drop." },
 	{ key: "auditKeepDays", env: "TYPETORCH_AUDIT_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 3650, unit: "days", label: "Audit log history", help: "Days of audit log entries kept (who did what on the admin side; pruned hourly)." },
 	{ key: "deployKeepDays", env: "TYPETORCH_DEPLOY_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 3650, unit: "days", label: "Deploy history", help: "Days of releases kept in the deploy history (at most 10,000 rows; pruned hourly)." },
 	{ key: "notify.enabled", env: "TYPETORCH_NOTIFY_ENABLED", group: "notify", kind: "switch", label: "Notifications", help: "Experience notifications: plan and send (off = paused; intents still queue)." },
@@ -322,6 +327,12 @@ export function checkSetting(def: SettingDef, raw: unknown, base?: unknown): Run
 			if (out.length > def.maxEntries) throw new SettingsError(`${def.key} holds at most ${def.maxEntries} names`, 400, def.key);
 			return out;
 		}
+		case "dropRules":
+			try {
+				return checkDropRules(raw);
+			} catch (error) {
+				throw new SettingsError((error as Error).message, 400, def.key);
+			}
 		case "kindSwitches": {
 			if (!isRecord(raw)) throw new SettingsError(`${def.key} is an object of kind name -> true / false`, 400, def.key);
 			const entries = Object.entries(raw);
@@ -362,6 +373,7 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		errorKeepDays: config.errorKeepDays,
 		errorMaxKinds: config.errorMaxKinds,
 		errorRowsPerDay: config.errorRowsPerDay,
+		errorDropRules: config.errorDropRules,
 		backendAlerts: config.backendAlerts ?? defaultAlertSettings(),
 		auditKeepDays: config.auditKeepDays,
 		deployKeepDays: config.deployKeepDays,

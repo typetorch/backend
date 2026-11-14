@@ -712,6 +712,28 @@ export class ErrorStore {
 	}
 
 	/** Right to erasure: the players' rows go (their counts stay, without them). */
+	/**
+	 * The stored kinds, most recently seen first (at most `limit`), with their occurrences since `since`: what a drop
+	 * rule's preview runs against.
+	 */
+	async kindsForPreview(since: number, limit = 5000): Promise<{ fp: string; template: string; stack: string | null; realm: string; branch: string | null; build: string | null; lastAt: number; recent: number }[]> {
+		const rows = await this.db.all<Record<string, unknown>>(
+			"SELECT k.fp AS fp, k.template AS template, k.stack AS stack, k.realm AS realm, k.last_branch AS branch, k.last_build AS build, k.last_at AS last_at, " +
+				"COALESCE((SELECT SUM(c.n) FROM error_counts c WHERE c.fp = k.fp AND c.minute >= ?), 0) AS recent FROM error_kinds k ORDER BY k.last_at DESC LIMIT ?",
+			[Math.floor(since / MINUTE), limit],
+		);
+		return rows.map((r) => ({
+			fp: String(r.fp),
+			template: String(r.template),
+			stack: r.stack === null || r.stack === undefined ? null : String(r.stack),
+			realm: String(r.realm),
+			branch: r.branch === null || r.branch === undefined ? null : String(r.branch),
+			build: r.build === null || r.build === undefined ? null : String(r.build),
+			lastAt: Number(r.last_at),
+			recent: Number(r.recent),
+		}));
+	}
+
 	async erasePids(pids: string[]): Promise<number> {
 		let removed = 0;
 		for (let i = 0; i < pids.length; i += 200) {

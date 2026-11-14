@@ -19,6 +19,8 @@ import { DeployMarksToggle, MarkHoverCard, markerLines, useDeployMarks, useOpenD
 import { UserIdLink } from "@/components/Identity";
 import { PlayerPageLink, playerLabel } from "@/components/PlayerLink";
 import { Sparkline } from "@/components/Sparkline";
+import { ErrorDropRules, exactRuleFor } from "@/components/ErrorDropRules";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -29,6 +31,7 @@ import { previousWindow, useCompare } from "@/lib/compare";
 import { fmtAgo, fmtInt, fmtTime, plural, shortId } from "@/lib/format";
 import { bucketIndex, groupMarks, markDeploySeq } from "@/lib/deploys";
 import { useParam } from "@/lib/hooks";
+import { isReadOnly, useAuth } from "@/lib/auth";
 import type { DeployMark } from "@/lib/perf";
 import type { ErrorDetail, ErrorKind, ErrorList, ErrorPlayer, ErrorPlayers } from "@/lib/types";
 import { JobLink } from "./server/shared";
@@ -357,14 +360,21 @@ function KindPlayers({ fp, params }: { fp: string; params: ErrorParams }) {
 	);
 }
 
-function KindDetail({ fp, params }: { fp: string; params: ErrorParams }) {
+function KindDetail({ fp, params, onDrop }: { fp: string; params: ErrorParams; onDrop?: (template: string) => void }) {
 	const window = params.window ?? "24h";
 	const query = useQuery({ queryKey: ["errors", "kind", fp, params], queryFn: ({ signal }) => api.errorKind(fp, params, signal), refetchInterval: 30_000 });
 	return (
 		<QueryState query={query} loadingRows={4}>
 			{(d) => (
 				<div className="space-y-4">
-					<div className="break-words font-mono text-sm">{d.kind.template}</div>
+					<div className="flex items-start justify-between gap-3">
+						<div className="min-w-0 break-words font-mono text-sm">{d.kind.template}</div>
+						{onDrop ? (
+							<Button size="xs" variant="outline" className="shrink-0" onClick={() => onDrop(d.kind.template)} title="Open the drop rules with a rule for exactly this message">
+								Drop errors like this
+							</Button>
+						) : null}
+					</div>
 					<div className="flex flex-wrap gap-x-6 gap-y-1">
 						<KeyValue label="in this window">{plural(d.count, "time")}</KeyValue>
 						<KeyValue label="players affected">{fmtInt(d.players)}</KeyValue>
@@ -409,6 +419,14 @@ export default function Errors() {
 	const [build, setBuild] = useParam("build");
 	const [q, setQ] = useParam("q");
 	const [selected, setSelected] = useParam("fp");
+	// ?drop=1 (the Settings page's link) opens the drop rules on arrival; after that it's plain state, so closing one sheet
+	// and opening the other in the same click can't race two URL updates.
+	const [dropParam] = useParam("drop");
+	const [dropOpen, setDropOpen] = useState(dropParam === "1");
+	const [dropDraft, setDropDraft] = useState<string | undefined>();
+	const canEdit = !isReadOnly(useAuth());
+	const dropRules = useQuery({ queryKey: ["errors", "drop-rules"], queryFn: ({ signal }) => api.errorDropRules(signal), refetchInterval: 30_000 });
+	const activeRules = dropRules.data?.rules.filter((r) => r.on).length ?? 0;
 	const params: ErrorParams = { window, ...(realm ? { realm } : {}), ...(branch ? { branch } : {}), ...(build ? { build } : {}), ...(q ? { q } : {}) };
 	// The search only picks which kinds are listed; one kind's reads take the window and the other filters.
 	const { q: _search, ...kindParams } = params;
@@ -479,6 +497,9 @@ export default function Errors() {
 						</Select>
 						<TextFilter value={q} onCommit={setQ} placeholder="search text" label="Search" className="w-40" />
 						<CompareToggle title="Show the change against the window before, of the same length" />
+						<Button variant="outline" size="sm" onClick={() => setDropOpen(true)} title="Error logs these rules match are dropped when they arrive, never stored">
+							Drop rules{activeRules ? ` (${activeRules})` : ""}
+						</Button>
 						<Status tone={streamTone}>{stream === "live" ? "live" : stream === "retrying" ? "stream lost, retrying" : "connecting"}</Status>
 					</>
 				}
@@ -504,7 +525,40 @@ export default function Errors() {
 						<SheetTitle>Selected error</SheetTitle>
 						<SheetDescription>{WINDOWS.find((w) => w.value === window)?.label ?? window}, under the page's filters.</SheetDescription>
 					</div>
-					<div className="p-4">{selected ? <KindDetail fp={selected} params={kindParams} /> : null}</div>
+					<div className="p-4">
+						{selected ? (
+							<KindDetail
+								fp={selected}
+								params={kindParams}
+								{...(canEdit
+									? {
+											onDrop: (template: string) => {
+												setDropDraft(exactRuleFor(template));
+												setSelected("");
+												setDropOpen(true);
+											},
+										}
+									: {})}
+							/>
+						) : null}
+					</div>
+				</SheetContent>
+			</Sheet>
+			<Sheet
+				open={dropOpen}
+				onOpenChange={(open) => {
+					setDropOpen(open);
+					if (!open) setDropDraft(undefined);
+				}}
+			>
+				<SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl">
+					<div className="space-y-1 border-b p-4 pr-10">
+						<SheetTitle>Drop rules</SheetTitle>
+						<SheetDescription>Filter expressions for error logs that shouldn't be stored.</SheetDescription>
+					</div>
+					<div className="p-4">
+						<ErrorDropRules canEdit={canEdit} {...(dropDraft !== undefined ? { draft: dropDraft } : {})} />
+					</div>
 				</SheetContent>
 			</Sheet>
 		</>
