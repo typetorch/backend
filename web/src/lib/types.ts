@@ -112,6 +112,39 @@ export interface RetentionResult {
 	average: Record<string, number | null>;
 }
 
+/** One cell of the `ltv` query: the cohort's numbers from its join day through day N. */
+export interface LtvCell {
+	/** Robux paid (gross). */
+	robux: number;
+	robuxPerPlayer: number;
+	/** What the creator keeps per player (robuxPerPlayer x creatorShare). */
+	revenuePerPlayer: number;
+	payers: number;
+	payerShare: number;
+	/** Today (UTC), so far. */
+	partial?: true;
+	/** The average row: the new players it is weighted over. */
+	players?: number;
+}
+
+export interface LtvCohort {
+	date: string;
+	size: number;
+	/** offset -> numbers; null while that day hasn't started. */
+	days: Record<string, LtvCell | null>;
+}
+
+/** The `ltv` query: revenue per join-day cohort. */
+export interface LtvResult {
+	from: string;
+	to: string;
+	days: number[];
+	creatorShare: number;
+	cohorts: LtvCohort[];
+	average: Record<string, LtvCell | null>;
+	todayElapsed: number;
+}
+
 export interface FunnelStep {
 	step: number;
 	label: string | null;
@@ -1013,6 +1046,7 @@ export interface QueryResults {
 	overview: OverviewResult;
 	roblox: RobloxResult;
 	retention: RetentionResult;
+	ltv: LtvResult;
 	demographics: DemographicsResult;
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;
