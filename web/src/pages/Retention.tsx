@@ -1,6 +1,9 @@
 import { useMemo } from "react";
 import { cn } from "cn";
+import { ChartBarStacked } from "lucide-react";
 import { DataTable, type DataColumn } from "@/components/data-table";
+import { ExplainPanel, useExplain } from "@/components/ExplainPanel";
+import { Button } from "@/components/ui/button";
 import { PageHeader, QueryState, Section } from "@/components/common";
 import { fmtInt, plural } from "@/lib/format";
 import { useAnalytics } from "@/lib/hooks";
@@ -154,15 +157,23 @@ export const RETENTION_DAYS = Array.from({ length: 30 }, (_, i) => i + 1);
 
 export default function Retention() {
 	const q = useAnalytics("retention", { days: RETENTION_DAYS });
+	const [, explain] = useExplain();
 	return (
 		<>
 			<PageHeader
 				title="Retention"
+				actions={
+					<Button variant="outline" size="sm" onClick={() => explain("d1")} title="Which segments moved D1 against the period before, of the same length">
+						<ChartBarStacked />
+						Explain the D1 change
+					</Button>
+				}
 				description="New players by the day they joined, and how many came back on each day from 1 to 30 (D1 = the day after joining). Today (UTC) shows the share back so far in orange; later days show –. Hide days under Columns."
 			/>
 			<QueryState query={q} isEmpty={(d) => d.cohorts.length === 0} empty="No new players joined in this range.">
 				{(data) => <Body data={data} />}
 			</QueryState>
+			<ExplainPanel />
 		</>
 	);
 }

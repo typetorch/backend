@@ -38,6 +38,8 @@
  *   GET  /v1/saved-queries[/<id>]   the Query page's saved queries; POST, PATCH /<id>, DELETE /<id> for admins (saved-queries.ts)
  *   GET  /v1/experiments/<key>/players?variant=&from=&to=|window=&limit=..  the players in one experiment (at most 200):
  *        variant, random or forced, assigned / first / last seen, UserId and Roblox name (experiment-players.ts)
+ *   POST /v1/experiments/<key>/change  owners: start / stop / split / settle / clear checked, audited, and answered with
+ *        the signed `typetorch experiment ...` command that applies it (experiment-change.ts; never applied here)
  *   GET  /v1/experiments            the experiment overrides this server knows (data/settings.json: active, weights,
  *        variant per experiment; nothing else from the file), or none
  *   GET  /v1/live?topics=..         Server-Sent Events of the event bus (server/live.ts)
@@ -89,6 +91,7 @@ import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
 import { compileDropExpr, DropRuleError, ErrorDropper, type ErrorDropRule } from "../errors/drop-rules.ts";
 import { handleErrorReads, handlePlayerErrors, handleServerErrors, type PlayerIdentity } from "../errors/http.ts";
 import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
+import { CHANGE_BODY_MAX, EXPERIMENT_NAME, ExperimentChangeInput, parseChange, prepareChange, type ChangeRequest, type PreparedChange } from "./experiment-change.ts";
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import type { FunnelPlayersResult } from "../queries/funnel.ts";
 import type { MonetizationPlayersResult, MonetizationPurchasesResult } from "../queries/monetization.ts";
@@ -1488,6 +1491,53 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return json(200, { source: "settings-file", experiments });
 	}
 
+	/**
+	 * POST /v1/experiments/<key>/change (owners): the checked change and the signed CLI command that applies it
+	 * (experiment-change.ts: the signing keys never reach this server), recorded in the audit log.
+	 */
+	async function experimentChange(req: Request, rawName: string): Promise<Response> {
+		let experiment: string;
+		try {
+			experiment = decodeURIComponent(rawName);
+		} catch {
+			return json(400, { error: "bad experiment name" });
+		}
+		if (!EXPERIMENT_NAME.test(experiment)) return json(400, { error: "experiment name: 1-64 letters, digits and _ - . /" });
+		if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { action, weights?, variant?, variants? }" });
+		const raw = await readCapped(req, CHANGE_BODY_MAX);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: unknown;
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8"));
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		let prepared: PreparedChange;
+		let request: ChangeRequest;
+		try {
+			request = parseChange(body);
+			prepared = prepareChange(experiment, request);
+		} catch (error) {
+			if (error instanceof ExperimentChangeInput) {
+				noteAudit(req, { action: "experiment.prepare", outcome: "failed", details: { experiment, error: error.message.slice(0, 200) } });
+				return json(400, { error: error.message });
+			}
+			throw error;
+		}
+		noteAudit(req, {
+			action: "experiment.prepare",
+			details: {
+				experiment,
+				change: request.action,
+				...(request.weights ? { weights: request.weights } : {}),
+				...(request.variant !== undefined ? { variant: request.variant } : {}),
+				...(request.variants ? { variants: request.variants } : {}),
+				command: prepared.command,
+			},
+		});
+		return json(200, prepared);
+	}
+
 	/** GET /v1/experiments/<key>/players (every signed-in reader, like the Experiments page's queries). */
 	async function experimentPlayersRead(path: string, url: URL): Promise<Response> {
 		const warehouse = analyticsOr();
@@ -2859,6 +2909,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const logs = /^\/v1\/roblox\/servers\/([^/]+)\/logs$/.exec(path);
 			if (logs) return method === "GET" ? serverLogs(logs[1] as string, url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/experiments") return method === "GET" ? experimentOverrides() : json(405, { error: "GET only" });
+			const change = /^\/v1\/experiments\/([^/]+)\/change$/.exec(path);
+			if (change) {
+				if (method !== "POST") return json(405, { error: "POST only" });
+				const admin = manage();
+				return admin instanceof Response ? admin : experimentChange(req, change[1] as string);
+			}
 			if (path.startsWith("/v1/experiments/")) return method === "GET" ? experimentPlayersRead(path, url) : json(405, { error: "GET only" });
 			const playerErrors = /^\/v1\/players\/([^/]+)\/errors$/.exec(path);
 			if (playerErrors) {
