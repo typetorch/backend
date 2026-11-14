@@ -98,6 +98,13 @@ function playerEvents(ctx: QueryContext, f: NormalizedFilters, from: number, to:
 	return `SELECT ${cols} FROM ${ctx.table("events", from, to)} e WHERE ${playerRows(fr, ctx, NOT_STUDIO)}`;
 }
 
+/** Trends' last bucket: the last full UTC day (24 h), or the bucket holding the earlier of `to` and now (6 / 12 h). */
+function lastTrendBucket(ctx: QueryContext, to: number, hours: number): number {
+	if (hours === 24) return lastFullDay(ctx, to);
+	const B = hours * 3_600_000;
+	return Math.floor((Math.min(to, ctx.now + 1) - 1) / B);
+}
+
 /** The last full UTC day at or before `to` (today isn't over, so at most yesterday). */
 function lastFullDay(ctx: QueryContext, to: number): number {
 	return Math.min(Math.floor((to - 1) / DAY_MS), Math.floor(ctx.now / DAY_MS) - 1);
@@ -433,8 +440,10 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 // trends -----------------------------------------------------------------------------------------------------------
 
 export interface TrendsOptions {
-	/** Moving-average window, days (default 7). */
+	/** Moving-average window, in buckets (default 7). */
 	window: number;
+	/** Bucket length in hours: 24 (default, full UTC days), 12 or 6 (the current bucket included, marked partial). */
+	bucketHours: number;
 	/** Join sources shown separately (busiest first); the rest is "other" (default 6). */
 	maxSources: number;
 	robuxKey: string;
@@ -464,16 +473,28 @@ export interface TrendsResult {
 	creatorShare: number;
 	/** Join sources (session/join `from`), busiest first; "other" folds the rest, "unknown" = no join row. */
 	sources: string[];
-	/** Full UTC days only: the last one is yesterday at the latest. */
-	days: { date: string; total: TrendValues; bySource: Record<string, TrendValues> }[];
+	bucketHours: number;
+	/**
+	 * One point per bucket. Days (bucketHours 24): full UTC days only, the last one yesterday at the latest, `date` is
+	 * YYYY-MM-DD. 12 / 6 hours: `date` is the bucket's start (ISO), the current bucket included with `partial: true`;
+	 * D1 is null (a per-day measure).
+	 */
+	days: { date: string; partial?: boolean; total: TrendValues; bySource: Record<string, TrendValues> }[];
 }
+
+const TREND_BUCKET_HOURS = [6, 12, 24];
 
 export const trends = defineQuery<TrendsOptions, TrendsResult>({
 	name: "trends",
-	summary: "per full UTC day, moving averages of new users, DAU, session time, playtime per DAU, revenue and D1, in total and per join source",
+	summary: "per full UTC day (or 12 / 6 hours), moving averages of new users, DAU, session time, playtime per DAU, revenue and D1, in total and per join source",
 	defaultDays: 28,
 	options: (input = {}) => ({
 		window: intOption(input.window, "window", 7, 1, 28),
+		bucketHours: (() => {
+			const h = intOption(input.bucketHours, "bucketHours", 24, 6, 24);
+			if (!TREND_BUCKET_HOURS.includes(h)) throw new Error("bucketHours must be 6, 12 or 24");
+			return h;
+		})(),
 		maxSources: intOption(input.maxSources, "maxSources", 6, 1, 20),
 		robuxKey: assertSafeKey(input.robuxKey ?? PROP_KEYS.purchaseRobux, "robuxKey"),
 		creatorShare: shareOption(input.creatorShare),
@@ -481,10 +502,13 @@ export const trends = defineQuery<TrendsOptions, TrendsResult>({
 	statements(ctx, f, o) {
 		const lim = ctx.dialect.limit;
 		const d = ctx.dialect;
-		const firstDay = Math.floor(f.from / DAY_MS) - (o.window - 1);
-		const lastDay = lastFullDay(ctx, f.to);
-		const lo = firstDay * DAY_MS;
-		const hi = (lastDay + 2) * DAY_MS; // one more day: the last cohort's return day
+		// "day" below is a bucket (a UTC day with bucketHours 24).
+		const B = o.bucketHours * 3_600_000;
+		const dayOf = (col: string) => `CAST(floor(${col} / ${B}.0) AS BIGINT)`;
+		const firstDay = Math.floor(f.from / B) - (o.window - 1);
+		const lastDay = lastTrendBucket(ctx, f.to, o.bucketHours);
+		const lo = firstDay * B;
+		const hi = Math.max((lastDay + 1) * B, (Math.floor(lastDay * (B / DAY_MS)) + 2) * DAY_MS); // one more day: the last cohort's return day
 		const sessions =
 			`WITH ev AS (${playerEvents(ctx, f, lo - SESSION_SLACK_MS, hi, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp, e.kind AS kind, e.name AS name, e.props AS props, e.src AS esrc")}), ` +
 			`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS t0, MAX(t) AS t1, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew, ` +
@@ -535,9 +559,11 @@ export const trends = defineQuery<TrendsOptions, TrendsResult>({
 			}
 		};
 		for (const r of rows.days) add(num(r.day), str(r.src), { dau: num(r.dau), newUsers: num(r.new_users), playtime: num(r.playtime_ms), sessions: num(r.sessions), robux: num(r.robux) });
-		for (const r of rows.d1) add(num(r.cday), str(r.src), { cohort: num(r.cohort), kept: num(r.kept) });
-		const first = Math.floor(f.from / DAY_MS);
-		const last = lastFullDay(ctx, f.to);
+		const daily = o.bucketHours === 24;
+		if (daily) for (const r of rows.d1) add(num(r.cday), str(r.src), { cohort: num(r.cohort), kept: num(r.kept) });
+		const B = o.bucketHours * 3_600_000;
+		const first = Math.floor(f.from / B);
+		const last = lastTrendBucket(ctx, f.to, o.bucketHours);
 		const average = (day: number, src: string): TrendValues => {
 			const window = Array.from({ length: o.window }, (_, i) => raw.get(`${day - o.window + 1 + i}|${src}`) ?? zero());
 			const total = (k: keyof Raw) => window.reduce((s, v) => s + v[k], 0);
@@ -551,13 +577,14 @@ export const trends = defineQuery<TrendsOptions, TrendsResult>({
 				playtimeMinutes: minutesOrNull(playtime),
 				robux: round(total("robux") / o.window, 2),
 				revenue: round((total("robux") * o.creatorShare) / o.window, 2),
-				d1: d1 === null ? null : rate4(d1),
+				d1: !daily || d1 === null ? null : rate4(d1),
 			};
 		};
 		const days: TrendsResult["days"] = [];
 		for (let day = first; day <= last; day++) {
-			days.push({ date: isoDay(day), total: average(day, "*"), bySource: Object.fromEntries(sources.map((s) => [s, average(day, s)])) });
+			const point = { date: daily ? isoDay(day) : iso(day * B), total: average(day, "*"), bySource: Object.fromEntries(sources.map((s) => [s, average(day, s)])) };
+			days.push((day + 1) * B > ctx.now ? { ...point, partial: true } : point);
 		}
-		return { from: iso(f.from), to: iso(f.to), window: o.window, creatorShare: o.creatorShare, sources, days };
+		return { from: iso(f.from), to: iso(f.to), window: o.window, bucketHours: o.bucketHours, creatorShare: o.creatorShare, sources, days };
 	},
 });

@@ -583,39 +583,72 @@ const SOURCE_LABELS: Record<string, string> = {
 	other: "Other",
 };
 
+/** The chart's ranges in days back (0 = today). */
+export const TREND_RANGES = [0, 3, 7, 14, 28, 56, 90];
+
+/** The granularity choice (`?trendWindow=`): 6 h / 12 h buckets, each day, or the 7-day moving average. */
+export function trendStep(choice: string, days: number): { key: string; bucketHours: number; window: number; title: string; description: string } {
+	const key = days === 0 && (choice === "1" || choice === "7") ? "6h" : ["6h", "12h", "1", "7"].includes(choice) ? choice : "7";
+	const sources = "total and per join source (where the player's first session in it came from)";
+	if (key === "6h" || key === "12h") {
+		const h = key === "6h" ? 6 : 12;
+		return { key, bucketHours: h, window: 1, title: `Every ${h} hours`, description: `Per ${h} hours (UTC), ${sources}. The running ${h} hours show too, marked "so far".` };
+	}
+	if (key === "1") return { key, bucketHours: 24, window: 1, title: "Daily values", description: `Per full UTC day, ${sources}: each day's own value.` };
+	return {
+		key,
+		bucketHours: 24,
+		window: 7,
+		title: "Snapshot of 7-day moving averages",
+		description: `Per full UTC day, ${sources}. Counts are averaged over the 7 days; ratios are the mean of the 7 daily values.`,
+	};
+}
+
+/** Axis tick: "11-13" for a day, "11-13 06:00" for a 6 / 12 h bucket. */
+export const trendTick = (d: string) => (d.length > 10 ? `${d.slice(5, 10)} ${d.slice(11, 16)}` : d.slice(5));
+/** Tooltip title: "2026-11-13" or "2026-11-13 06:00-12:00 UTC". */
+export function trendLabel(d: string, hours: number): string {
+	if (d.length <= 10) return d;
+	const start = Date.parse(d);
+	const end = new Date(start + hours * 3_600_000).toISOString().slice(11, 16);
+	return `${d.slice(0, 10)} ${d.slice(11, 16)}-${end === "00:00" ? "24:00" : end} UTC`;
+}
+
 function Trends({ filters }: { filters: Filters }) {
 	const [metric, setMetric] = useParam("trend", "d1");
 	const [range, setRange] = useParam("trendDays", "28");
-	// "1": each day's own value (the change day to day); "7": the 7-day moving average (smoother).
 	const [smooth, setSmooth] = useParam("trendWindow", "7");
-	const windowDays = smooth === "1" ? 1 : 7;
-	const days = Number.parseInt(range, 10) || 28;
-	// The last `days` full UTC days: the query leaves today out (it isn't over).
+	const days = TREND_RANGES.includes(Number(range)) ? Number(range) : 28;
+	// Today has no full day yet: a daily view of it shows 6-hour buckets instead.
+	const step = trendStep(smooth, days);
+	// From `days` UTC days back (0 = today's midnight). Daily views end yesterday; 6 / 12 h include today so far.
 	const from = isoDate(Date.now() - days * 86_400_000);
-	const q = useAnalytics("trends", { window: windowDays }, { filters: { ...filters, from } });
+	const q = useAnalytics("trends", { window: step.window, ...(step.bucketHours !== 24 ? { bucketHours: step.bucketHours } : {}) }, { filters: { ...filters, from } });
 	const spec = TRENDS.find((t) => t.key === metric) ?? TRENDS[0];
 	return (
 		<Section
 			title={
 				<span className="flex items-center gap-1.5">
-					{windowDays === 1 ? "Daily values" : "Snapshot of 7-day moving averages"}
+					{step.title}
 					<DiffersBadge differs={{ label: "Ours", why: JOIN_SOURCES_DIFFER }} />
 				</span>
 			}
-			description={
-				windowDays === 1
-					? "Per full UTC day, total and per join source (where the player's first session that day came from): each day's own value."
-					: "Per full UTC day, total and per join source (where the player's first session that day came from). Counts are averaged over the 7 days; ratios are the mean of the 7 daily values."
-			}
+			description={step.description}
 			actions={
 				<div className="flex gap-2">
-					<Select value={windowDays === 1 ? "1" : "7"} onValueChange={setSmooth}>
-						<SelectTrigger size="sm" className="w-36" aria-label="Smoothing">
+					<Select value={step.key} onValueChange={setSmooth}>
+						<SelectTrigger size="sm" className="w-36" aria-label="Granularity">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
-							<SelectItem value="1">Daily</SelectItem>
-							<SelectItem value="7">7-day average</SelectItem>
+							<SelectItem value="6h">Every 6 hours</SelectItem>
+							<SelectItem value="12h">Every 12 hours</SelectItem>
+							<SelectItem value="1" disabled={days === 0}>
+								Daily
+							</SelectItem>
+							<SelectItem value="7" disabled={days === 0}>
+								7-day average
+							</SelectItem>
 						</SelectContent>
 					</Select>
 					<Select value={String(days)} onValueChange={setRange}>
@@ -623,9 +656,9 @@ function Trends({ filters }: { filters: Filters }) {
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
-							{[14, 28, 56, 90].map((d) => (
+							{TREND_RANGES.map((d) => (
 								<SelectItem key={d} value={String(d)}>
-									Last {d} days
+									{d === 0 ? "Today" : `Last ${d} days`}
 								</SelectItem>
 							))}
 						</SelectContent>
@@ -646,7 +679,8 @@ function Trends({ filters }: { filters: Filters }) {
 			<QueryState query={q} isEmpty={(r) => r.days.every((d) => d.total.dau === 0)} empty="No players in this range yet.">
 				{(r) => {
 					const pick = (v: TrendValues | undefined) => (v ? v[spec.key] : null);
-					const rows = r.days.map((d) => ({ date: d.date, total: pick(d.total), ...Object.fromEntries(r.sources.map((s) => [s, pick(d.bySource[s])])) }));
+					const rows = r.days.map((d) => ({ date: d.date, partial: d.partial === true, total: pick(d.total), ...Object.fromEntries(r.sources.map((s) => [s, pick(d.bySource[s])])) }));
+					if (spec.key === "d1" && step.bucketHours !== 24) return <EmptyState>D1 retention is a per-day measure: pick Daily or 7-day average.</EmptyState>;
 					if (!rows.some((row) => typeof row.total === "number" && row.total > 0)) {
 						return (
 							<EmptyState>
@@ -664,9 +698,19 @@ function Trends({ filters }: { filters: Filters }) {
 						<ChartContainer config={config} className="aspect-auto h-72 w-full">
 							<LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
 								<CartesianGrid vertical={false} />
-								<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={28} tickFormatter={(d: string) => d.slice(5)} />
+								<XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={6} minTickGap={28} tickFormatter={trendTick} />
 								<YAxis tickLine={false} axisLine={false} width={48} tickFormatter={(v: number) => spec.format(v)} />
-								<ChartTooltip content={<ChartTooltipContent formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${typeof v === "number" ? spec.format(v) : "–"}`} />} />
+								<ChartTooltip
+									content={
+										<ChartTooltipContent
+											labelFormatter={(_l, items) => {
+												const p = items?.[0]?.payload as { date?: string; partial?: boolean } | undefined;
+												return p?.date ? `${trendLabel(p.date, step.bucketHours)}${p.partial ? " (so far)" : ""}` : "";
+											}}
+											formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${typeof v === "number" ? spec.format(v) : "–"}`}
+										/>
+									}
+								/>
 								<ChartLegend content={<ChartLegendContent />} />
 								<Line dataKey="total" stroke="var(--color-total)" strokeWidth={2.5} dot={false} isAnimationActive={false} connectNulls={false} />
 								{r.sources.map((s) => (
