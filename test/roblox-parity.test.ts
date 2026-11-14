@@ -159,7 +159,9 @@ describe("retention and roblox use the same cohort rule", () => {
 describe("trends", () => {
 	test("one point per full UTC day; ratios are the mean of the window's daily values", async () => {
 		const r = await store.query("trends", { from: isoDay(-3) }, { window: 2 });
-		expect(r.days.map((d) => d.date)).toEqual([isoDay(-3), isoDay(-2), isoDay(-1)]); // not today
+		expect(r.days.map((d) => d.date)).toEqual([isoDay(-3), isoDay(-2), isoDay(-1), isoDay(0)]); // today so far last
+		expect(r.days.map((d) => d.partial === true)).toEqual([false, false, false, true]);
+		expect(r.days[3].total).toMatchObject({ dau: 0.5, newUsers: 0.5, d1: null }); // T at 02:00 today, over the 2-day window
 		const [d3, d2, d1] = r.days.map((d) => d.total);
 		expect(d3).toMatchObject({ dau: 1, newUsers: 1, sessionMinutes: 20, playtimeMinutes: 20, d1: 0.5 });
 		expect(d2.dau).toBe(2);
