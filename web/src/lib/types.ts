@@ -112,6 +112,42 @@ export interface RetentionResult {
 	average: Record<string, number | null>;
 }
 
+export type ChurnBucket = "active" | "at_risk" | "lapsing" | "churned";
+
+/** One player of the `churn` query. */
+export interface ChurnPlayer {
+	pid: string;
+	bucket: ChurnBucket;
+	firstPlayed: string;
+	lastPlayed: string;
+	daysSince: number;
+	/** Median days between play days; null with one play day. */
+	usualGap: number | null;
+	playDays: number;
+	/** Play days in the last 14 days, and in the 14 before. */
+	recentDays: number;
+	priorDays: number;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+	/** Owners only: the notification opt-in the backend learned (subscribed / not_subscribed), null when unknown. */
+	optin?: string | null;
+}
+
+/** The `churn` query: churn risk from play patterns. */
+export interface ChurnResult {
+	from: string;
+	to: string;
+	asOf: string;
+	players: number;
+	buckets: { bucket: ChurnBucket; players: number; share: number }[];
+	payers: Record<ChurnBucket, number>;
+	bucket: ChurnBucket | null;
+	list: ChurnPlayer[];
+	total: number;
+	more: number;
+}
+
 /** One cell of the `ltv` query: the cohort's numbers from its join day through day N. */
 export interface LtvCell {
 	/** Robux paid (gross). */
@@ -1047,6 +1083,7 @@ export interface QueryResults {
 	roblox: RobloxResult;
 	retention: RetentionResult;
 	ltv: LtvResult;
+	churn: ChurnResult;
 	demographics: DemographicsResult;
 	funnel: FunnelResult;
 	"funnel-progress": FunnelProgressResult;

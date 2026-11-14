@@ -14,7 +14,8 @@
  *   plus the query and SQL POSTs), never a change (every other POST / PUT / PATCH is refused by method) and never the
  *   server's own configuration: the settings file, storage, the runtime settings, the access list, the debug audit
  *   POST /v1/query/<name>           { filters, options } -> { result }        GET /v1/queries
- *        (experiment-players, funnel-players, monetization-players and monetization-purchases get UserIds and cached Roblox names joined in, erased players left out)
+ *        (experiment-players, funnel-players, monetization-players, monetization-purchases and churn get UserIds and cached Roblox names joined in, erased players left out;
+ *        churn also each player's notification opt-in for owners)
  *   GET  /v1/rollups/<daily|players|player_days|edges>?from=&to=&pid=&limit=   (from / to: dates, or unix ms / ISO instants)
  *   POST /v1/sql                    { sql, limit? }: one read-only SELECT
  *   GET  /v1/storage                bytes and files per part of the data folder
@@ -92,6 +93,7 @@ import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-pla
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
 import type { FunnelPlayersResult } from "../queries/funnel.ts";
 import type { MonetizationPlayersResult, MonetizationPurchasesResult } from "../queries/monetization.ts";
+import type { ChurnResult } from "../queries/churn.ts";
 import type { FeedbackListResult } from "../queries/feedback.ts";
 import { ErrorQueueFull, ErrorStore } from "../errors/store.ts";
 import { DAY_MS } from "../sql/dialect.ts";
@@ -1377,7 +1379,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 	}
 
-	async function query(req: Request, name: string): Promise<Response> {
+	/** POST /v1/query/<name>; `owner`: the caller may read owner-only data (the notification opt-in state on `churn`). */
+	async function query(req: Request, name: string, owner = false): Promise<Response> {
 		const warehouse = analyticsOr();
 		if (warehouse instanceof Response) return warehouse;
 		if (!isQueryName(name)) return json(404, { error: `unknown query ${JSON.stringify(name)}` });
@@ -1437,6 +1440,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const found = result as FeedbackListResult;
 				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.rows });
 				result = { ...found, total, rows: players };
+			}
+			if (name === "churn") {
+				// UserIds and names (erased players left out), and for owners each player's notification opt-in as the
+				// backend learned it (subscribed / not_subscribed / null): who a win-back notification can reach.
+				const found = result as ChurnResult;
+				const { total, players } = await withPlayerIdentities({ total: found.total, players: found.list });
+				const optin = owner ? await notify.store.optinOf(players.flatMap((p) => (p.uid !== undefined ? [p.uid] : []))) : undefined;
+				const list = optin ? players.map((p) => ({ ...p, optin: p.uid !== undefined ? (optin.get(p.uid) ?? null) : null })) : players;
+				result = { ...found, total, more: Math.max(0, total - list.length), list };
 			}
 			if (name === "timeline" || name === "player-graph" || name === "player-stats") {
 				const r = result as { pid?: string; uid?: number };
@@ -2845,7 +2857,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				return method === "GET" ? json(200, access.get()) : putAccess(req, admin);
 			}
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
-			if (q) return method === "POST" ? query(req, q[1]) : json(405, { error: "POST only" });
+			if (q) return method === "POST" ? query(req, q[1], gate.principal.role === "admin") : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);
 			if (r && method === "GET") return rollups(url, r[1]);
 			return notFound();

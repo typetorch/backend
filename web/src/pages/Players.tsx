@@ -2,6 +2,7 @@ import { Copy, ListPlus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { DataTable, type DataColumn, type SortSpec } from "@/components/data-table";
+import { ChurnBadge, ChurnRisk, churnFilters } from "@/components/ChurnRisk";
 import { IdentityStatus } from "@/components/Identity";
 import { PlayerDetail } from "@/components/player-detail/PlayerDetail";
 import { PlayerHover } from "@/components/PlayerHover";
@@ -16,7 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { useRegisterCommands } from "@/lib/commands";
 import { fmtAgo, fmtInt, fmtMinutes, plural, shortId } from "@/lib/format";
-import { useAnalytics, useParam } from "@/lib/hooks";
+import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import type { FunnelProgress, PlayerSummary } from "@/lib/types";
 
 const PID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -50,7 +51,8 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 	// spenders), not the 100 most recent re-sorted.
 	const q = useAnalytics("players", { limit: 100, ...(search ? { search } : {}), ...(sort ? { orderBy: sort.id, desc: sort.desc } : {}) }, { enabled: valid, keepPrevious: true });
 	const [funnels, setFunnels] = useFunnelColumns();
-	const columns = useFunnelProgressColumns(q.data?.players, funnels);
+	const funnelColumns = useFunnelProgressColumns(q.data?.players, funnels);
+	const columns = useChurnColumn(q.data?.players, funnelColumns);
 	return (
 		<Section
 			title="Players"
@@ -99,6 +101,33 @@ function PlayerList({ selected, onPick, initial }: { selected: string; onPick(pi
 			</QueryState>
 		</Section>
 	);
+}
+
+/**
+ * The Risk column (after Seen): each listed player's churn bucket from one `churn` lookup of the listed pids (the
+ * same 90 days and filters as the Churn risk section), "–" for a player it doesn't place.
+ */
+function useChurnColumn(players: readonly PlayerSummary[] | undefined, columns: DataColumn<PlayerSummary>[]): DataColumn<PlayerSummary>[] {
+	const { apiFilters } = useFilters();
+	const filters = useMemo(() => churnFilters(apiFilters), [apiFilters]);
+	const pids = useMemo(() => (players ?? []).slice(0, 200).map((p) => p.pid), [players]);
+	const risk = useAnalytics("churn", { pids }, { filters, enabled: pids.length > 0 });
+	return useMemo(() => {
+		const by = new Map((risk.data?.list ?? []).map((p) => [p.pid, p]));
+		const column: DataColumn<PlayerSummary> = {
+			id: "risk",
+			header: "Risk",
+			title: "Churn risk: the last play day against the player's usual gap (last 90 days; see Churn risk below)",
+			accessor: (p) => by.get(p.pid)?.bucket ?? null,
+			cell: (p) => {
+				const r = by.get(p.pid);
+				if (r) return <ChurnBadge bucket={r.bucket} />;
+				return risk.isPending ? <Skeleton className="h-4 w-14" /> : <span className="text-muted-foreground">–</span>;
+			},
+		};
+		const at = columns.findIndex((c) => c.id === "lastSeen");
+		return [...columns.slice(0, at + 1), column, ...columns.slice(at + 1)];
+	}, [columns, risk.data, risk.isPending]);
 }
 
 /** The columns the server orders by (the players query's orderBy). */
@@ -279,7 +308,7 @@ export default function Players() {
 	}, [find]);
 	return (
 		<>
-			<PageHeader title="Players" description="Find a player by pid (random ids, never a UserId) or UserId, then read their spending, playtime, sessions and timeline." />
+			<PageHeader title="Players" description="Find a player by pid (random ids, never a UserId) or UserId, then read their spending, playtime, sessions and timeline. Churn risk (who is drifting away) is at the bottom." />
 			<div className="space-y-4">
 				<div>
 					<PlayerList selected={pid} onPick={pick} initial={find} />
@@ -290,6 +319,7 @@ export default function Players() {
 				<div ref={detailRef} className="scroll-mt-36">
 					{pid && PID.test(pid) ? <PlayerDetail pid={pid} /> : <EmptyState>Pick a player in the list.</EmptyState>}
 				</div>
+				<ChurnRisk onPick={pick} />
 			</div>
 		</>
 	);
