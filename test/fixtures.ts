@@ -65,7 +65,7 @@ export function generateFixture(seed = 7): Fixture {
 			let screen = "";
 			const push = (kind: EventRow["kind"], name: string, props?: object, at = t) =>
 				events.push({ ...base, t: at, kind, name, state: state(zone, screen), ...(props ? { props: JSON.stringify(props) } : {}) });
-			push("session", "join", { from: "direct", age: "1-7d", prem: false, friends: 0, ret: first ? -1 : 1 });
+			push("session", "join", { from: "direct", age: "1-7d", prem: i % 4 === 0, friends: 0, ret: first ? -1 : 1, country: (["US", "GB", "BR"] as const)[i % 3], ...(i % 5 === 4 ? {} : { locale: i % 2 === 0 ? "en-us" : "pt-br" }) });
 			if (first) push("experiment", "onboarding", { variant });
 			// Onboarding funnel in the first session.
 			if (first) {

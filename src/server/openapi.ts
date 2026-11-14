@@ -478,6 +478,14 @@ const ROUTES: Route[] = [
 		summary: "Roblox's play-through rate, impressions and qualified plays (Open Cloud Analytics Query API)",
 		params: [q("days", "7, 14 or 28 (default 7)", int())],
 	},
+	{
+		method: "get",
+		path: "/v1/roblox/demographics",
+		tag: "roblox",
+		roles: ["admin", "web"],
+		summary: "Creator Hub's Demographics: daily active users per age group, gender, locale, country, platform and OS (Open Cloud Analytics Query API)",
+		params: [q("from", "unix ms or ISO (default 28 days before to)"), q("to", "unix ms or ISO (default now)"), q("dev", "devices, comma-separated: Roblox's Platform"), q("players", "new or returning: Roblox's IsNewUser")],
+	},
 
 	// Live ----------------------------------------------------------------------------------------------------------------------
 	{ method: "get", path: "/v1/live", tag: "live", roles: ["admin", "web"], summary: "Server-Sent Events of the event bus", ok: { status: 200, description: "an event stream", contentType: "text/event-stream" } },

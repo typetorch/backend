@@ -2,6 +2,7 @@
 import { normalizeFilters, type Filters, type NormalizedFilters } from "../sql/filters.ts";
 import { benchmarks, realtime, trends } from "./benchmarks.ts";
 import { confusion } from "./confusion.ts";
+import { demographics } from "./demographics.ts";
 import { economy } from "./economy.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment, experimentPlayers } from "./experiment.ts";
@@ -24,6 +25,7 @@ export const QUERIES = {
 	overview,
 	roblox,
 	retention,
+	demographics,
 	funnel,
 	"funnel-progress": funnelProgress,
 	"playtime-funnel": playtimeFunnel,

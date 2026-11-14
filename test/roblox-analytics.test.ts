@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { queryAnalyticsMetric } from "../src/opencloud.ts";
-import { METRICS, RobloxAnalytics, RobloxAnalyticsError } from "../src/server/roblox-analytics.ts";
+import { METRICS, ROBLOX_MAX_DAYS, RobloxAnalytics, RobloxAnalyticsError, robloxWindow } from "../src/server/roblox-analytics.ts";
 import { ADMIN, API, asJson, bearer, harness, T0, type Harness } from "./harness.ts";
 
 const UNIVERSE = 5_550_001;
@@ -174,5 +174,110 @@ describe("the fetcher alone", () => {
 		await expect(queryAnalyticsMetric({ ...base, fetch: answer({ done: false, path: "../../etc" }) })).rejects.toMatchObject({ status: 502 });
 		await expect(queryAnalyticsMetric({ ...base, fetch: answer({ done: true, error: { code: 2001, message: "bad metric" } }) })).rejects.toThrow("bad metric");
 		expect(await queryAnalyticsMetric({ ...base, fetch: answer({ done: true, response: { values: [{ breakdowns: [{ dimension: "Platform" }], dataPoints: [{ time: day(0), value: "7" }] }] } }) })).toEqual([{ breakdowns: [], dataPoints: [{ time: day(0), value: 7 }] }]);
+	});
+});
+
+describe("Roblox demographics", () => {
+	const D = 86_400_000;
+	const now = Date.UTC(2026, 10, 15, 9);
+	const today = Date.UTC(2026, 10, 15);
+
+	test("the window: the range's full UTC days that are over; no full day -> the last full day; capped", () => {
+		// "Last 7 days" in the filter bar: 6 days ago 00:00 to now -> 6 full days.
+		expect(robloxWindow(today - 6 * D, now, now)).toMatchObject({ from: "2026-11-09T00:00:00.000Z", to: "2026-11-15T00:00:00.000Z", days: 6 });
+		expect(robloxWindow(today - 6 * D, now, now).note).toContain("full UTC days");
+		// A custom range of whole past days: exactly those, no note.
+		expect(robloxWindow(today - 10 * D, today - 3 * D, now)).toEqual({ from: "2026-11-05T00:00:00.000Z", to: "2026-11-12T00:00:00.000Z", days: 7 });
+		// The last hour: no full day -> yesterday.
+		expect(robloxWindow(now - 3_600_000, now, now)).toMatchObject({ from: "2026-11-14T00:00:00.000Z", to: "2026-11-15T00:00:00.000Z", days: 1 });
+		// Three hours yesterday afternoon -> that day.
+		expect(robloxWindow(today - 8 * 3_600_000, today - 5 * 3_600_000, now)).toMatchObject({ from: "2026-11-14T00:00:00.000Z", to: "2026-11-15T00:00:00.000Z", days: 1 });
+		expect(robloxWindow(today - 1000 * D, today, now).days).toBe(ROBLOX_MAX_DAYS);
+	});
+
+	test("one DailyActiveUsers query per card; device / new players as Roblox filters matched on its own values; a refused card keeps its error; a refused key fails", async () => {
+		const asked: Record<string, any>[] = [];
+		let keyRefused = false;
+		const fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body));
+			asked.push(body);
+			if (keyRefused) return new Response(JSON.stringify({ errors: [{ message: "Scope not authorized." }] }), { status: 403 });
+			const dim = body.breakdown[0];
+			if (dim === "Gender") return new Response(JSON.stringify({ message: "dimension not supported" }), { status: 400 });
+			const at = { time: body.startTime, value: 0, status: "Valid" };
+			const row = (value: string, users: number, displayValue?: string) => ({ breakdowns: [{ dimension: dim, value, ...(displayValue ? { displayValue } : {}) }], dataPoints: [{ ...at, value: users }] });
+			const values =
+				dim === "AgeGroupV2"
+					? [row("Age21Plus", 587, "21+"), row("Age18To20", 267, "18-20"), row("Age16To17", 146, "16-17"), row("Unknown", 0)]
+					: dim === "Platform"
+						? [row("Computer", 50, "Desktop"), row("Phone", 40), row("Tablet", 10)]
+						: dim === "IsNewUser"
+							? [row("true", 30), row("false", 70)]
+							: [row("x", 5)];
+			return Response.json({ path: "x", done: true, response: { values } });
+		}) as typeof globalThis.fetch;
+		const ra = new RobloxAnalytics({ apiKey: "k", universeId: UNIVERSE, fetch, clock: () => now, perMinute: 100 });
+		const r = await ra.demographics({ from: today - 28 * D, to: today });
+		expect(asked.map((b) => b.breakdown[0]).sort()).toEqual(["AgeGroupV2", "Country", "Gender", "Locale", "OperatingSystem", "Platform"]);
+		for (const b of asked) {
+			expect(b).toMatchObject({ metric: "DailyActiveUsers", granularity: "None", startTime: "2026-10-18T00:00:00.000Z", endTime: "2026-11-15T00:00:00.000Z" });
+			expect(b.filter).toBeUndefined();
+			expect(b.limit).toBeGreaterThan(0);
+		}
+		expect(r.window).toEqual({ from: "2026-10-18T00:00:00.000Z", to: "2026-11-15T00:00:00.000Z", days: 28 });
+		const age = r.breakdowns.AgeGroupV2;
+		if ("error" in age) throw new Error("expected rows");
+		expect(age.total).toBe(1000);
+		expect(age.rows).toEqual([
+			{ value: "Age21Plus", label: "21+", users: 587, share: 0.587 },
+			{ value: "Age18To20", label: "18-20", users: 267, share: 0.267 },
+			{ value: "Age16To17", label: "16-17", users: 146, share: 0.146 },
+		]);
+		expect(r.breakdowns.Gender).toHaveProperty("error");
+		expect((await ra.demographics({ from: today - 28 * D, to: today })).cached).toBe(true);
+
+		// Desktop (Roblox calls it Computer, shown as Desktop) and new players.
+		asked.length = 0;
+		const f = await ra.demographics({ from: today - 7 * D, to: today, dev: ["desktop", "phone"], players: "new" });
+		const discovery = asked.filter((b) => !b.filter);
+		expect(discovery.map((b) => b.breakdown[0]).sort()).toEqual(["IsNewUser", "Platform"]);
+		const cards = asked.filter((b) => b.filter);
+		expect(cards).toHaveLength(6);
+		for (const b of cards)
+			expect(b.filter).toEqual([
+				{ dimension: "Platform", operation: "In", values: ["Computer", "Phone"] },
+				{ dimension: "IsNewUser", operation: "In", values: ["true"] },
+			]);
+		expect(f.applied).toEqual([
+			{ filter: "device", dimension: "Platform", values: ["Computer", "Phone"] },
+			{ filter: "players", dimension: "IsNewUser", values: ["true"] },
+		]);
+		expect(f.notApplied).toEqual([]);
+		// The values are cached a day: a second filtered answer asks no discovery query.
+		asked.length = 0;
+		await ra.demographics({ from: today - 14 * D, to: today, dev: ["tablet"] });
+		expect(asked.every((b) => b.filter)).toBe(true);
+		// A device Roblox has no platform for: not filtered, and said why.
+		const vr = await ra.demographics({ from: today - 14 * D, to: today, dev: ["vr"] });
+		expect(vr.applied).toEqual([]);
+		expect(vr.notApplied[0]).toMatchObject({ filter: "device" });
+		expect(vr.notApplied[0]?.reason).toContain("Desktop");
+
+		keyRefused = true;
+		const fresh = new RobloxAnalytics({ apiKey: "k", universeId: UNIVERSE, fetch, clock: () => now, perMinute: 100 });
+		await expect(fresh.demographics({ from: today - 7 * D, to: today })).rejects.toMatchObject({ status: 502 });
+	});
+
+	test("the route: filters parsed and checked, 409 without the key", async () => {
+		const h = await harness({});
+		try {
+			expect((await h.call("/v1/roblox/demographics?dev=fridge", { headers: bearer(ADMIN) })).status).toBe(400);
+			expect((await h.call("/v1/roblox/demographics?art=x", { headers: bearer(ADMIN) })).status).toBe(400);
+			expect((await h.call("/v1/roblox/demographics?from=2026-11-01&to=2026-10-01", { headers: bearer(ADMIN) })).status).toBe(400);
+			expect((await h.call("/v1/roblox/demographics?dev=phone&players=new", { headers: bearer(ADMIN) })).status).toBe(409);
+			expect((await h.call("/v1/roblox/demographics", {})).status).toBe(401);
+		} finally {
+			await h.close();
+		}
 	});
 });

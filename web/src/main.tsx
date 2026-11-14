@@ -51,6 +51,7 @@ const router = createBrowserRouter([
 			{ path: "notifications", lazy: page(() => import("@/pages/Notifications")) },
 			{ path: "feedback", lazy: page(() => import("@/pages/Feedback")) },
 			{ path: "retention", lazy: page(() => import("@/pages/Retention")) },
+			{ path: "demographics", lazy: page(() => import("@/pages/Demographics")) },
 			{ path: "funnels", lazy: page(() => import("@/pages/Funnels")) },
 			{ path: "players", lazy: page(() => import("@/pages/Players")) },
 			{ path: "flow", lazy: page(() => import("@/pages/Flow")) },
