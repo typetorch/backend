@@ -22,7 +22,7 @@ import { useAnalytics } from "@/lib/hooks";
 import type { FirstActionSplit, FirstActionStat, QuitAutopsyRow, RecFrame, RecSampling, RecordingLayersResult } from "@/lib/types";
 import { MapView, type ToView } from "./recordings/MapView";
 import { ACTION_LABELS, NO_MAP, REASON_LABELS, RECORDING_LAYERS, cellBox, layerColor, layerName, mapName } from "./recordings/map";
-import { ReplayPlayer, whyLabel } from "./recordings/ReplayPlayer";
+import { ReplayPlayer } from "./recordings/ReplayPlayer";
 
 const TABS = ["layers", "replay", "autopsy", "first"] as const;
 type Tab = (typeof TABS)[number];
