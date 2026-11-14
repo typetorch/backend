@@ -433,7 +433,9 @@ Revoked and expired keys answer 401 like unknown ones; `last_used_at` is written
 - `GET /v1/players/by-uid/<uid>/events?names=&since=&before=&limit=` (1..100, default 50; `since` / `before` unix ms,
   default the last 30 days): `{ uid, known, pids, rows: [{ t, name, kind, pid, job, props }], more }`, every pid of the
   UserId from `identities`, newest first, `props` an object. Names must be in the runtime setting `players.supportEvents`
-  (default `ac_flag,ac_action,ac_honeypot,join,leave`; `join` / `leave` / `device` are the `session` rows) unless the caller is an
+  (default `ac_flag,ac_action,ac_honeypot,join,leave`; `join` / `leave` / `device` are the `session` rows; `feedback` is the
+  player feedback, the `feedback` kind's rows (named `feedback` in the answer) and the older `custom/feedback` rows, and
+  no other name reaches the `feedback` kind) unless the caller is an
   admin: else `403 { error: "event_not_allowed", name }`. `GET .../summary?since=`: `{ uid, known, pids, since, byName,
   byCategory, sessions, lastSeen, playtimeSecs, robuxSpent, purchases }`. An unknown UserId: `known: false`. Named queries `player-events` / `player-summary`
   (DuckDB and Basin). Every call writes a `players.read` audit row (key id and name, role, route template, status, IP, a
@@ -1176,6 +1178,8 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `notify-player` | one player's notify rows (`pids`, at most 20): prompt checks / shown / closed (where, secs, err), inferred consent, opens, plays; newest first (`limit` 500); `opens`: the join rows that came from a send (props carry its `nid`) with their raw join data `jd` (plans/30). Behind `GET /v1/notify/user` | 400 days |
 | `notify-queue` | notification sends per hour (planned, sent, dry, failed, 429s, skipped), planned by why, skipped by kind and why, failures by kind, HTTP status and code (final or retried). The live queue is `GET /v1/notify/status` | 1 day |
 | `monetization-purchases` | the latest purchases, newest first: player, session, product, kind, Robux paid, revenue and `where` (`limit`, 50, at most 200) | 30 days |
+| `feedback-summary` | [player feedback](#player-feedback) (plans/32): `total`, `withText`, `players`, `rated`, `legacy`, `avgNorm`; `scales`: one distribution per scale (`scale`, `type`, `steps`, `legacy`, `n`, `rated`, `textOnly`, `counts` per `r` with every step listed and its `label`, `labels` seen, `avgR`, `avgNorm`, `firstAt` / `lastAt`; newest scale first); `thumbs` (`up`, `down`, `upShare` over the thumbs scales, or null); `trend` of `n`, `rated`, `withText`, `avgNorm` per hour (`bucket: "hour"`, ranges up to 2 days) or per UTC day. Every filter applies | 30 days |
+| `feedback-list` | player feedback rows, newest first (`limit` 50, at most 200; `offset`, at most 5,000; `total`, `more`): `t`, `pid`, `sid`, `dev`, `state`, `scale`, `type`, `steps`, `r`, `norm`, `label`, `text`, `len`, `topic`, `ctx`, `play_s`, `legacy`. Options `pid` (or `uid`), `scale`, `r`, `hasText`, `q` (a case-insensitive substring of the text, at most 100 characters); the device filter is the filters' `dev`. Over `POST /v1/query/feedback-list` with `uid` / `name` / `displayName` joined in and erased players left out | 30 days |
 
 Session length is the time between a session's first and last event (`join` and `leave`). Delivery is at least
 once: the DuckDB server drops exact duplicate rows when it writes each day's Parquet file; today's numbers and Basin can
@@ -1836,6 +1840,24 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
 - **Erasure**: the Right to Erasure path deletes the user's rows in all three tables and their queued sends.
 - **Limits**: 200 items and 256 KB per intents request, 6000 notify requests a minute per address (plus the ingest limit),
   2,000,000 pending intents at most (`full`), 30 admin sends / config / key changes a minute.
+
+## Player feedback
+
+Plans/32 (`plans/32-feedback.md`, the row contract). The game calls `TypeTorch.feedback().submit(player, { rating?, text?,
+topic?, ctx? })` on the server; the framework validates and rate-limits it and writes one `kind = feedback`,
+`name = submit` row (`src = server`; ingest refuses the kind from a client, as purchases). Props: `scale`, `type`
+(`thumbs` / `stars` / `scale`), `steps`, `r`, `norm` (0..1), `label`, `text`, `len`, `topic`, `play_s`, `ctx`. No UserId or
+username on the row: the explorer resolves pid -> user through `identities`.
+
+- **Older rows**: CuceGame's `kind = custom, name = feedback` rows (`{ rating 1..5, text, length }`) read as scale
+  `legacy_faces5` (type `scale`, 5 steps, labels BAD / MEH / OK / GOOD / GREAT, norm = (rating - 1) / 4), mapped at query
+  time and marked `legacy: true`. No migration; their `username` prop is never returned.
+- **Queries**: `feedback-summary` and `feedback-list` (see [Queries](#queries); `src/queries/feedback.ts`). A scale
+  change is safe: every row carries its scale, so each scale gets its own distribution and the trend uses `norm`.
+- **Explorer**: the **Feedback** page (next to Notifications; its own range picker, device, rating, has text and search
+  filters) and a **Feedback** view in the player detail (`feedback-list` with the pid).
+- **Support keys** (plans/31): `feedback` in `players.supportEvents` opens a player's feedback rows; it is not in the
+  default list.
 
 ## Privacy
 

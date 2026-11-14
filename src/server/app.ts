@@ -1274,7 +1274,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		// pid <-> UserId from the identity table: a UserId instead of a pid, or a UserId as a players search.
 		const queryOptions: Record<string, unknown> = { ...(isRecordLike(body.options) ? body.options : {}) };
-		if ((name === "timeline" || name === "player-graph" || name === "player-stats" || name === "events") && queryOptions.pid === undefined && queryOptions.uid !== undefined) {
+		if ((name === "timeline" || name === "player-graph" || name === "player-stats" || name === "events" || name === "feedback-list") && queryOptions.pid === undefined && queryOptions.uid !== undefined) {
 			const uid = parseUid(queryOptions.uid);
 			if (uid === undefined) return json(400, { error: "uid must be a UserId (digits)" });
 			const known = await identities.byUid(uid);
