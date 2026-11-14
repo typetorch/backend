@@ -207,6 +207,9 @@ const JOIN_DIMENSIONS = new Set<ExplainDimension>(["country", "language", "accou
 function segmentCte(ctx: QueryContext, d: ExplainDimension, name: string): string {
 	if (d === "playerType") return `${name} AS (SELECT w, pid, CASE WHEN MAX(CASE WHEN newp THEN 1 ELSE 0 END) = 1 THEN 'new' ELSE 'returning' END AS v FROM ev GROUP BY w, pid)`;
 	const rows = JOIN_DIMENSIONS.has(d) ? "ev WHERE kind = 'session' AND name = 'join' AND studio = 0" : "ev";
+	// A player's rows from before the client reported its device say "unknown"; any real device wins over it (a plain
+	// MAX would pick "unknown", which sorts after every device name).
+	if (d === "device") return `${name} AS (SELECT w, pid, COALESCE(MAX(NULLIF(NULLIF(dev, ''), 'unknown')), MAX(NULLIF(dev, ''))) AS v FROM ${rows} GROUP BY w, pid)`;
 	return `${name} AS (SELECT w, pid, MAX(NULLIF(${segmentExpr(ctx, d)}, '')) AS v FROM ${rows} GROUP BY w, pid)`;
 }
 

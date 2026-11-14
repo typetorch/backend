@@ -674,3 +674,26 @@ test("unknown queries and bad filters are refused", async () => {
 	expect(() => store.render("overview", { dev: "fridge" as never })).toThrow("dev must be one of");
 	expect(() => store.render("overview", { variant: { experiment: "a'b", variant: "x" } })).toThrow("experiment");
 });
+
+describe("device per player: a real device wins over 'unknown'", () => {
+	test("demographics and explain count a player under the device they reported, not the 'unknown' rows from before it", async () => {
+		// Every player's first row (the join) says "unknown", as on live servers before the client reports its device.
+		const seen = new Set<string>();
+		const events = fx.events.map((e) => {
+			if (!e.pid || seen.has(e.pid)) return e;
+			seen.add(e.pid);
+			return { ...e, dev: "unknown" as const };
+		});
+		const db = await fixtureDb({ ...fx, events });
+		try {
+			const s = new DuckDbStore(db.connection, (name) => name, () => NOW);
+			const devices = (await s.query("demographics")).dimensions.device.map((x) => x.value);
+			expect(devices).not.toContain("unknown");
+			const r = await s.query("explain", {}, { metric: "players", dimension: "device" });
+			expect(r.dimensions[0]?.segments.map((x) => x.value)).not.toContain("unknown");
+		} finally {
+			db.connection.closeSync();
+			db.instance.closeSync();
+		}
+	});
+});
