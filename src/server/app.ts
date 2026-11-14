@@ -150,6 +150,10 @@ import { measureStorage, type StorageReport } from "./storage.ts";
 import type { BackendBus, BackendTopics } from "./topics.ts";
 import { RawLogClosed } from "./raw.ts";
 import { Warehouse } from "./warehouse.ts";
+import { LiveEventError, LiveEventStore, signCommands, signedViewOf, syncOf, type SignedView } from "./live-events.ts";
+import { AFTER_DAYS_MAX, WEEKS_MAX, buildLiftReport, planLiftWindows, type LiftReport } from "./live-event-lift.ts";
+import { getDataStoreEntry } from "../opencloud.ts";
+import type { LiveEventLiftResult } from "../queries/live-event-lift.ts";
 import { GeoIpUpdater } from "./geoip.ts";
 
 export interface AppOptions {
@@ -377,6 +381,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys],
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
+	// Scheduled live events (live-events.ts): the schedule the owner signs with the CLI, and each event's lift report.
+	const liveEvents = await LiveEventStore.open(sqlite, clock);
 	// Plans/29: experience notifications, in notify.db next to the fleet file. Backend rows go to the events like a game's.
 	const notify = await NotifyService.open({
 		fleetDb: config.fleetDb,
@@ -2253,6 +2259,139 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// Named API keys (plans/31) ------------------------------------------------------------------------------------------
 
+	// Live events ------------------------------------------------------------------------------------------------------
+
+	/** The signed settings record as last read (Open Cloud), shared by every reader; read again after LIVE_SIGNED_TTL_MS. */
+	let signedView: SignedView | undefined;
+	let signedRead: Promise<SignedView> | undefined;
+	const LIVE_SIGNED_TTL_MS = 60_000;
+	const LIVE_SIGNED_REFRESH_MS = 10_000;
+	async function readSigned(refresh: boolean): Promise<SignedView> {
+		const now = clock();
+		const age = signedView ? now - Date.parse(signedView.readAt) : Infinity;
+		if (signedView && age < (refresh ? LIVE_SIGNED_REFRESH_MS : LIVE_SIGNED_TTL_MS)) return signedView;
+		if (!config.openCloudKey || !config.universeId) return { state: "unconfigured", readAt: new Date(now).toISOString() };
+		signedRead ??= (async () => {
+			try {
+				const value = await getDataStoreEntry({ apiKey: config.openCloudKey as string, universeId: config.universeId as number, dataStore: "TypeTorch", entry: "settings", attempts: 1, timeoutMs: 10_000, ...(options.fetch ? { fetch: options.fetch } : {}) });
+				return signedViewOf(value, central?.blessKeys.list() ?? [], clock());
+			} catch (error) {
+				return { state: "error" as const, error: ((error as Error).message ?? String(error)).slice(0, 300), readAt: new Date(clock()).toISOString() };
+			}
+		})().finally(() => {
+			signedRead = undefined;
+		});
+		signedView = await signedRead;
+		return signedView;
+	}
+
+	/** Lift reports by event and options, for a few minutes (each runs a multi-window scan). */
+	const liftCache = new Map<string, { at: number; report: LiftReport }>();
+	const LIFT_CACHE_MS = 5 * 60_000;
+
+	/**
+	 * GET /v1/live-events (every signed-in reader: the events with their sync state, the schedule and the CLI command),
+	 * POST /v1/live-events (owners: create), POST /v1/live-events/<id>/cancel (owners), GET /v1/live-events/<id>/lift
+	 * (every reader: the lift report).
+	 */
+	async function liveEventsRoute(req: Request, path: string, url: URL, manage: () => (Principal & { role: "admin" }) | Response): Promise<Response> {
+		const method = req.method;
+		if (path === "/v1/live-events") {
+			if (method === "GET") {
+				const signed = await readSigned(url.searchParams.get("refresh") === "1");
+				const now = clock();
+				const schedule = liveEvents.schedule();
+				const events = liveEvents.list().map((e) => ({ ...e, sync: syncOf(e, signed, now) }));
+				const needsSigning = events.some((e) => e.sync === "unsigned" || e.sync === "outdated" || e.sync === "cancel-unsigned");
+				return json(200, { now: new Date(now).toISOString(), events, schedule, commands: signCommands(schedule), signed, needsSigning });
+			}
+			if (method !== "POST") return json(405, { error: "GET or POST only" });
+			const admin = manage();
+			if (admin instanceof Response) return admin;
+			if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { name, values, start, end, note? }" });
+			const raw = await readCapped(req, 16 * 1024);
+			if (!raw) return json(413, { error: "body too large" });
+			let body: unknown;
+			try {
+				body = JSON.parse(Buffer.from(raw).toString("utf8"));
+			} catch {
+				return json(400, { error: "body is not JSON" });
+			}
+			try {
+				const made = await liveEvents.create(body, actorOf(admin).who);
+				noteAudit(req, { action: "live-events.create", details: { id: made.id, name: made.name, keys: Object.keys(made.values), start: made.start, end: made.end } });
+				log(`live event ${made.id} (${made.name}, ${made.start} to ${made.end}) scheduled by ${actorOf(admin).who}`);
+				return json(201, { event: made, commands: signCommands(liveEvents.schedule()) });
+			} catch (error) {
+				if (error instanceof LiveEventError) {
+					noteAudit(req, { action: "live-events.create", outcome: error.status === 409 ? "refused" : "failed", details: { error: error.message } });
+					return json(error.status, { error: error.message });
+				}
+				throw error;
+			}
+		}
+		const m = /^\/v1\/live-events\/(ev_[0-9a-z]{10})\/(cancel|lift)$/.exec(path);
+		if (!m) return json(404, { error: "not found" });
+		const id = m[1] as string;
+		if (m[2] === "cancel") {
+			if (method !== "POST") return json(405, { error: "POST only" });
+			const admin = manage();
+			if (admin instanceof Response) return admin;
+			try {
+				const done = await liveEvents.cancel(id, actorOf(admin).who);
+				noteAudit(req, { action: "live-events.cancel", details: { id, name: done.name } });
+				log(`live event ${id} (${done.name}) cancelled by ${actorOf(admin).who}`);
+				return json(200, { event: done, commands: signCommands(liveEvents.schedule()) });
+			} catch (error) {
+				if (error instanceof LiveEventError) {
+					noteAudit(req, { action: "live-events.cancel", outcome: "refused", details: { id, error: error.message } });
+					return json(error.status, { error: error.message });
+				}
+				throw error;
+			}
+		}
+		if (method !== "GET") return json(405, { error: "GET only" });
+		const event = liveEvents.get(id);
+		if (!event) return json(404, { error: "no such event" });
+		const warehouse = analyticsOr();
+		if (warehouse instanceof Response) return warehouse;
+		const int = (name: string, fallback: number, max: number, min: number) => {
+			const v = url.searchParams.get(name);
+			if (v === null || v === "") return fallback;
+			const n = Number(v);
+			return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
+		};
+		const weeks = int("weeks", 3, WEEKS_MAX, 1);
+		const afterDays = int("afterDays", 3, AFTER_DAYS_MAX, 0);
+		if (weeks === undefined) return json(400, { error: `weeks is a whole number from 1 to ${WEEKS_MAX}` });
+		if (afterDays === undefined) return json(400, { error: `afterDays is a whole number from 0 to ${AFTER_DAYS_MAX}` });
+		const now = clock();
+		let plan: ReturnType<typeof planLiftWindows>;
+		try {
+			plan = planLiftWindows({ start: Date.parse(event.start), end: event.status === "cancelled" && event.cancelledAt ? Math.min(Date.parse(event.end), Date.parse(event.cancelledAt)) : Date.parse(event.end) }, now, { weeks, afterDays }, liveEvents.windowsExcept(id));
+		} catch (error) {
+			return json(409, { error: (error as Error).message });
+		}
+		const key = `${id}:${weeks}:${afterDays}`;
+		const cached = liftCache.get(key);
+		// A finished report (event and after window over) keeps; one still running is read again after a few minutes.
+		if (cached && (!cached.report.plan.partial && !cached.report.plan.afterPartial ? true : now - cached.at < LIFT_CACHE_MS)) return json(200, { event, report: cached.report, cached: true });
+		try {
+			const lo = Math.min(...plan.windows.map((w) => w.from));
+			const hi = Math.max(...plan.windows.map((w) => w.to));
+			const result = (await warehouse.query("live-event-lift", { from: lo, to: hi }, { windows: plan.windows })) as LiveEventLiftResult;
+			const report = buildLiftReport(plan, result.windows);
+			liftCache.set(key, { at: now, report });
+			if (liftCache.size > 200) liftCache.delete(liftCache.keys().next().value as string);
+			return json(200, { event, report, cached: false });
+		} catch (error) {
+			const message = (error as Error).message ?? String(error);
+			if (/interrupt/i.test(message)) return json(504, { error: `query took longer than ${config.queryTimeoutSeconds} s` });
+			log(`live event lift failed: ${message.slice(0, 300)}`);
+			return json(500, { error: "query failed" });
+		}
+	}
+
 	/** GET|POST /v1/admin/keys, DELETE /v1/admin/keys/<id> (admin). The secret is in the POST answer only, never audited. */
 	async function keysRoute(req: Request, path: string, url: URL, admin: Principal & { role: "admin" }): Promise<Response> {
 		const method = req.method;
@@ -2836,6 +2975,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (admin instanceof Response) return admin;
 				return method === "GET" ? json(200, access.get()) : putAccess(req, admin);
 			}
+			// Live events: every reader sees them and their reports; owners schedule and cancel (`manage`, audited).
+			if (path === "/v1/live-events" || path.startsWith("/v1/live-events/")) return liveEventsRoute(req, path, url, manage);
 			const q = /^\/v1\/query\/([A-Za-z-]+)$/.exec(path);
 			if (q) return method === "POST" ? query(req, q[1]) : json(405, { error: "POST only" });
 			const r = /^\/v1\/rollups\/(daily|players|edges|player_days)$/.exec(path);

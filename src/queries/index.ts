@@ -7,6 +7,7 @@ import { economy } from "./economy.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment, experimentPlayers } from "./experiment.ts";
 import { events, players, values } from "./explore.ts";
+import { liveEventLift } from "./live-event-lift.ts";
 import { feedbackList, feedbackSummary } from "./feedback.ts";
 import { deployReport, servers } from "./fleet.ts";
 import { funnel, funnelPlayers, funnelProgress, playtimeFunnel, timeline } from "./funnel.ts";
@@ -61,6 +62,7 @@ export const QUERIES = {
 	"notify-player": notifyPlayer,
 	"feedback-summary": feedbackSummary,
 	"feedback-list": feedbackList,
+	"live-event-lift": liveEventLift,
 } as const;
 
 export type QueryName = keyof typeof QUERIES;
