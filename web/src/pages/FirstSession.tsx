@@ -1,4 +1,6 @@
+import { Link, useLocation } from "react-router";
 import { DataTable, type DataColumn } from "@/components/data-table";
+import { withFilters } from "@/lib/commands";
 import { Metric, PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { fmtInt, fmtNum, fmtPct } from "@/lib/format";
 import { useAnalytics } from "@/lib/hooks";
@@ -55,21 +57,45 @@ const BACK_AND_FORTH: DataColumn<ConfusionResult["backAndForth"][number]>[] = [
 	shareColumn("share", "Flagged", (r) => r.share),
 ];
 
+/** Opens the Recordings page's session list for one signal (keeping the filters), to replay the sessions behind it. */
+export function ReplayLink({ signal, zone, target }: { signal: "idle" | "camera_spin" | "repeated_clicks"; zone?: string; target?: string }) {
+	const { search } = useLocation();
+	const extra: Record<string, string> = { tab: "replay", signal };
+	if (zone && zone !== "(unknown)") extra.zone = zone;
+	if (target && target !== "(unknown)") extra.target = target;
+	return (
+		<Link to={withFilters("/recordings", search, extra)} className="text-xs underline">
+			Replays
+		</Link>
+	);
+}
+
+const replayColumn = <T,>(get: (row: T) => { signal: "idle" | "camera_spin" | "repeated_clicks"; zone?: string; target?: string }): DataColumn<T> => ({
+	id: "replay",
+	header: "Replay",
+	accessor: () => "",
+	cell: (row) => <ReplayLink {...get(row)} />,
+	filter: false,
+});
+
 const IDLE: DataColumn<Idle>[] = [
 	{ id: "zone", header: "Idle in zone", accessor: (r) => r.zone, className: "whitespace-normal" },
 	count("count", "Times", (r) => r.count),
 	{ id: "avg", header: "Avg", hint: "s", accessor: (r) => r.avgSeconds, cell: (r) => `${fmtNum(r.avgSeconds, 1)} s` },
+	replayColumn((r) => ({ signal: "idle", zone: r.zone })),
 ];
 
 const CAMERA_SPIN: DataColumn<Spin>[] = [
 	{ id: "zone", header: "Camera spins in zone", accessor: (r) => r.zone, className: "whitespace-normal" },
 	count("count", "Times", (r) => r.count),
+	replayColumn((r) => ({ signal: "camera_spin", zone: r.zone })),
 ];
 
 const REPEATED_CLICKS: DataColumn<Clicks>[] = [
 	{ id: "button", header: "Button pressed again and again", accessor: (r) => r.button, className: "font-mono text-xs whitespace-normal" },
 	count("count", "Times", (r) => r.count),
 	{ id: "avgPresses", header: "Avg presses", accessor: (r) => r.avgPresses, cell: (r) => fmtNum(r.avgPresses, 1) },
+	replayColumn((r) => ({ signal: "repeated_clicks", target: r.button })),
 ];
 
 function SignalTable<T>({ id, rows, columns, empty }: { id: string; rows: readonly T[]; columns: DataColumn<T>[]; empty: string }) {
@@ -119,9 +145,18 @@ function Body({ data }: { data: ConfusionResult }) {
 
 export default function FirstSession() {
 	const q = useAnalytics("confusion");
+	const location = useLocation();
 	return (
 		<>
-			<PageHeader title="First session" description="Signs that new players got lost in their first session, per zone and button." />
+			<PageHeader
+				title="First session"
+				description="Signs that new players got lost in their first session, per zone and button."
+				actions={
+					<Link to={withFilters("/recordings", location.search)} className="text-sm underline">
+						Maps, replays and quit autopsy
+					</Link>
+				}
+			/>
 			<QueryState query={q} isEmpty={(d) => d.firstSessions === 0} empty="No first sessions in this range.">
 				{(data) => <Body data={data} />}
 			</QueryState>

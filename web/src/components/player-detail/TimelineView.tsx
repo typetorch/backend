@@ -4,6 +4,7 @@
  */
 import { Workflow } from "lucide-react";
 import { useRef } from "react";
+import { Link, useLocation } from "react-router";
 import { EventTable } from "@/components/EventTable";
 import { JoinData, joinDataOf } from "@/components/player-detail/JoinData";
 import { FacetToggle, isFacet, LazyGraph, MomentsToggle, PathStrip, SparseNote } from "@/components/LazyGraph";
@@ -13,12 +14,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { fmtInt, fmtMinutes, fmtTime, plural, shortId } from "@/lib/format";
+import { withFilters } from "@/lib/commands";
 import { useAnalytics, useParam } from "@/lib/hooks";
 import type { TimelineEvent, TimelineResult } from "@/lib/types";
 
 const ALL_SESSIONS = "__all";
 
 function Sessions({ data, onGraph }: { data: TimelineResult; onGraph(sid: string): void }) {
+	const { search } = useLocation();
 	const bySession = new Map<string, TimelineEvent[]>();
 	for (const e of data.events) bySession.set(e.sid, [...(bySession.get(e.sid) ?? []), e]);
 	return (
@@ -31,6 +34,11 @@ function Sessions({ data, onGraph }: { data: TimelineResult; onGraph(sid: string
 							<h3 className="flex flex-wrap items-center gap-2 text-sm font-medium">
 								Session {fmtTime(s.start)}
 								{s.firstSession ? <Badge>first session</Badge> : null}
+								{s.firstSession ? (
+									<Link to={withFilters("/recordings", search, { tab: "replay", sid: s.sid })} className="text-xs font-normal underline">
+										Replay (if recorded)
+									</Link>
+								) : null}
 							</h3>
 							<p className="text-xs break-words text-muted-foreground">
 								{fmtMinutes(s.minutes)} · {plural(s.events, "event")} · {s.dev ?? "unknown device"} · artifact {s.art} · sid {shortId(s.sid)}

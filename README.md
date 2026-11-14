@@ -964,10 +964,10 @@ reached it (drop-offs: their last step and when; playtime funnels: their playtim
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
 Roblox, Retention, **Demographics** (who plays: Roblox's age, gender, language, country, platform and OS cards over the filter bar's full UTC days, its device and new / returning filters sent as Roblox's Platform / IsNewUser; and from our join events country, language, device, Roblox account age and Premium, every filter applying), Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
-Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
+Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Recordings**, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
-Events, Funnels, Flow, Retention, Demographics, First session, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
+Events, Funnels, Flow, Retention, Demographics, First session, Recordings, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
 Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
 TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
 name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. **Ctrl+K**
@@ -985,6 +985,20 @@ Network, Audit).
 presets send an exact instant (`from` = an ISO time on a whole minute); the day presets and custom ranges send dates, as before.
 Charts step by the window: up to an hour per minute, up to 6 hours per 5 minutes, up to a day per hour, longer per day (the
 Overview's `buckets` below a day, its `days` beyond; `windowBucketMs` in `src/queries/core.ts`).
+
+**Recordings** (`/recordings`): new players' first-session recordings without Roblox Studio ([the queries](#recordings-maps-replays-quit-autopsy)).
+Four tabs, their state in the URL (`tab`, `map`, `layers`, `view`, `sid`, `win`) next to the filter bar's: **Map layers** (pick
+a map, toggle layers: positions, idle spots, deaths, spawns, screens opened / closed, button presses, prompts, quits, and
+every positioned event kind found in the range; per-layer value chips (screen names, button paths, a positioned event split
+by a prop such as `cause`), zone and screen filters, heatmap or dots; the grey silhouette is every recorded position on the
+map; click a cell for the sessions with a point of the first picked layer there), **Replay** (the session list by how it
+ended, an id, or a confusion signal; then the session top-down: the path, a moving dot with the camera's direction as a
+cone, a timeline of clicks, buttons, screens, prompts, deaths, the game's events and confusion signals with a scrubber,
+play / pause and 0.5x-8x; device, build and why it ended), **Quit autopsy** (the last 5 / 10 / 20 / 30 s before quitting,
+reasons with their share among quitters and among the players who played on, lift, examples that open the replay; per
+screen, tutorial step and map part) and **First actions** (seconds from spawn to the first move, screen, button, prompt and
+round: median, middle half, reached share, distribution; by build and by device). The First session page links each idle,
+camera spin and repeated-click row to its replays; a player's first session on the Players page links to its replay.
 
 **Performance** (`/performance`): how the game runs on players' devices and on the servers. Client frame rate, memory and ping
 (tech/client) and server TPS (the Heartbeat rate), memory and players (tech/server) over time, by device class, input,
