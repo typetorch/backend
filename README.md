@@ -153,6 +153,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_DEPLOY_KEEP_DAYS` | `365` | Days of releases in the [deploy history](#deploy-history) (at most 10,000 rows). |
 | `TYPETORCH_ERRORS_IP_PER_MINUTE` | `1200` | `POST /v1/errors` per address per minute (game servers share egress addresses). |
 | `TYPETORCH_ERROR_ROWS_PER_DAY` | `2000000` | New error count and player rows per UTC day; past it new rows are dropped and counted. |
+| `TYPETORCH_ERROR_DROP_RULES` | none | Error drop rules ([Error logs](#error-logs)): a JSON list of expressions; the Errors page overrides it. |
 | `TYPETORCH_SESSION_MAX_DAYS` | `3` | Explorer session lifetime from sign-in (no idle timeout). |
 | `TYPETORCH_LOGIN_MAX_FAILURES`, `TYPETORCH_LOGIN_WINDOW_MINUTES` | `5`, `15` | Failed logins per address before 429. |
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
@@ -900,6 +901,18 @@ What is stored, and what is dropped (counted in `/healthz` -> `errors`, the requ
   adding to a row that exists is always free.
 
 Counts and pids older than 30 days go (`TYPETORCH_ERROR_KEEP_DAYS`).
+
+**Drop rules.** Before any of that, `POST /v1/errors` runs each item through the drop rules (runtime setting
+`errorDropRules`, default `TYPETORCH_ERROR_DROP_RULES`: a JSON list of expressions or of `{ id, expr, note?, on }`); an item
+a rule matches is dropped right there, never queued or stored, and counted per rule (the answer says `dropped`). An
+expression is `field op value` joined with `and` / `or` (and first), `not` and parentheses: fields `message` (the
+template), `stack`, `any`, `realm`, `branch`, `build`, `fp`; operators `contains`, `startswith`, `endswith`, `is` / `=`,
+`!=` with `"text"` (case ignored), `matches` with `/regex/` or `/regex/i`. For example
+`(message contains "asset" or message contains "mesh") and realm = "client"`. At most 50 rules of 500 characters;
+regexes up to 200 characters, and none that repeats a group that repeats inside (`(a+)+`). The Errors page's **Drop
+rules** edits them (owners), with a live preview of the stored kinds a rule would catch:
+`GET /v1/errors/drop-rules` (rules, drops per rule since the start, every role) and
+`POST /v1/errors/drop-rules/preview { expr, days? }` (owners). Saving a rule doesn't delete what is stored.
 
 Reads (admin, web): `GET /v1/errors?window=24h&realm=server&branch=prod&build=...&q=text&limit=100&bucket=300` (also
 `from=` / `to=` in unix ms or ISO) answers `{ window: { from, to, bucketSeconds, buckets }, kinds: [{ fp, template, topFrame,

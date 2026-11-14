@@ -86,6 +86,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { EventBus } from "../bus.ts";
 import { ErrorInputError, parseErrorBatch } from "../errors/parse.ts";
+import { compileDropExpr, DropRuleError, ErrorDropper, type ErrorDropRule } from "../errors/drop-rules.ts";
 import { handleErrorReads, handlePlayerErrors, handleServerErrors, type PlayerIdentity } from "../errors/http.ts";
 import { ExperimentPlayersInput, parseExperimentPlayers } from "./experiment-players.ts";
 import type { ExperimentPlayersResult } from "../queries/experiment.ts";
@@ -355,6 +356,17 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		maxKinds: () => runtime.get("errorMaxKinds"),
 		rowsPerDay: () => runtime.get("errorRowsPerDay"),
 	});
+	// Error drop rules (errors/drop-rules.ts): applied at POST /v1/errors, before anything is queued or stored.
+	const errorDropper = new ErrorDropper(runtime.get("errorDropRules"), clock);
+	let errorDropRulesSeen: ErrorDropRule[] = runtime.get("errorDropRules");
+	const currentDropper = (): ErrorDropper => {
+		const rules = runtime.get("errorDropRules");
+		if (rules !== errorDropRulesSeen) {
+			errorDropRulesSeen = rules;
+			errorDropper.set(rules);
+		}
+		return errorDropper;
+	};
 	/** Named API keys made by this process (plans/31): redacted from the audit whatever a handler puts there (bounded). */
 	const madeKeys: string[] = [];
 	// The audit log (server/audit.ts): every secret in play is redacted from it, whatever a handler puts in the details.
@@ -793,6 +805,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		if (!errorJobLimiter.take(`job:${job}`)) return tooMany(errorJobLimiter.retryAfter(`job:${job}`));
 		rememberErrorSender(job);
+		// Drop rules: matching items end here (counted per rule), never queued or stored.
+		const { kept, dropped } = currentDropper().filter(batch.items);
+		if (dropped) batch = { ...batch, items: kept, total: kept.reduce((n, item) => n + item.count, 0) };
 		if (batch.items.length) {
 			if (errors.full) return tooMany(1);
 			try {
@@ -802,7 +817,60 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				throw error;
 			}
 		}
-		return json(202, { accepted: batch.items.length, rejected: batch.rejected, ...(batch.errors.length ? { errors: batch.errors } : {}) });
+		return json(202, { accepted: batch.items.length, rejected: batch.rejected, ...(dropped ? { dropped } : {}), ...(batch.errors.length ? { errors: batch.errors } : {}) });
+	}
+
+	/** GET /v1/errors/drop-rules: the saved rules, each one's drops since the process started, and parse errors (env rules). */
+	function dropRulesView() {
+		const dropper = currentDropper();
+		const rules = runtime.get("errorDropRules").map((rule) => {
+			let error: string | undefined;
+			try {
+				compileDropExpr(rule.expr);
+			} catch (e) {
+				error = (e as Error).message;
+			}
+			return { ...rule, ...(error ? { error } : {}) };
+		});
+		return { rules, counts: dropper.stats(), since: new Date(dropper.since).toISOString(), source: runtime.source("errorDropRules") };
+	}
+
+	/**
+	 * POST /v1/errors/drop-rules/preview { expr, days? }: whether the expression parses, and which stored error kinds it
+	 * would have dropped (most recently seen first, at most 50, with their occurrences in the last `days`, default 7).
+	 * Saving a rule never deletes what is stored; it only stops new ones.
+	 */
+	async function previewDropRule(req: Request): Promise<Response> {
+		const raw = await readCapped(req, 8 * 1024);
+		if (!raw) return json(413, { error: "body too large" });
+		let body: { expr?: unknown; days?: unknown };
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8")) as typeof body;
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		if (typeof body.expr !== "string") return json(400, { error: "expr is a string" });
+		const days = body.days === undefined ? 7 : body.days;
+		if (typeof days !== "number" || !Number.isInteger(days) || days < 1 || days > 90) return json(400, { error: "days is 1 to 90" });
+		let test: (s: { message: string; stack: string | null; realm: string; branch: string | null; build: string | null; fp: string }) => boolean;
+		try {
+			test = compileDropExpr(body.expr).test;
+		} catch (error) {
+			if (error instanceof DropRuleError) return json(200, { ok: false, error: error.message });
+			throw error;
+		}
+		const kinds = await errors.kindsForPreview(clock() - days * 86_400_000);
+		const matched = kinds.filter((k) => test({ message: k.template, stack: k.stack, realm: k.realm, branch: k.branch, build: k.build, fp: k.fp }));
+		const recent = (list: typeof kinds) => list.reduce((n, k) => n + k.recent, 0);
+		return json(200, {
+			ok: true,
+			days,
+			kinds: kinds.length,
+			matchedKinds: matched.length,
+			matchedOccurrences: recent(matched),
+			allOccurrences: recent(kinds),
+			matches: matched.slice(0, 50).map((k) => ({ fp: k.fp, template: k.template, realm: k.realm, lastAt: new Date(k.lastAt).toISOString(), occurrences: k.recent })),
+		});
 	}
 
 	/** POST /v1/identity (API key): identity rows from Basin games (the framework posts them to the fleet API). */
@@ -1133,7 +1201,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!config.universeId && !fleetPlace) return json(200, { configured: false });
 		const { place, status, cached } = await robloxPlace.get(config.universeId ? { universeId: config.universeId } : { placeId: fleetPlace as number });
 		const placeId = place.placeId ?? fleetPlace;
-		return json(200, { configured: true, roblox: status, cached, ...place, placeId, url: placeId ? `https://www.roblox.com/games/${placeId}` : null });
+		// Roblox gave no count (the experience is hidden from anonymous lookups): the fleet's own, from the heartbeats.
+		const playing = place.playing ?? (fleet ? await fleet.livePlayers() : null);
+		return json(200, { configured: true, roblox: status, cached, ...place, playing, ...(place.playing === null && playing !== null ? { playingFrom: "fleet" } : {}), placeId, url: placeId ? `https://www.roblox.com/games/${placeId}` : null });
 	}
 
 	/**
@@ -2671,6 +2741,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 					},
 					allowWrite: () => savedQueryLimiter.take(ip),
 				});
+			}
+			// Drop rules: the rules and their counters (every role reads), a preview of an expression (owners).
+			if (path === "/v1/errors/drop-rules") return method === "GET" ? json(200, dropRulesView()) : json(405, { error: "GET only" });
+			if (path === "/v1/errors/drop-rules/preview") {
+				if (method !== "POST") return json(405, { error: "POST only" });
+				const admin = manage();
+				return admin instanceof Response ? admin : previewDropRule(req);
 			}
 			if ((path === "/v1/errors" || path.startsWith("/v1/errors/")) && method === "GET") return handleErrorReads(errors, url, { now: clock(), keepDays: runtime.get("errorKeepDays"), identify: playerIdentities });
 			if (path === "/v1/admin/keys" || path.startsWith("/v1/admin/keys/")) {

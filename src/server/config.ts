@@ -8,6 +8,7 @@
  * The names from before the rename (TT_ANALYTICS_*, TT_FLEET_*, TT_SERVER_PARTS, TYPETORCH_FLEET_*) are still read for
  * one release, each with a one-line warning that names the new one (`config.warnings`).
  */
+import { checkDropRules, type ErrorDropRule } from "../errors/drop-rules.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,6 +117,8 @@ export interface ServerConfig {
 	errorsIpPerMinute: number;
 	/** New error count and player rows per UTC day; past it new rows are dropped and counted (/healthz). */
 	errorRowsPerDay: number;
+	/** TYPETORCH_ERROR_DROP_RULES: error drop rules (a JSON list of expressions, or of { id, expr, note?, on }); the Settings / Errors page overrides it. */
+	errorDropRules: ErrorDropRule[];
 	/** Days of audit log entries kept (server/audit.ts). */
 	auditKeepDays: number;
 	/** Local backups (server/backup.ts): where they go, how many are kept, hours between them (0 = no schedule). */
@@ -542,6 +545,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		notifyClock: env.TYPETORCH_NOTIFY_CLOCK === "utc_day" ? "utc_day" : "rolling24",
 		notifyPresenceStaleHours: num(env, "TYPETORCH_NOTIFY_PRESENCE_STALE_HOURS", 6, 1, 168),
 		keysRatePerMinute: num(env, "TYPETORCH_KEYS_RATE_PER_MINUTE", 120, 1, 100_000),
+		errorDropRules: dropRulesFromEnv(env.TYPETORCH_ERROR_DROP_RULES, warnings),
 		supportEvents: env.TYPETORCH_PLAYERS_SUPPORT_EVENTS
 			? [...new Set(env.TYPETORCH_PLAYERS_SUPPORT_EVENTS.split(",").map((n) => n.trim()).filter((n) => /^[A-Za-z0-9_.:-]{1,128}$/.test(n)))].slice(0, 64)
 			: ["ac_flag", "ac_action", "ac_honeypot", "join", "leave"],
@@ -620,4 +624,17 @@ export function describeConfig(config: ServerConfig): string {
 		`backups=${config.backupHours ? `every ${config.backupHours} h, keep ${config.backupKeep}` : "manual only"}`,
 		`disk warning=${config.diskWarnFreePercent ? `under ${config.diskWarnFreePercent}% free (critical under ${config.diskCriticalFreePercent}%)` : "off"}`,
 	].join(", ");
+}
+
+/** TYPETORCH_ERROR_DROP_RULES: `["message contains \"mesh\"", ...]` or `[{ "id": "mesh", "expr": "...", "on": true }]`. Bad -> none, and a warning. */
+function dropRulesFromEnv(raw: string | undefined, warnings: string[]): ErrorDropRule[] {
+	if (!raw || !raw.trim()) return [];
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		const list = Array.isArray(parsed) ? parsed.map((r, i) => (typeof r === "string" ? { id: `env${i + 1}`, expr: r, on: true } : r)) : parsed;
+		return checkDropRules(list);
+	} catch (error) {
+		warnings.push(`TYPETORCH_ERROR_DROP_RULES is ignored: ${(error as Error).message.slice(0, 200)}`);
+		return [];
+	}
 }

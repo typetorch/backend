@@ -1915,6 +1915,15 @@ export class FleetService {
 		this.rolledUntil = until;
 	}
 
+	/** Players on the live servers right now, from their heartbeats (studio sessions left out); null with no live server. */
+	async livePlayers(): Promise<number | null> {
+		const r = await this.db.first<{ servers: number; players: number | null }>(
+			"SELECT COUNT(*) AS servers, SUM(COALESCE(players, 0)) AS players FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ? AND (server_type IS NULL OR server_type <> 'studio')",
+			[this.clock() - LOST_AFTER_MS],
+		);
+		return r && Number(r.servers) > 0 ? Number(r.players ?? 0) : null;
+	}
+
 	async counts(): Promise<{ servers: number; reports: number; alerts: number; unacked: number }> {
 		const now = this.clock();
 		const r = await this.db.first<{ servers: number; reports: number; alerts: number; unacked: number }>(

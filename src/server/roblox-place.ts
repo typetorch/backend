@@ -1,6 +1,6 @@
 /**
  * The game's place card in the explorer's sidebar: its name, live player count and icon, from Roblox's public APIs.
- * Only fixed https hosts are called (apis.roblox.com, games.roblox.com, thumbnails.roblox.com), without credentials
+ * Only fixed https hosts are called (apis.roblox.com, games.roblox.com, develop.roblox.com, thumbnails.roblox.com), without credentials
  * (never the Open Cloud key); the only inputs are checked positive integers (TYPETORCH_UNIVERSE_ID, or a PlaceId from
  * the fleet's heartbeats), so nothing from a request becomes a URL. Redirects are refused, every call has a timeout and
  * a body cap, and the icon must be an https URL on *.rbxcdn.com (the explorer's CSP img-src already allows that).
@@ -15,6 +15,12 @@ import { cdnUrl, readCapped } from "./roblox-profiles.ts";
 export const ROBLOX_PLACE_UNIVERSE_URL = "https://apis.roblox.com/universes/v1/places/";
 export const ROBLOX_GAMES_URL = "https://games.roblox.com/v1/games";
 export const ROBLOX_GAME_ICONS_URL = "https://thumbnails.roblox.com/v1/games/icons";
+/**
+ * The name when games.roblox.com hides the experience: for an anonymous caller it answers a placeholder (`id: 0`,
+ * "[TITLE UNAVAILABLE]", 0 playing) while the experience is age-restricted or under review; this one still has the name
+ * and root place (no player count).
+ */
+export const ROBLOX_DEVELOP_UNIVERSE_URL = "https://develop.roblox.com/v1/universes/";
 /** A game's details are a few KB; the icon answer well under 1 KB. */
 const MAX_BODY = 128 * 1024;
 const MAX_ENTRIES = 8;
@@ -133,7 +139,11 @@ export class RobloxPlace {
 			this.getJson(`${ROBLOX_GAMES_URL}?universeIds=${id}`),
 			this.getJson(`${ROBLOX_GAME_ICONS_URL}?universeIds=${id}&returnPolicy=PlaceHolder&size=512x512&format=Png&isCircular=false`),
 		]);
-		const gameOk = games.status === 200 && "body" in games && readGame(games.body, place);
+		let gameOk = games.status === 200 && "body" in games && readGame(games.body, place);
+		if (!gameOk) {
+			const dev = await this.getJson(`${ROBLOX_DEVELOP_UNIVERSE_URL}${id}`);
+			gameOk = dev.status === 200 && "body" in dev && readUniverse(dev.body, place);
+		}
 		const icon = icons.status === 200 && "body" in icons ? readIcon(icons.body, place.universeId as number) : null;
 		if (icon) place.icon = icon;
 		return { place, status: gameOk && icon ? "ok" : gameOk || icon ? "partial" : "unavailable" };
@@ -190,6 +200,18 @@ function readGame(body: unknown, place: PlaceInfo): boolean {
 	if (typeof g.playing === "number" && Number.isSafeInteger(g.playing) && g.playing >= 0) place.playing = g.playing;
 	if (isId(g.rootPlaceId)) place.placeId = g.rootPlaceId;
 	return place.name !== null;
+}
+
+/** develop.roblox.com/v1/universes/<id>: { id, name, rootPlaceId, ... } (no player count). Fills `place`; false on a wrong shape. */
+function readUniverse(body: unknown, place: PlaceInfo): boolean {
+	if (typeof body !== "object" || body === null) return false;
+	const u = body as Record<string, unknown>;
+	if (u.id !== place.universeId || typeof u.name !== "string") return false;
+	const clean = u.name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 100);
+	if (!clean) return false;
+	place.name = clean;
+	if (isId(u.rootPlaceId)) place.placeId = u.rootPlaceId;
+	return true;
 }
 
 /** thumbnails.roblox.com/v1/games/icons: { data: [{ targetId, state, imageUrl }] }. Only an https URL on *.rbxcdn.com. */

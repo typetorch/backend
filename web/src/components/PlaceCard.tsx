@@ -74,7 +74,11 @@ export function PlaceCard() {
 			<span className="flex min-w-0 flex-col gap-1">
 				<span className="line-clamp-2 text-sm font-medium leading-tight text-sidebar-foreground">{name}</span>
 				{place.playing !== null ? (
-					<span className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="place-live">
+					<span
+						className="flex items-center gap-1.5 text-xs text-muted-foreground"
+						data-testid="place-live"
+						title={place.playingFrom === "fleet" ? "From your servers' heartbeats: Roblox didn't give a count to this backend (the game may be restricted in its region)" : "Roblox's count"}
+					>
 						<span className="size-1.5 shrink-0 rounded-full bg-[var(--status-good)]" aria-hidden />
 						{fmtInt(place.playing)} live
 					</span>

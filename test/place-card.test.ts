@@ -4,19 +4,24 @@
  * All tokens and ids are made up.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ROBLOX_GAMES_URL, ROBLOX_GAME_ICONS_URL, ROBLOX_PLACE_UNIVERSE_URL, RobloxPlace } from "../src/server/roblox-place.ts";
+import { ROBLOX_DEVELOP_UNIVERSE_URL, ROBLOX_GAMES_URL, ROBLOX_GAME_ICONS_URL, ROBLOX_PLACE_UNIVERSE_URL, RobloxPlace } from "../src/server/roblox-place.ts";
 import { ADMIN, API, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 const UNIVERSE = 5_550_001;
 const PLACE = 7_770_001;
 
 /** A fake Roblox for one game; `state.down` makes every call fail; every URL and init asked is recorded. */
-function fakeRoblox(calls: { url: string; init?: RequestInit }[], state: { down: boolean; playing: number }) {
+function fakeRoblox(calls: { url: string; init?: RequestInit }[], state: { down: boolean; playing: number; restricted?: boolean }) {
 	return (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
 		calls.push({ url, ...(init ? { init } : {}) });
 		if (state.down) return new Response("upstream down", { status: 503 });
 		if (url === `${ROBLOX_PLACE_UNIVERSE_URL}${PLACE}/universe`) return Response.json({ universeId: UNIVERSE });
+		// Restricted in the server's region: games.roblox.com answers a placeholder; develop.roblox.com still has the name.
+		if (url.startsWith(ROBLOX_GAMES_URL) && state.restricted) {
+			return Response.json({ data: [{ id: 0, rootPlaceId: 0, name: "[TITLE UNAVAILABLE]", playing: 0, visits: 0 }] });
+		}
+		if (url === `${ROBLOX_DEVELOP_UNIVERSE_URL}${UNIVERSE}`) return Response.json({ id: UNIVERSE, name: "Zomvival", rootPlaceId: PLACE, description: "x" });
 		if (url.startsWith(ROBLOX_GAMES_URL)) {
 			return Response.json({ data: [{ id: UNIVERSE, rootPlaceId: PLACE, name: "Test\u0000 Torch Game", playing: state.playing, visits: 1 }] });
 		}
@@ -70,7 +75,7 @@ describe("GET /v1/place", () => {
 
 		test("public endpoints only: no credentials or Open Cloud key sent, redirects refused, fixed hosts", async () => {
 			for (const c of calls) {
-				expect(["apis.roblox.com", "games.roblox.com", "thumbnails.roblox.com"]).toContain(new URL(c.url).host);
+				expect(["apis.roblox.com", "games.roblox.com", "develop.roblox.com", "thumbnails.roblox.com"]).toContain(new URL(c.url).host);
 				expect(c.init?.redirect).toBe("error");
 				expect(JSON.stringify(c.init?.headers ?? {})).not.toContain("fake-open-cloud-key");
 				expect(c.url).not.toContain("fake-open-cloud-key");
@@ -85,22 +90,40 @@ describe("GET /v1/place", () => {
 		});
 	});
 
-	test("the fleet's PlaceId: resolved to its universe; Roblox down from the start gives a card with no count", async () => {
+	test("the fleet's PlaceId: resolved to its universe; Roblox down from the start: no name, the fleet's own count", async () => {
 		const calls: { url: string }[] = [];
 		const state = { down: true, playing: 3 };
 		const h = await harness({}, { fetch: fakeRoblox(calls, state) });
 		try {
 			expect((await h.call("/v1/fleet/heartbeat", post(API, { j: "job-place", p: PLACE, n: 3 }))).status).toBe(202);
 			const down = await asJson(await h.call("/v1/place", { headers: bearer(ADMIN) }));
-			expect(down).toMatchObject({ configured: true, roblox: "unavailable", placeId: PLACE, name: null, playing: null, icon: null, url: `https://www.roblox.com/games/${PLACE}` });
+			expect(down).toMatchObject({ configured: true, roblox: "unavailable", placeId: PLACE, name: null, playing: 3, playingFrom: "fleet", icon: null, url: `https://www.roblox.com/games/${PLACE}` });
 			state.down = false;
 			h.setNow(h.now() + 61_000);
-			expect(await asJson(await h.call("/v1/place", { headers: bearer(ADMIN) }))).toMatchObject({ roblox: "ok", universeId: UNIVERSE, placeId: PLACE, playing: 3 });
+			const up = await asJson(await h.call("/v1/place", { headers: bearer(ADMIN) }));
+			expect(up).toMatchObject({ roblox: "ok", universeId: UNIVERSE, placeId: PLACE, playing: 3 });
+			expect(up).not.toHaveProperty("playingFrom");
 			expect(calls.some((c) => c.url === `${ROBLOX_PLACE_UNIVERSE_URL}${PLACE}/universe`)).toBe(true);
 		} finally {
 			await h.close();
 		}
 	});
+});
+
+test("restricted in the server's region: the name from develop.roblox.com, the count from the fleet's heartbeats", async () => {
+	const calls: { url: string }[] = [];
+	const h = await harness({ TYPETORCH_UNIVERSE_ID: String(UNIVERSE) }, { fetch: fakeRoblox(calls, { down: false, playing: 0, restricted: true }) });
+	try {
+		// No live server yet: a name, no count.
+		expect(await asJson(await h.call("/v1/place", { headers: bearer(ADMIN) }))).toMatchObject({ roblox: "ok", name: "Zomvival", placeId: PLACE, playing: null, url: `https://www.roblox.com/games/${PLACE}` });
+		expect(calls.some((c) => c.url === `${ROBLOX_DEVELOP_UNIVERSE_URL}${UNIVERSE}`)).toBe(true);
+		// Two live servers (one Studio session, left out).
+		for (const [j, n, t] of [["job-a", 7, "public"], ["job-b", 5, "private"], ["job-studio", 1, "studio"]] as const) expect((await h.call("/v1/fleet/heartbeat", post(API, { j, p: PLACE, n, t }))).status).toBe(202);
+		h.setNow(h.now() + 61_000);
+		expect(await asJson(await h.call("/v1/place", { headers: bearer(ADMIN) }))).toMatchObject({ name: "Zomvival", playing: 12, playingFrom: "fleet" });
+	} finally {
+		await h.close();
+	}
 });
 
 describe("RobloxPlace", () => {
@@ -136,6 +159,7 @@ describe("RobloxPlace", () => {
 		}) as unknown as typeof fetch;
 		const p = new RobloxPlace({ fetch: f });
 		await Promise.all([p.get({ universeId: 3 }), p.get({ universeId: 3 }), p.get({ universeId: 3 })]);
-		expect(n).toBe(2);
+		// One lookup: games, icons, and the develop.roblox.com fallback (the games answer was empty).
+		expect(n).toBe(3);
 	});
 });
