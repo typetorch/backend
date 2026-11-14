@@ -561,9 +561,12 @@ export interface TrendsResult {
 	from: string;
 	to: string;
 	window: number;
+	/** 24 (days), 12 or 6. */
+	bucketHours?: number;
 	creatorShare: number;
 	sources: string[];
-	days: { date: string; total: TrendValues; bySource: Record<string, TrendValues> }[];
+	/** `date`: YYYY-MM-DD for days, the bucket's ISO start for 6 / 12 h; `partial`: the running bucket. */
+	days: { date: string; partial?: boolean; total: TrendValues; bySource: Record<string, TrendValues> }[];
 }
 
 export interface EconomyDay {

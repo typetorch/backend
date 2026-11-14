@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api, ApiError } from "@/lib/api";
 import type { BenchmarkPeriod, BenchmarksResult, Filters, RealtimeResult, TrendsResult, TrendValues } from "@/lib/types";
-import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, realtimeHours, retentionSub, TRENDS, windowLabel } from "./Roblox";
+import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, realtimeHours, retentionSub, TREND_RANGES, TRENDS, trendLabel, trendStep, trendTick, windowLabel } from "./Roblox";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -193,6 +193,28 @@ describe("Roblox page", () => {
 		const calls = mount("/roblox?trendWindow=1&trend=playtimeMinutes");
 		expect(await screen.findByText("Daily values")).toBeTruthy();
 		expect(calls.find((c) => c.name === "trends")?.options).toEqual({ window: 1 });
+	});
+	it("trendWindow=6h asks for 6-hour buckets; Today with Daily falls back to 6 hours from today's midnight", async () => {
+		const calls = mount("/roblox?trendWindow=6h");
+		expect((await screen.findAllByText("Every 6 hours")).length).toBeGreaterThan(0);
+		expect(calls.find((c) => c.name === "trends")?.options).toEqual({ window: 1, bucketHours: 6 });
+		cleanup();
+		const today = mount("/roblox?trendWindow=1&trendDays=0");
+		await screen.findAllByText("Every 6 hours");
+		const t = today.find((c) => c.name === "trends");
+		expect(t?.options).toEqual({ window: 1, bucketHours: 6 });
+		expect(t?.filters.from).toBe(new Date().toISOString().slice(0, 10));
+	});
+	it("granularity, ranges and bucket labels", () => {
+		expect(TREND_RANGES).toEqual([0, 3, 7, 14, 28, 56, 90]);
+		expect(trendStep("12h", 7)).toMatchObject({ bucketHours: 12, window: 1 });
+		expect(trendStep("7", 7)).toMatchObject({ bucketHours: 24, window: 7 });
+		expect(trendStep("7", 0)).toMatchObject({ key: "6h", bucketHours: 6 });
+		expect(trendStep("junk", 7).key).toBe("7");
+		expect(trendTick("2026-11-13")).toBe("11-13");
+		expect(trendTick("2026-11-13T06:00:00.000Z")).toBe("11-13 06:00");
+		expect(trendLabel("2026-11-13T18:00:00.000Z", 6)).toBe("2026-11-13 18:00-24:00 UTC");
+		expect(trendLabel("2026-11-13T00:00:00.000Z", 12)).toBe("2026-11-13 00:00-12:00 UTC");
 	});
 });
 

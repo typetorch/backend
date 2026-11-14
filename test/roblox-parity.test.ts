@@ -171,6 +171,30 @@ describe("trends", () => {
 		expect(d1.sessionMinutes).toBeCloseTo(40 / 3, 2); // day -1 has no sessions: only day -2 counts
 		expect(r.sources).toEqual(["direct"]);
 	});
+
+	test("6-hour buckets: one point per 6 h up to the current (partial) bucket, D1 null", async () => {
+		const r = await store.query("trends", { from: isoDay(-2) }, { window: 1, bucketHours: 6 });
+		expect(r.bucketHours).toBe(6);
+		const at = (offset: number, h: number) => new Date(D(offset) + h * HOUR).toISOString();
+		// Day -2 and day -1: 4 buckets each; today (NOW = 12:00 sharp): 00 and 06 (it ends at NOW: complete).
+		expect(r.days.map((d) => d.date)).toEqual([
+			...[0, 6, 12, 18].map((h) => at(-2, h)),
+			...[0, 6, 12, 18].map((h) => at(-1, h)),
+			...[0, 6].map((h) => at(0, h)),
+		]);
+		expect(r.days.some((d) => d.partial)).toBe(false);
+		// Half an hour later the running 12:00 bucket shows, marked partial.
+		const later = new DuckDbStore(connection, (name) => name, () => NOW + 30 * MIN);
+		const r2 = await later.query("trends", { from: isoDay(-2), to: new Date(NOW + 30 * MIN).toISOString() }, { window: 1, bucketHours: 6 });
+		expect(r2.days.at(-1)).toMatchObject({ date: at(0, 12), partial: true });
+		const byDate = new Map(r.days.map((d) => [d.date, d.total]));
+		// 06-12 on day -2: B (20 min, 100 Robux) and C (5 min).
+		expect(byDate.get(at(-2, 6))).toMatchObject({ dau: 2, newUsers: 1, playtimeMinutes: 12.5, sessionMinutes: 12.5, robux: 100, d1: null });
+		expect(byDate.get(at(-2, 12))).toMatchObject({ dau: 1, playtimeMinutes: 15 });
+		expect(byDate.get(at(0, 0))).toMatchObject({ dau: 1, newUsers: 1, playtimeMinutes: 10 });
+		expect(byDate.get(at(-1, 6))?.dau).toBe(0);
+		expect(() => store.render("trends", {}, { bucketHours: 8 })).toThrow("bucketHours");
+	});
 });
 
 describe("realtime", () => {
