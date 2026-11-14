@@ -65,6 +65,7 @@ import type {
 } from "./types";
 import type { DeployMark, PerfServer, ServerMetricPoint } from "./perf";
 import type { DeployDetail, DeployPage } from "./deploys";
+import type { LiftReport, LiveEvent, LiveEventInput, LiveEventsView, SignCommands } from "./live-events";
 
 /** The header the backend wants on cookie-authenticated requests that change something. */
 export const CSRF_HEADER = "x-typetorch";
@@ -334,6 +335,14 @@ export function createApi(options: ApiOptions = {}) {
 		 * browser's read-only owner session became admin in place (re-check auth).
 		 */
 		blessDevice: (token: string, signal?: AbortSignal) => post<{ ok: boolean; blessed: boolean; upgraded?: boolean }>("/auth/device", { token }, signal),
+		/** Scheduled live events, the schedule servers should hold and whether the signed record has it (`refresh`: read it again). */
+		liveEvents: (refresh = false, signal?: AbortSignal) => get<LiveEventsView>(`/v1/live-events${qs({ refresh: refresh ? 1 : undefined })}`, signal),
+		/** Schedule a live event (owners); the answer carries the CLI commands that sign the new schedule. */
+		createLiveEvent: (input: LiveEventInput, signal?: AbortSignal) => post<{ event: LiveEvent; commands: SignCommands }>("/v1/live-events", input, signal),
+		cancelLiveEvent: (id: string, signal?: AbortSignal) => post<{ event: LiveEvent; commands: SignCommands }>(`/v1/live-events/${encodeURIComponent(id)}/cancel`, {}, signal),
+		/** An event's lift report against the same weekdays and hours of earlier weeks. */
+		liveEventLift: (id: string, params: { weeks?: number; afterDays?: number } = {}, signal?: AbortSignal) =>
+			get<{ event: LiveEvent; report: LiftReport; cached: boolean }>(`/v1/live-events/${encodeURIComponent(id)}/lift${qs(params)}`, signal),
 		/** Chart marks: releases, kernel publishes and backup refreshes in a window, oldest first (GET /v1/fleet/marks). */
 		fleetMarks: (params: { since?: number; until?: number; branch?: string; kinds?: string; limit?: number } = {}, signal?: AbortSignal) =>
 			get<{ marks: DeployMark[] }>(`/v1/fleet/marks${qs(params)}`, signal).then((r) => r.marks),

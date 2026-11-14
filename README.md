@@ -43,6 +43,7 @@ is the same command.
 - [The fleet API (SQLite)](#the-fleet-api-sqlite) ([game server addresses and locations](#game-server-addresses-and-locations))
 - [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Experience notifications](#experience-notifications) (intents from the game, the planner, the sender, signed launch data)
+- [Live events](#live-events) (scheduled live value changes, signed by the CLI; each event's lift report)
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -598,6 +599,9 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/storage` | admin | what the data folder holds |
 | `GET /v1/settings` | admin | live dials from `data/settings.json` |
 | `GET /v1/identity` | admin, web | pid <-> UserId lookups |
+| `GET /v1/live-events` | admin, web | [live events](#live-events): the events with their status and sync state, the schedule servers should hold, the CLI commands that sign it (`refresh=1`: read the signed record again) |
+| `POST /v1/live-events`, `POST /v1/live-events/<id>/cancel` | admin | schedule or cancel a live event (audited); the answer carries the new signing commands |
+| `GET /v1/live-events/<id>/lift` | admin, web | an event's lift report (`weeks` 1-8, `afterDays` 0-7) |
 | `POST /v1/identity/backfill` | admin | the identity backfill from the DataStore |
 | `GET /v1/roblox/servers/<job>/logs` | admin, web | Roblox's [server logs](#roblox-server-logs) for one JobId (Open Cloud) |
 | `GET /v1/roblox/demographics?from&to&dev&players` | admin, web | Creator Hub's Demographics from Roblox: daily active users per age group, gender, locale, country, platform and OS over the range's full UTC days; device / players as Roblox's Platform / IsNewUser (matched on the values Roblox reports; `applied`, `notApplied` say what happened) |
@@ -747,10 +751,10 @@ method: `token`, `roblox`, `typetorch.dev`, `bearer` for a wrong token on a rout
 URL only as `set` / `not set`; lists such as viewers and the allow list as added / removed), refused saves (the lockout
 guards), test alerts, the owner list (`access.owners`: seq, added, removed) and the signing keys, trusted browsers
 (`device.trust`, `device.revoke`), alert acks (`alert.ack`), erasure (`erasure`: counts only, never a pid or a UserId; the
-Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), remote debug watches and
-commands, the CLI's release starts and marks (`deploy.start`, `deploy.mark`, by the API key), experiment changes prepared
-on the Experiments page (`experiment.prepare`: the experiment, the change and the CLI command; a refused body as
-`failed`), and any other write by a
+Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), live events (`live-events.create`,
+`live-events.cancel`), remote debug watches and commands, the CLI's release starts and marks (`deploy.start`,
+`deploy.mark`, by the API key), experiment changes prepared on the Experiments page (`experiment.prepare`: the
+experiment, the change and the CLI command; a refused body as `failed`), and any other write by a
 signed-in caller under `<METHOD> <route>` (a write the web role tried is recorded as `refused`).
 
 Each entry has the time, the actor (`admin token`, `roblox user <id> (<name>)`, `typetorch.dev user <id> (<name>)`,
@@ -1040,11 +1044,16 @@ Compare a change that is worse by over 10% (orange) or 25% (red); nothing is fla
 "few samples"). All the lines live in `web/src/lib/perf-thresholds.ts`. Picked chips and toggles (percentile, Compare builds,
 History) are filled with the primary colour with a check. Every chart carries **deploy marks**, like Creator
 Hub's published-change lines: a vertical mark per deploy, rollback, promote, re-sign, kernel publish and backup refresh
-(`GET /v1/fleet/marks`); hover for the branch, seq, build, place version and results, click to filter the page to that build.
+(`GET /v1/fleet/marks`), plus each [live event](#live-events)'s start and end; hover for the branch, seq, build, place version and
+results, click to filter the page to that build.
 **Compare**: builds side by side over the range, or before vs after a mark over two windows of the same length (1 h to 7 d).
 **Live servers**: each server's latest TPS and memory from its heartbeat, and its own history
 (`GET /v1/fleet/servers/<jobId>/metrics`, kernel 0.4.2 heartbeats; the page says so when a server or the backend doesn't have
 it). A **Step** picker overrides the window's step (1 min to 1 day, 2 to 400 steps).
+
+**Live events** (`/live-events`): scheduled live value changes (Live now, Upcoming, Past, with UTC and local times and whether
+servers hold the signed schedule), the owners' form and Cancel, the signing command, and each event's lift report. See
+[Live events](#live-events).
 
 **Economy** (`/economy`): the in-game currency from the game's server-sent `currency` rows (the `economy` query), one currency at
 a time (a picker lists every currency in the range, busiest first; `?currency=`). Earned vs spent per UTC day, the running
@@ -1957,6 +1966,70 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
 - **Erasure**: the Right to Erasure path deletes the user's rows in all three tables and their queued sends.
 - **Limits**: 200 items and 256 KB per intents request, 6000 notify requests a minute per address (plus the ingest limit),
   2,000,000 pending intents at most (`full`), 30 admin sends / config / key changes a minute.
+
+## Live events
+
+"Double cash, Saturday 12:00 to Sunday 23:59 UTC": an owner schedules a change to game live values (`liveConfig` keys)
+on the explorer's **Live events** page; every game server switches it on and off at those times; afterwards the page
+reports whether it raised playtime, revenue and so on, or only moved them in time.
+
+**Security: the backend never signs.** Live values only reach servers through the CLI-signed settings record, and this
+stays so. The backend keeps the schedule (SQLite `live_events`, `src/server/live-events.ts`) and prepares its JSON; the
+owner signs it with the CLI like any other value:
+
+```bash
+typetorch settings set game.tt.events - <<'TT_EVENTS'
+{"v":1,"events":[{"id":"ev_k3j9x0a1b2","name":"Double cash","start":1763812800,"end":1763942340,"set":{"cash.multiplier":2}}]}
+TT_EVENTS
+```
+
+(the page gives the exact command, a PowerShell one and the JSON file). The start and end times are INSIDE the signed
+record (unix seconds, UTC), and the framework (`src/settings.ts`, the release after 0.7.0) switches each event's values on and off on the
+server's own clock: no message at the start or end, so a server that starts mid-event has it from its first read, and
+the event ends on time even when the backend is down. While it runs, its `set` values replace `game[key]` for
+`TypeTorch.liveConfig(key)` (the game's `parse` still checks them); `TypeTorch.liveEvents()` lists the active and upcoming
+ones for game UI. Cancelling is signing the schedule without the event. Nothing unsigned ever reaches a server, and the
+signing checks are unchanged. (The alternatives were an unsigned channel limited to declared, bounded flags, or the
+backend pushing on and off messages: both trust the backend at run time and can't end an event while it's down.)
+
+- **Checks** (owners, `manage()`): a name (1-80 characters), 1-8 game keys (the CLI's key rule, not `tt.events`), JSON
+  values (no null, at most 1 KB each), start and end as ISO with a zone or unix ms, whole seconds (a start up to 5 minutes
+  ago starts now; never backdated), at most 31 days long and 366 days ahead, no two events on one key at the same time
+  (409), at most 50 scheduled or live at once, the schedule at most 8 KB (the record's `game` is 16 KB in all).
+- **Status**: `scheduled`, `live`, `ended` (from the times), `cancelled`. Audited: `live-events.create`,
+  `live-events.cancel` (with the id, the keys and the times; refused and failed ones too).
+- **Do servers have it?** The backend reads the signed record back (DataStore `TypeTorch` / `settings` through Open
+  Cloud: `OPENCLOUD_API_KEY` with `universe-datastores.objects:read` and `TYPETORCH_UNIVERSE_ID`; at most once a minute,
+  "Check again" at most every 10 s), verifies its signature with the game's public keys when it knows them (the trust
+  link keys, Sign in with typetorch.dev), and shows per event: `signed`, `outdated` (other times or values), `unsigned`
+  (servers won't run it), `cancel-unsigned` (cancelled here but still signed: servers WILL run it until the owner
+  signs), `done`, `unknown` (no key, or signed by other keys).
+- **Chart marks**: each event's start and end are dashed lines next to the deploy marks on every time chart (the same
+  toggle); clicking one opens the page.
+
+**The lift report** (`GET /v1/live-events/<id>/lift?weeks=3&afterDays=3`, `src/server/live-event-lift.ts`, the
+`live-event-lift` query):
+
+- **Windows**: the event (cut at now while it runs); the days after it (`afterDays`, default 3: the pull-forward check);
+  and the baseline, the same weekdays and hours `weeks` weeks back (default 3, at most 8). The step is a whole number of
+  weeks covering the event and its after window, so a baseline never overlaps the event; a week overlapping another live
+  event is skipped for an earlier one; a week with no players (before the data) is dropped.
+- **Metrics per window**: players, playtime per player (each session's time inside the window), sessions per player,
+  Robux per player and payer conversion (monetization's convention: server-sent distinct purchase rows; payers /
+  players), new players; Studio rows never count.
+- **Math**: baseline = the mean of the baseline weeks; lift = event / baseline - 1. The range is how much a normal week
+  moved: each baseline week against the mean of the others (min to max). Above the range is up, below is down, inside
+  is no clear change; fewer than 2 weeks is "not enough baseline". A plain, hand-checkable band, not a significance test.
+  The after window is judged the same way (a dip there = pulled forward), and `net` adds the event and after windows for
+  playtime, Robux, sessions and new players.
+- **Example** (test/live-event-lift.test.ts, hand-checked): a one-day event with 10 players at 36 min each and 3 payers
+  of 100 Robux, the next day 9 players at 28 min; baseline weeks of 10 players at 30, 29 and 31 min (after: 30, 31, 29)
+  with 2 payers:
+
+  > +20% playtime per player (baseline range -5% to +5%), +50% Robux per player (baseline range +0% to +0%), +50% payer
+  > conversion (baseline range +0% to +0%). Dip after: -7% playtime per player (baseline range -5% to +5%), -10% players
+  > (baseline range +0% to +0%) the 1 day after: part of it was pulled forward; net over the event and the 1 day after:
+  > +2% playtime.
 
 ## Player feedback
 
