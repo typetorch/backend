@@ -42,6 +42,12 @@ export function previousPeriod(state: FilterState, now = Date.now()): PreviousPe
 		const start = minute(now) - shiftMs;
 		from = new Date(start - shiftMs).toISOString();
 		to = new Date(start).toISOString();
+	} else if (state.range === "deploy") {
+		// Since the release: the same length right before it (today when the release isn't known).
+		const start = state.sinceMs !== undefined && state.sinceMs < now ? minute(state.sinceMs) : dayStart(isoDate(now));
+		shiftMs = Math.max(MINUTE_MS, minute(now) - start);
+		from = new Date(start - shiftMs).toISOString();
+		to = new Date(start).toISOString();
 	} else if (state.range !== "custom") {
 		const days = Number.parseInt(state.range, 10);
 		shiftMs = days * DAY_MS;

@@ -42,6 +42,12 @@ function errorsWindow(state: FilterState): string {
 			return state.range;
 		case "1d":
 			return "24h";
+		case "3d":
+			return "7d";
+		case "deploy": {
+			const hours = state.sinceMs !== undefined ? (Date.now() - state.sinceMs) / 3_600_000 : 24;
+			return hours <= 1 ? "1h" : hours <= 6 ? "6h" : hours <= 24 ? "24h" : hours <= 168 ? "7d" : "30d";
+		}
 		default:
 			return "30d";
 	}

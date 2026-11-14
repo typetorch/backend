@@ -24,6 +24,15 @@ describe("previousPeriod", () => {
 		expect(previousPeriod({ range: "custom" }, NOW)).toBeUndefined();
 		expect(previousPeriod({ range: "custom", from: "2026-10-05", to: "2026-10-01" }, NOW)).toBeUndefined();
 	});
+
+	it("since the last prod deploy: the same length right before the release", () => {
+		const since = NOW - 3 * H; // 09:30:15
+		expect(previousPeriod({ range: "deploy", sinceMs: since }, NOW)).toEqual({
+			filters: { from: "2026-10-09T06:30:00.000Z", to: "2026-10-09T09:30:00.000Z" },
+			shiftMs: 3 * H,
+		});
+		expect(previousPeriod({ range: "3d" }, NOW)?.filters).toEqual({ from: "2026-10-04", to: "2026-10-06T12:30:00.000Z" });
+	});
 });
 
 describe("previousWindow and withPrevious", () => {

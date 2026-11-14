@@ -6,7 +6,7 @@
  */
 import { DEVICES, type Device, type Filters } from "./types";
 
-export const RANGE_PRESETS = ["1h", "6h", "1d", "7d", "30d", "90d"] as const;
+export const RANGE_PRESETS = ["1h", "6h", "1d", "3d", "7d", "30d", "90d", "deploy"] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number] | "custom";
 export const DEFAULT_RANGE: RangePreset = "30d";
 /** What the filter bar (and the command palette) calls each range. */
@@ -14,13 +14,18 @@ export const RANGE_LABELS: Record<RangePreset, string> = {
 	"1h": "Last 1 hour",
 	"6h": "Last 6 hours",
 	"1d": "Today",
+	"3d": "Last 3 days",
 	"7d": "Last 7 days",
 	"30d": "Last 30 days",
 	"90d": "Last 90 days",
+	deploy: "Since last prod deploy",
 	custom: "Custom",
 };
 
-/** The presets that count hours back from now (the rest are days, today included). */
+/** The branch "Since last prod deploy" reads its release from (the deploy history). */
+export const PROD_BRANCH = "prod";
+
+/** The presets that count hours back from now (the rest are days, today included, and "deploy"). */
 export const HOUR_PRESETS: Partial<Record<RangePreset, number>> = { "1h": 1, "6h": 6 };
 
 export interface FilterState {
@@ -36,6 +41,11 @@ export interface FilterState {
 	/** Experiment and variant (both needed). */
 	exp?: string;
 	variant?: string;
+	/**
+	 * range = deploy: when the last prod release started (unix ms), looked up by useFilters (not in the URL). Unknown
+	 * (still loading, no release, no access): the range is today.
+	 */
+	sinceMs?: number;
 }
 
 /** The URL parameters the filter bar owns; pages keep their own (pid, funnel, ...) alongside. */
@@ -114,6 +124,8 @@ export function toApiFilters(state: FilterState, now = Date.now()): Filters {
 		if (state.to) filters.to = state.to;
 	} else if (hours) {
 		filters.from = new Date(Math.floor(now / MINUTE_MS) * MINUTE_MS - hours * HOUR_MS).toISOString();
+	} else if (state.range === "deploy") {
+		filters.from = state.sinceMs !== undefined && state.sinceMs < now ? new Date(Math.floor(state.sinceMs / MINUTE_MS) * MINUTE_MS).toISOString() : isoDate(now);
 	} else {
 		const days = Number.parseInt(state.range, 10);
 		filters.from = isoDate(now - (days - 1) * DAY_MS);
@@ -139,6 +151,8 @@ export function describeRange(state: FilterState): string {
 			return "the last 6 hours";
 		case "1d":
 			return "today (UTC)";
+		case "deploy":
+			return state.sinceMs !== undefined ? `since the last prod deploy (${new Date(state.sinceMs).toISOString().slice(0, 16).replace("T", " ")} UTC)` : "since the last prod deploy";
 		case "custom":
 			return `${state.from ?? "start"} to ${state.to ?? "now"} (UTC)`;
 		default:

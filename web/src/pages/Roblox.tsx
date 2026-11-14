@@ -377,12 +377,13 @@ function BenchmarkEditor({ value, onSave, onClose }: { value: Benchmarks; onSave
 
 // Realtime -----------------------------------------------------------------------------------------------------------
 
-const RANGE_HOURS: Partial<Record<FilterState["range"], number>> = { "1h": 1, "6h": 6, "1d": 24, "7d": 168, "30d": 720, "90d": 2160 };
+const RANGE_HOURS: Partial<Record<FilterState["range"], number>> = { "1h": 1, "6h": 6, "1d": 24, "3d": 72, "7d": 168, "30d": 720, "90d": 2160 };
 
 /** The Realtime window: the filter bar's range in hours (a custom range: its length in days), 1 h to 90 days. */
-export function realtimeHours(state: FilterState): number {
+export function realtimeHours(state: FilterState, now = Date.now()): number {
 	const preset = RANGE_HOURS[state.range];
 	if (preset) return preset;
+	if (state.range === "deploy") return state.sinceMs !== undefined ? Math.min(2160, Math.max(1, Math.ceil((now - state.sinceMs) / 3_600_000))) : 24;
 	if (state.range === "custom" && state.from && state.to) {
 		const days = Math.round((Date.parse(state.to) - Date.parse(state.from)) / 86_400_000) + 1;
 		if (Number.isFinite(days) && days > 0) return Math.min(2160, days * 24);
