@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { EXPORT_MAGIC, FLAGS, FORMAT_VERSION, halfExtents, MapFormatError, mapBlob, mapRecords, parseExport, readPart, RECORD_BYTES, SHAPES, summarize, type ExportEntry, type Shape } from "../src/maps/format.ts";
 import { ALIGNED_SHARE, alignment, pickMaps } from "../src/maps/match.ts";
 import { exportScript, luauString, mapKey } from "../src/maps/script.ts";
-import { LOBBY, MIN_EXPORT_GAP_MS } from "../src/maps/store.ts";
+import { LOBBY, MapStore } from "../src/maps/store.ts";
 import { ADMIN, API, T0, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 // The writer (the Luau script's layout) ---------------------------------------------------------------------------------
@@ -429,6 +429,17 @@ describe("the maps routes", () => {
 		expect(after.overrides.Mall).toMatchObject({ path: "ReplicatedStorage.assets.maps.Mall", by: "admin token" });
 		expect((await h.call("/v1/maps/Mall/override", { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
 		expect((await asJson(await h.call("/v1/maps", { headers: bearer(ADMIN) }))).overrides).toEqual({});
+	});
+
+	test("another instance on the same data dir (a rolling deploy) sees the index change", async () => {
+		const other = new MapStore({ dataDir: h.dir });
+		expect(other.latest?.maps.length).toBe(3);
+		other.setOverride("Port", { offset: [1, 2, 3] }, "other instance");
+		await Bun.sleep(5);
+		const list = await asJson(await h.call("/v1/maps", { headers: bearer(ADMIN) }));
+		expect(list.overrides.Port).toMatchObject({ offset: [1, 2, 3], by: "other instance" });
+		expect((await h.call("/v1/maps/Port/override", { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
+		expect(other.overrides).toEqual({});
 	});
 
 	test("a failed task: the export says why, the old maps stay", async () => {

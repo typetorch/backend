@@ -11,7 +11,7 @@
  * explorer how far it got.
  */
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { downloadBinaryOutput, OpenCloudError, runLuauTask } from "../opencloud.ts";
 import { type Bounds, mapBlob, parseExport, summarize, type Vec3 } from "./format.ts";
@@ -129,6 +129,8 @@ export class MapStore {
 	private readonly file: string;
 	private readonly clock: () => number;
 	private index: MapsIndex;
+	/** index.json's mtime when it was read (another instance sharing the data dir, a rolling deploy, may write it). */
+	private indexMtime = 0;
 	private current: ExportStatus = { state: "idle", step: "", startedAt: null, finishedAt: null, by: null, error: null };
 	private running: Promise<void> | null = null;
 
@@ -144,6 +146,7 @@ export class MapStore {
 		const empty: MapsIndex = { format: INDEX_VERSION, latest: null, history: [], overrides: {} };
 		if (!existsSync(this.file)) return empty;
 		try {
+			this.indexMtime = statSync(this.file).mtimeMs;
 			const parsed = JSON.parse(readFileSync(this.file, "utf8")) as MapsIndex;
 			if (parsed?.format !== INDEX_VERSION) return empty;
 			return { ...empty, ...parsed, overrides: parsed.overrides ?? {}, history: parsed.history ?? [] };
@@ -159,18 +162,29 @@ export class MapStore {
 		writeFileSync(tmp, JSON.stringify(this.index), { mode: 0o600 });
 		chmodSync(tmp, 0o600);
 		renameSync(tmp, this.file);
+		this.indexMtime = statSync(this.file).mtimeMs;
+	}
+
+	/** Reads index.json again when another process changed it. */
+	private fresh(): MapsIndex {
+		try {
+			if (existsSync(this.file) && statSync(this.file).mtimeMs !== this.indexMtime) this.index = this.load();
+		} catch {
+			// keep what is in memory
+		}
+		return this.index;
 	}
 
 	get latest(): ExportRecord | null {
-		return this.index.latest;
+		return this.fresh().latest;
 	}
 
 	get history(): MapsIndex["history"] {
-		return this.index.history;
+		return this.fresh().history;
 	}
 
 	get overrides(): Record<string, MapOverride> {
-		return this.index.overrides;
+		return this.fresh().overrides;
 	}
 
 	status(): ExportStatus {
@@ -185,7 +199,7 @@ export class MapStore {
 	/** A stored map by name (ignoring case and punctuation; LOBBY for the lobby). */
 	find(name: string): StoredMap | undefined {
 		const key = mapKey(name);
-		return this.index.latest?.maps.find((m) => (name === LOBBY ? m.kind === "lobby" : m.kind === "map" && mapKey(m.name) === key));
+		return this.fresh().latest?.maps.find((m) => (name === LOBBY ? m.kind === "lobby" : m.kind === "map" && mapKey(m.name) === key));
 	}
 
 	geometry(map: StoredMap): Uint8Array | null {
@@ -196,6 +210,7 @@ export class MapStore {
 
 	/** Sets or clears (null) a map's override. */
 	setOverride(name: string, input: unknown, by: string): MapOverride | null {
+		this.fresh();
 		const clean = name.trim();
 		if (!clean || clean.length > 100 || !mapKey(clean)) throw new MapsError(400, "the map name must have letters or digits (at most 100 characters)");
 		const existing = Object.keys(this.index.overrides).find((k) => mapKey(k) === mapKey(clean));
@@ -232,6 +247,7 @@ export class MapStore {
 	/** Starts an export in the background. Throws MapsError 409 while one runs, 429 too soon after the last. */
 	start(input: ExportInput): ExportStatus {
 		if (this.current.state === "running") throw new MapsError(409, "an export is already running");
+		this.fresh();
 		const last = Math.max(this.current.startedAt ?? 0, this.index.latest?.at ?? 0);
 		const wait = last + MIN_EXPORT_GAP_MS - this.clock();
 		if (last && wait > 0) throw new MapsError(429, `the last export was moments ago: try again in ${Math.ceil(wait / 1000)} s`, Math.ceil(wait / 1000));
