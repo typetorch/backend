@@ -6,7 +6,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api, ApiError } from "@/lib/api";
 import type { BenchmarkPeriod, BenchmarksResult, Filters, RealtimeResult, TrendsResult, TrendValues } from "@/lib/types";
-import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, periodLabel, realtimeHours, retentionSub, TREND_RANGES, TRENDS, trendLabel, trendStep, trendTick, windowLabel } from "./Roblox";
+import Roblox, { BENCHMARK_ROWS, BENCHMARKED_CARDS, CALCULATION_NOTES, CARDS, deviceRows, periodLabel, realtimeHours, retentionSub, TREND_RANGES, TRENDS, trendLabel, trendStep, trendTick, windowLabel } from "./Roblox";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -58,6 +58,11 @@ const realtime: RealtimeResult = {
 	current: { sessions: 30, players: 22, newPlayers: 5, running: 3, playtimeMinutes: 330, playtimePerPlayer: 15, avgSessionMinutes: 11, clientErrors: 2, errorsPerSession: 0.07, clientFps: 55, serverMemoryMb: 800 },
 	previous: { sessions: 25, players: 20, newPlayers: 4, running: 0, playtimeMinutes: 250, playtimePerPlayer: 12.5, avgSessionMinutes: 10, clientErrors: 1, errorsPerSession: 0.04, clientFps: 50, serverMemoryMb: 700 },
 	ccu: { now: 9, series: [{ hour: "2026-10-09T10:00:00.000Z", avg: 4, peak: 7 }], currentAvg: 4.3, previousAvg: 3, currentPeak: 7, previousPeak: 5 },
+	devices: {
+		now: { phone: 6, desktop: 2 },
+		names: ["phone", "desktop"],
+		series: [{ hour: new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000).toISOString(), avg: { phone: 5.5, desktop: 1 }, peak: { phone: 8, desktop: 2 } }],
+	},
 };
 
 const values = (over: Partial<TrendValues> = {}): TrendValues => ({ newUsers: 2, dau: 10, sessionMinutes: 12, playtimeMinutes: 24, robux: 50, revenue: 35, d1: 0.3, ...over });
@@ -137,7 +142,7 @@ describe("Roblox page", () => {
 		// Estimates (new users and the three retention cards: the SDK's first visit; revenue, payers, CCU) and our own numbers
 		// (qualified first sessions, join sources) carry a mark with the reason.
 		expect(document.querySelectorAll('button[aria-label^="Estimate: how it differs"]').length).toBe(8);
-		expect(document.querySelectorAll('button[aria-label^="Ours: how it differs"]').length).toBe(2);
+		expect(document.querySelectorAll('button[aria-label^="Ours: how it differs"]').length).toBe(3); // + concurrent players by device
 		expect(screen.getByText("6 of 12 first sessions, 5 min or longer")).toBeTruthy();
 	}, 60_000);
 
@@ -204,6 +209,17 @@ describe("Roblox page", () => {
 		const t = today.find((c) => c.name === "trends");
 		expect(t?.options).toEqual({ window: 1, bucketHours: 6 });
 		expect(t?.filters.from).toBe(new Date().toISOString().slice(0, 10));
+	});
+	it("concurrent players by device: live chips with shares, and the hourly rows", async () => {
+		mount();
+		expect(await screen.findByText("Concurrent players by device")).toBeTruthy();
+		expect(await screen.findByText("Live now: 8")).toBeTruthy();
+		const chips = screen.getByLabelText("Live now by device");
+		expect(within(chips).getByText("Phone: 6")).toBeTruthy();
+		expect(within(chips).getByText("(75%)")).toBeTruthy();
+		const rows = deviceRows(realtime.devices.series, ["phone", "desktop", "tablet"], "peak", 24);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ phone: 8, desktop: 2, tablet: 0 });
 	});
 	it("granularity, ranges and bucket labels", () => {
 		expect(TREND_RANGES).toEqual([0, 3, 7, 14, 28, 56, 90]);

@@ -24,6 +24,7 @@ import { api } from "@/lib/api";
 import { barMax, change, estimatePercentile, loadBenchmarks, saveBenchmarks, type Benchmark, type BenchmarkKey, type Benchmarks } from "@/lib/benchmarks";
 import { isoDate, type FilterState } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum, fmtPct } from "@/lib/format";
+import { groupLabel } from "@/lib/perf";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import type { BenchmarkPeriod, Filters, RealtimeResult, Retention, TrendValues } from "@/lib/types";
 
@@ -544,6 +545,103 @@ function Realtime({ filters }: { filters: Filters }) {
 	);
 }
 
+// Concurrent players by device ----------------------------------------------------------------------------------------
+
+const DEVICE_COLORS: Record<string, string> = {
+	desktop: "var(--chart-1)",
+	phone: "var(--chart-2)",
+	tablet: "var(--chart-3)",
+	console: "var(--chart-4)",
+	vr: "var(--chart-5)",
+	unknown: "var(--chart-7)",
+};
+
+/** The device rows for one hour's map: names in order, 0 when absent. */
+export function deviceRows(series: RealtimeResult["devices"]["series"], names: string[], pick: "avg" | "peak", hours: number) {
+	const from = Date.now() - hours * 3_600_000;
+	return series
+		.filter((p) => Date.parse(p.hour) + 3_600_000 > from)
+		.map((p) => ({ hour: p.hour, ...Object.fromEntries(names.map((n) => [n, p[pick][n] ?? 0])) }));
+}
+
+function DeviceCcu({ filters }: { filters: Filters }) {
+	const { state } = useFilters();
+	const hours = realtimeHours(state);
+	// Same query (and cache entry) as the Realtime card.
+	const q = useAnalytics("realtime", { hours, ccuDays: Math.min(30, Math.max(7, Math.ceil((hours * 2) / 24))) }, { filters });
+	const [pick, setPick] = useParam("devCcu", "avg");
+	const metric = pick === "peak" ? "peak" : "avg";
+	const span = Math.max(24, Math.min(hours, 30 * 24));
+	return (
+		<Section
+			title={
+				<span className="flex items-center gap-1.5">
+					Concurrent players by device
+					<DiffersBadge differs={{ label: "Ours", why: "From player sessions (first to last event) and the device class the client reported, not from the servers' heartbeats: totals can differ a little from Concurrent users." }} />
+				</span>
+			}
+			description={`Live now, and per hour over the last ${windowLabel(span)}: the ${metric === "avg" ? "average" : "peak minute"} per device class. Follows the filter bar (at least 24 hours).`}
+			actions={
+				<ToggleGroup type="single" size="sm" variant="outline" value={metric} onValueChange={(v) => v && setPick(v)} aria-label="Average or peak">
+					<ToggleGroupItem value="avg">Average</ToggleGroupItem>
+					<ToggleGroupItem value="peak">Peak</ToggleGroupItem>
+				</ToggleGroup>
+			}
+			contentClassName="space-y-3"
+		>
+			<QueryState query={q} isEmpty={(r) => !r.devices || r.devices.names.length === 0} empty="No player sessions in this range.">
+				{(r) => {
+					const names = r.devices.names;
+					const liveTotal = Object.values(r.devices.now).reduce((a, b) => a + b, 0);
+					const rows = deviceRows(r.devices.series, names, metric, span);
+					const config: ChartConfig = Object.fromEntries(names.map((n) => [n, { label: groupLabel("dev", n), color: DEVICE_COLORS[n] ?? "var(--chart-8)" }]));
+					return (
+						<>
+							<div className="flex flex-wrap gap-2" aria-label="Live now by device">
+								<Badge variant="secondary" className="tabular-nums">
+									{`Live now: ${fmtInt(liveTotal)}`}
+								</Badge>
+								{names.map((n) => {
+									const v = r.devices.now[n] ?? 0;
+									return (
+										<Badge key={n} variant="outline" className="gap-1.5 tabular-nums">
+											<span className="size-2 rounded-full" style={{ backgroundColor: DEVICE_COLORS[n] ?? "var(--chart-8)" }} />
+											{`${groupLabel("dev", n)}: ${fmtInt(v)}`}
+											{liveTotal > 0 ? <span className="text-muted-foreground">({fmtPct(v / liveTotal, 0)})</span> : null}
+										</Badge>
+									);
+								})}
+							</div>
+							<ChartContainer config={config} className="aspect-auto h-64 w-full">
+								<LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+									<CartesianGrid vertical={false} />
+									<XAxis dataKey="hour" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} tickFormatter={(h: string) => `${h.slice(5, 10)} ${h.slice(11, 13)}h`} />
+									<YAxis tickLine={false} axisLine={false} width={40} tickFormatter={(v: number) => fmtNum(v, 0)} />
+									<ChartTooltip
+										content={
+											<ChartTooltipContent
+												labelFormatter={(_l, items) => {
+													const h = (items?.[0]?.payload as { hour?: string } | undefined)?.hour;
+													return h ? `${h.slice(0, 10)} ${h.slice(11, 13)}:00 UTC` : "";
+												}}
+												formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${typeof v === "number" ? fmtNum(v, metric === "avg" ? 1 : 0) : "–"}`}
+											/>
+										}
+									/>
+									<ChartLegend content={<ChartLegendContent />} />
+									{names.map((n) => (
+										<Line key={n} dataKey={n} stroke={`var(--color-${n})`} strokeWidth={2} dot={false} isAnimationActive={false} />
+									))}
+								</LineChart>
+							</ChartContainer>
+						</>
+					);
+				}}
+			</QueryState>
+		</Section>
+	);
+}
+
 // 7-day moving averages ---------------------------------------------------------------------------------------------
 
 type TrendKey = "d1" | "newUsers" | "sessionMinutes" | "playtimeMinutes" | "dau" | "revenue";
@@ -836,6 +934,7 @@ export default function Roblox() {
 				</div>
 				<Realtime filters={filters} />
 			</div>
+			<DeviceCcu filters={filters} />
 			<RobloxAcquisition days={days} {...(bench.playThrough ? { bench: bench.playThrough } : {})} onSet={() => setEditing(true)} />
 			<Trends filters={filters} />
 			<HowCalculated />

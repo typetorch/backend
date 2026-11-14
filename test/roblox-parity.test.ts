@@ -209,3 +209,40 @@ describe("realtime", () => {
 		expect(r.current.sessions).toBe(1); // T's session today; Studio sessions are older than 24 h anyway
 	});
 });
+
+describe("realtime: concurrent players by device", () => {
+	let inst: DuckDBInstance;
+	let conn: DuckDBConnection;
+	let dev: DuckDbStore;
+	// Live at NOW: P1 (phone, a row a minute ago, no leave) and K1 (desktop). G1 (phone) left 20 minutes ago.
+	// Two hours ago: P1's earlier session overlapped G1 for 30 of the hour's minutes (2 phones), K1 not yet there.
+	const h2 = Math.floor((NOW - 2 * HOUR) / HOUR) * HOUR;
+	const devEvents: EventRow[] = [
+		row("P1", "p-old", h2, { dev: "phone", kind: "session", name: "join" }),
+		row("P1", "p-old", h2 + 59 * MIN, { dev: "phone" }),
+		row("G1", "g1", h2 + 30 * MIN, { dev: "phone", kind: "session", name: "join" }),
+		row("G1", "g1", NOW - 20 * MIN, { dev: "phone", kind: "session", name: "leave" }),
+		row("P1", "p1", NOW - 30 * MIN, { dev: "unknown", kind: "session", name: "join" }), // before the client's hello
+		row("P1", "p1", NOW - MIN, { dev: "phone", kind: "tech", name: "client" }),
+		row("K1", "k1", NOW - 10 * MIN, { dev: "desktop", kind: "session", name: "join" }),
+		row("K1", "k1", NOW - 2 * MIN, { dev: "desktop", kind: "tech", name: "client" }),
+	];
+	beforeAll(async () => {
+		({ instance: inst, connection: conn } = await fixtureDb({ events: devEvents, recordings: [] }));
+		dev = new DuckDbStore(conn, (name) => name, () => NOW);
+	});
+	afterAll(() => {
+		conn.closeSync();
+		inst.closeSync();
+	});
+
+	test("live now per device, and per hour the average and peak minute per device", async () => {
+		const r = await dev.query("realtime", {}, { ccuDays: 1 });
+		expect(r.devices.now).toEqual({ phone: 1, desktop: 1 });
+		expect(r.devices.names).toEqual(["phone", "desktop"]);
+		const hour = r.devices.series.find((p) => p.hour === new Date(h2).toISOString());
+		expect(hour?.peak.phone).toBe(2);
+		expect(hour?.avg.phone).toBe(1.5); // 60 minutes of P1 + 30 of G1
+		expect(hour?.avg.desktop ?? 0).toBe(0);
+	});
+});
