@@ -19,18 +19,18 @@ import { useQuery } from "@tanstack/react-query";
 import { CircleAlert, Send } from "lucide-react";
 import { useSearchParams } from "react-router";
 import { ChangeChip } from "@/components/ChangeChip";
+import { RangePicker } from "@/components/RangePicker";
 import { Metric, QueryState } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
 import { change } from "@/lib/benchmarks";
-import { describeRange, isoDate, RANGE_LABELS, type RangePreset } from "@/lib/filters";
+import { describeRange, isoDate, type RangePreset } from "@/lib/filters";
 import { fmtInt, fmtPct, fmtTime } from "@/lib/format";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import type { Filters, NotifyHalt, NotifyStatus } from "@/lib/types";
@@ -117,42 +117,6 @@ function KindPicker({ kinds, value, onChange }: { kinds: string[]; value: string
 				))}
 			</SelectContent>
 		</Select>
-	);
-}
-
-/** The range alone (the shell's filter bar is off here: only the range applies to notify rows). */
-function RangePicker() {
-	const { state, set } = useFilters();
-	const today = isoDate(Date.now());
-	return (
-		<>
-			<Select
-				value={state.range}
-				onValueChange={(v) => {
-					const next = v as RangePreset;
-					if (next === "custom") set({ range: "custom", from: state.from ?? isoDate(Date.now() - 29 * DAY_MS), to: state.to ?? today });
-					else set({ range: next });
-				}}
-			>
-				<SelectTrigger size="sm" className="w-36" aria-label="Date range">
-					<SelectValue />
-				</SelectTrigger>
-				<SelectContent>
-					{(Object.keys(RANGE_LABELS) as RangePreset[]).map((r) => (
-						<SelectItem key={r} value={r}>
-							{RANGE_LABELS[r]}
-						</SelectItem>
-					))}
-				</SelectContent>
-			</Select>
-			{state.range === "custom" ? (
-				<span className="flex items-center gap-1">
-					<Input type="date" aria-label="From (UTC)" className="h-8 w-36" value={state.from ?? ""} max={state.to ?? today} onChange={(e) => set({ from: e.target.value || undefined })} />
-					<span className="text-xs text-muted-foreground">to</span>
-					<Input type="date" aria-label="To (UTC, inclusive)" className="h-8 w-36" value={state.to ?? ""} min={state.from} onChange={(e) => set({ to: e.target.value || undefined })} />
-				</span>
-			) : null}
-		</>
 	);
 }
 

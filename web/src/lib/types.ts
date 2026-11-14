@@ -1024,6 +1024,84 @@ export interface QueryResults {
 	"notify-funnel": NotifyFunnelResult;
 	"notify-optin": NotifyOptinResult;
 	"notify-queue": NotifyQueueResult;
+	"feedback-summary": FeedbackSummaryResult;
+	"feedback-list": FeedbackListResult;
+}
+
+// Player feedback (plans/32) ------------------------------------------------------------------------------------------------
+
+/** One scale's distribution (`legacy_faces5`: the older custom/feedback rows, mapped). */
+export interface FeedbackScaleSummary {
+	scale: string;
+	/** thumbs | stars | scale (anything else renders as a scale). */
+	type: string;
+	steps: number;
+	legacy: boolean;
+	n: number;
+	rated: number;
+	textOnly: number;
+	/** Every step of the scale (thumbs 0 / 1, else 1..steps) with its label when known. */
+	counts: { r: number; label: string | null; n: number }[];
+	labels: Record<string, string>;
+	avgR: number | null;
+	avgNorm: number | null;
+	firstAt: string | null;
+	lastAt: string | null;
+}
+
+export interface FeedbackTrendPoint {
+	at: string;
+	t: number;
+	n: number;
+	rated: number;
+	withText: number;
+	avgNorm: number | null;
+}
+
+export interface FeedbackSummaryResult {
+	from: string;
+	to: string;
+	total: number;
+	withText: number;
+	players: number;
+	rated: number;
+	legacy: number;
+	avgNorm: number | null;
+	scales: FeedbackScaleSummary[];
+	thumbs: { up: number; down: number; upShare: number } | null;
+	bucket: "hour" | "day";
+	trend: FeedbackTrendPoint[];
+}
+
+export interface FeedbackRow {
+	t: number;
+	at: string;
+	pid: string;
+	sid: string;
+	dev: string | null;
+	state: string | null;
+	scale: string;
+	type: string;
+	steps: number;
+	r: number | null;
+	norm: number | null;
+	label: string | null;
+	text: string | null;
+	len: number;
+	topic: string | null;
+	ctx: Record<string, string | number | boolean> | null;
+	play_s: number | null;
+	legacy: boolean;
+	uid?: number;
+	name?: string;
+	displayName?: string;
+}
+
+export interface FeedbackListResult {
+	total: number;
+	offset: number;
+	more: boolean;
+	rows: FeedbackRow[];
 }
 
 export type QueryName = keyof QueryResults;

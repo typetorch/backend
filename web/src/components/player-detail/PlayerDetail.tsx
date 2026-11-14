@@ -4,7 +4,7 @@
  * Sessions, Timeline, Errors), the chosen view below. The view and Chart / Table live in the URL (`view`, `show`), next to the page's pid and filters.
  */
 import { useQuery } from "@tanstack/react-query";
-import { Bell, Bug, CalendarDays, Clock, Coins, History, type LucideIcon } from "lucide-react";
+import { Bell, Bug, CalendarDays, Clock, Coins, History, MessageSquareText, type LucideIcon } from "lucide-react";
 import { useCallback } from "react";
 import { useSearchParams } from "react-router";
 import { QueryState } from "@/components/common";
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
+import { FeedbackList } from "@/pages/feedback/shared";
 import { PlayerView as NotifyPlayerView } from "@/pages/notifications/PlayerPanel";
 import { describeRange } from "@/lib/filters";
 import { useAnalytics, useFilters } from "@/lib/hooks";
@@ -22,8 +23,10 @@ import type { Show } from "./SeriesView";
 import { PlaytimeView, SessionsView, SpendingView } from "./StatViews";
 import { TimelineView } from "./TimelineView";
 
-export const PLAYER_VIEWS = ["spending", "playtime", "sessions", "timeline", "errors", "notifications"] as const;
+export const PLAYER_VIEWS = ["spending", "playtime", "sessions", "timeline", "errors", "feedback", "notifications"] as const;
 export type PlayerView = (typeof PLAYER_VIEWS)[number];
+
+const FEEDBACK_LIMIT = 100;
 
 const VIEW_BUTTONS: { id: PlayerView; label: string; icon: LucideIcon }[] = [
 	{ id: "spending", label: "Spending", icon: Coins },
@@ -31,6 +34,7 @@ const VIEW_BUTTONS: { id: PlayerView; label: string; icon: LucideIcon }[] = [
 	{ id: "sessions", label: "Sessions", icon: CalendarDays },
 	{ id: "timeline", label: "Timeline", icon: History },
 	{ id: "errors", label: "Errors", icon: Bug },
+	{ id: "feedback", label: "Feedback", icon: MessageSquareText },
 	{ id: "notifications", label: "Notifications", icon: Bell },
 ];
 
@@ -38,6 +42,21 @@ const VIEW_BUTTONS: { id: PlayerView; label: string; icon: LucideIcon }[] = [
 function NotificationsView({ pid }: { pid: string }) {
 	const q = useQuery({ queryKey: ["notify-user", { pid }], queryFn: ({ signal }) => api.notifyUser({ pid }, signal), retry: false, refetchInterval: 30_000 });
 	return <QueryState query={q} loadingRows={3}>{(view) => <NotifyPlayerView view={view} onPick={() => undefined} />}</QueryState>;
+}
+
+/** The player's feedback (plans/32) in the range: `feedback-list` with the pid, newest first. */
+function FeedbackView({ pid }: { pid: string }) {
+	const q = useAnalytics("feedback-list", { pid, limit: FEEDBACK_LIMIT });
+	return (
+		<QueryState query={q} loadingRows={3} isEmpty={(d) => d.rows.length === 0} empty="No feedback from this player in this range.">
+			{(d) => (
+				<div className="space-y-2">
+					<FeedbackList rows={d.rows} showPlayer={false} label="This player's feedback" />
+					{d.more ? <p className="text-xs text-muted-foreground">The newest {FEEDBACK_LIMIT} of {d.total}; the Feedback page has the rest.</p> : null}
+				</div>
+			)}
+		</QueryState>
+	);
 }
 
 const isView = (value: string | null): value is PlayerView => (PLAYER_VIEWS as readonly (string | null)[]).includes(value);
@@ -93,9 +112,11 @@ export function PlayerDetail({ pid }: { pid: string }) {
 					</div>
 				</nav>
 				<div className="space-y-3 p-4 sm:p-6">
-					{stats.data?.window.clamped && view !== "timeline" && view !== "errors" && view !== "notifications" ? <p className="text-xs text-muted-foreground">The range is longer than 400 days: these numbers cover its last 400.</p> : null}
+					{stats.data?.window.clamped && view !== "timeline" && view !== "errors" && view !== "feedback" && view !== "notifications" ? <p className="text-xs text-muted-foreground">The range is longer than 400 days: these numbers cover its last 400.</p> : null}
 					{view === "notifications" && owner ? (
 						<NotificationsView pid={pid} />
+					) : view === "feedback" ? (
+						<FeedbackView pid={pid} />
 					) : view === "errors" ? (
 						<ErrorsView pid={pid} />
 					) : view === "timeline" ? (
