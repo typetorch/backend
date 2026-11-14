@@ -359,9 +359,11 @@ export const feedbackList = defineQuery<FeedbackListOptions, FeedbackListResult>
 		const w = `WITH ${feedbackCtes(ctx, f)} `;
 		const cond = listWhere(o);
 		return {
+			// The page through ROW_NUMBER (both engines), so the statement still ends in its LIMIT.
 			rows:
-				`${w}SELECT t, pid, sid, dev, state, legacy, scale, type, steps, r, norm, text, len, label, props FROM m WHERE ${cond} ` +
-				`ORDER BY t DESC, pid, sid ${d.limit(o.limit + 1)} OFFSET ${int(o.offset)}`,
+				`${w}SELECT t, pid, sid, dev, state, legacy, scale, type, steps, r, norm, text, len, label, props FROM (` +
+				`SELECT m.*, ROW_NUMBER() OVER (ORDER BY t DESC, pid, sid, props) AS rn FROM m WHERE ${cond}) x ` +
+				`WHERE rn > ${int(o.offset)} ORDER BY rn ${d.limit(o.limit + 1)}`,
 			total: `${w}SELECT COUNT(*) AS n FROM m WHERE ${cond} ${d.limit(1)}`,
 		};
 	},
