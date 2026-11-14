@@ -332,11 +332,25 @@ export interface RealtimeResult {
 		currentPeak: number;
 		previousPeak: number;
 	};
+	/**
+	 * Concurrent players by device class (the session's `dev`), from player sessions (first to last event; heartbeats
+	 * carry no device). `now`: sessions with an event in the last 3 minutes and no leave row. `series`: per hour (UTC,
+	 * the ccu series' hours), the average and the peak minute per device.
+	 */
+	devices: {
+		now: Record<string, number>;
+		/** Device classes seen, busiest first. */
+		names: string[];
+		series: { hour: string; avg: Record<string, number>; peak: Record<string, number> }[];
+	};
 }
+
+/** Live: a session with an event this recent and no leave row (clients send a tech/client row every techEvery s). */
+const LIVE_MS = 3 * 60_000;
 
 export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 	name: "realtime",
-	summary: "concurrent users per hour (peak and average) from fleet heartbeats; sessions, players, new players, playtime, session time, client errors per session, client fps, server memory: last hours vs the hours before",
+	summary: "concurrent users per hour (peak and average) from fleet heartbeats, and by device class from sessions (live now and per hour); sessions, players, new players, playtime, session time, client errors per session, client fps, server memory: last hours vs the hours before",
 	defaultDays: 7,
 	options: (input = {}) => ({
 		hours: intOption(input.hours, "hours", 24, 1, 2160),
@@ -374,6 +388,10 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 				`pm AS (SELECT minute, job, MAX(COALESCE(players, 0)) AS players FROM hb GROUP BY minute, job), ` +
 				`m AS (SELECT minute, SUM(players) AS ccu FROM pm GROUP BY minute) ` +
 				`SELECT CAST(floor(minute / 60.0) AS BIGINT) AS hour, SUM(ccu) AS ccu_sum, MAX(ccu) AS peak, MAX(minute) AS last_minute FROM m GROUP BY CAST(floor(minute / 60.0) AS BIGINT) ORDER BY hour ${lim(10_000)}`,
+			devSessions:
+				`WITH ev AS (${playerEvents(ctx, f, ccuFrom - SESSION_SLACK_MS, now + 60_000, "e.sid AS sid, e.t AS t, e.dev AS dev, e.kind AS kind, e.name AS name")}) ` +
+				`SELECT t0, t1, dev, lft FROM (SELECT sid, MIN(t) AS t0, MAX(t) AS t1, COALESCE(MAX(CASE WHEN dev <> '' AND dev <> 'unknown' THEN dev END), 'unknown') AS dev, ` +
+				`MAX(CASE WHEN kind = 'session' AND name = 'leave' THEN 1 ELSE 0 END) AS lft FROM ev WHERE sid <> '' GROUP BY sid) x WHERE t1 >= ${int(ccuFrom)} ORDER BY t0 ${lim(500_000)}`,
 			ccuNow:
 				`WITH hb AS (SELECT e.job AS job, e.t AS t, ${d.jsonNumber("e.props", "n")} AS players, ROW_NUMBER() OVER (PARTITION BY e.job ORDER BY e.t DESC) AS rn ` +
 				`FROM ${ctx.table("events", now - 120_000, now + 60_000)} e WHERE ${whereSql({ ...serverFilters, from: now - 120_000, to: now + 60_000 }, d, { prefix: "e." })} ` +
@@ -418,6 +436,51 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 			const t = Date.parse(p.hour);
 			return t >= ctx.now - a * HOUR_MS && t < ctx.now - b * HOUR_MS;
 		});
+		// Concurrent players by device: a per-minute sweep over the sessions (start +1, the minute after the end -1).
+		const firstMinute = firstHour * 60;
+		const minutes = Math.floor(ctx.now / 60_000) - firstMinute + 1;
+		const deltas = new Map<string, Int32Array>();
+		const devNow: Record<string, number> = {};
+		for (const r of rows.devSessions) {
+			const dev = str(r.dev) || "unknown";
+			const t0 = num(r.t0);
+			const t1 = num(r.t1);
+			let arr = deltas.get(dev);
+			if (!arr) deltas.set(dev, (arr = new Int32Array(minutes + 1)));
+			const a = Math.max(0, Math.floor(t0 / 60_000) - firstMinute);
+			const b = Math.min(minutes - 1, Math.floor(t1 / 60_000) - firstMinute);
+			if (b >= a) {
+				arr[a] += 1;
+				arr[b + 1] -= 1;
+			}
+			if (t1 >= ctx.now - LIVE_MS && num(r.lft) === 0) devNow[dev] = (devNow[dev] ?? 0) + 1;
+		}
+		const devSeries: RealtimeResult["devices"]["series"] = [];
+		const totals = new Map<string, number>();
+		const running = new Map<string, number>();
+		for (let h = firstHour; h <= lastHour; h++) {
+			const avg: Record<string, number> = {};
+			const pk: Record<string, number> = {};
+			const m0 = (h - firstHour) * 60;
+			const m1 = Math.min(minutes, m0 + 60);
+			for (const [dev, arr] of deltas) {
+				let cur = running.get(dev) ?? 0;
+				let sum = 0;
+				let max = 0;
+				for (let m = m0; m < m1; m++) {
+					cur += arr[m];
+					sum += cur;
+					if (cur > max) max = cur;
+				}
+				running.set(dev, cur);
+				const n = Math.max(1, m1 - m0);
+				avg[dev] = round(sum / n, 2);
+				pk[dev] = max;
+				totals.set(dev, (totals.get(dev) ?? 0) + sum);
+			}
+			devSeries.push({ hour: iso(h * HOUR_MS), avg, peak: pk });
+		}
+		const devNames = [...totals].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([d]) => d);
 		const mean = (points: { avg: number }[]) => (points.length ? round(points.reduce((s, p) => s + p.avg, 0) / points.length, 2) : 0);
 		const peak = (points: { peak: number }[]) => points.reduce((m, p) => Math.max(m, p.peak), 0);
 		return {
@@ -432,6 +495,7 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 				currentPeak: peak(hoursBack(o.hours, 0)),
 				previousPeak: peak(hoursBack(2 * o.hours, o.hours)),
 			},
+			devices: { now: devNow, names: devNames, series: devSeries },
 		};
 	},
 });

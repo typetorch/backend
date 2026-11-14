@@ -545,6 +545,8 @@ export interface RealtimeResult {
 	current: RealtimeWindow;
 	previous: RealtimeWindow;
 	ccu: { now: number; series: { hour: string; avg: number; peak: number }[]; currentAvg: number; previousAvg: number; currentPeak: number; previousPeak: number };
+	/** Concurrent players by device class, from sessions: live now, and per hour the average and peak minute. */
+	devices: { now: Record<string, number>; names: string[]; series: { hour: string; avg: Record<string, number>; peak: Record<string, number> }[] };
 }
 
 export interface TrendValues {
