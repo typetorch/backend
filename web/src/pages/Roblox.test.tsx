@@ -189,6 +189,11 @@ describe("Roblox page", () => {
 		expect(daysBack).toBeGreaterThanOrEqual(28);
 		expect(daysBack).toBeLessThanOrEqual(29);
 	});
+	it("trendWindow=1 asks for each day's own value (Daily) instead of the 7-day average", async () => {
+		const calls = mount("/roblox?trendWindow=1&trend=playtimeMinutes");
+		expect(await screen.findByText("Daily values")).toBeTruthy();
+		expect(calls.find((c) => c.name === "trends")?.options).toEqual({ window: 1 });
+	});
 });
 
 describe("definitions", () => {

@@ -164,6 +164,16 @@ describe("roblox numbers and retention", () => {
 		expect(keptD1).toBe(ref.kept);
 		expect(r.average["1"]).toBe(Math.round((ref.kept / ref.of) * 10_000) / 10_000);
 	});
+
+	test("retention: every day from 1 to 30 (the Retention page's columns); more than 31 offsets refused", async () => {
+		const all = Array.from({ length: 30 }, (_, i) => i + 1);
+		const r = await store.query("retention", {}, { days: all });
+		expect(r.days).toEqual(all);
+		const keptD1 = r.cohorts.reduce((s, c) => s + (c.keptPlayers["1"] ?? 0), 0);
+		expect(keptD1).toBe(reference(1).kept);
+		for (const c of r.cohorts) expect(Object.keys(c.kept)).toHaveLength(30);
+		expect(() => store.render("retention", {}, { days: Array.from({ length: 32 }, (_, i) => i + 1) })).toThrow("1-31");
+	});
 });
 
 describe("funnel", () => {
