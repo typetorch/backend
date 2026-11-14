@@ -279,8 +279,8 @@ export const retention = defineQuery<RetentionOptions, RetentionResult>({
 	defaultDays: 30,
 	options: (input = {}) => {
 		const days = input.days ?? [1, 3, 7, 14, 30];
-		if (!Array.isArray(days) || days.length === 0 || days.length > 12 || days.some((d) => !Number.isInteger(d) || d < 1 || d > 90)) {
-			throw new Error("days must be 1-12 whole numbers from 1 to 90");
+		if (!Array.isArray(days) || days.length === 0 || days.length > 31 || days.some((d) => !Number.isInteger(d) || d < 1 || d > 90)) {
+			throw new Error("days must be 1-31 whole numbers from 1 to 90");
 		}
 		return { days: [...new Set(days)].sort((a, b) => a - b) };
 	},

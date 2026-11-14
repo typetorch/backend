@@ -586,33 +586,51 @@ const SOURCE_LABELS: Record<string, string> = {
 function Trends({ filters }: { filters: Filters }) {
 	const [metric, setMetric] = useParam("trend", "d1");
 	const [range, setRange] = useParam("trendDays", "28");
+	// "1": each day's own value (the change day to day); "7": the 7-day moving average (smoother).
+	const [smooth, setSmooth] = useParam("trendWindow", "7");
+	const windowDays = smooth === "1" ? 1 : 7;
 	const days = Number.parseInt(range, 10) || 28;
 	// The last `days` full UTC days: the query leaves today out (it isn't over).
 	const from = isoDate(Date.now() - days * 86_400_000);
-	const q = useAnalytics("trends", { window: 7 }, { filters: { ...filters, from } });
+	const q = useAnalytics("trends", { window: windowDays }, { filters: { ...filters, from } });
 	const spec = TRENDS.find((t) => t.key === metric) ?? TRENDS[0];
 	return (
 		<Section
 			title={
 				<span className="flex items-center gap-1.5">
-					Snapshot of 7-day moving averages
+					{windowDays === 1 ? "Daily values" : "Snapshot of 7-day moving averages"}
 					<DiffersBadge differs={{ label: "Ours", why: JOIN_SOURCES_DIFFER }} />
 				</span>
 			}
-			description="Per full UTC day, total and per join source (where the player's first session that day came from). Counts are averaged over the 7 days; ratios are the mean of the 7 daily values."
+			description={
+				windowDays === 1
+					? "Per full UTC day, total and per join source (where the player's first session that day came from): each day's own value."
+					: "Per full UTC day, total and per join source (where the player's first session that day came from). Counts are averaged over the 7 days; ratios are the mean of the 7 daily values."
+			}
 			actions={
-				<Select value={String(days)} onValueChange={setRange}>
-					<SelectTrigger size="sm" className="w-32" aria-label="Date range">
-						<SelectValue />
-					</SelectTrigger>
-					<SelectContent>
-						{[14, 28, 56, 90].map((d) => (
-							<SelectItem key={d} value={String(d)}>
-								Last {d} days
-							</SelectItem>
-						))}
-					</SelectContent>
-				</Select>
+				<div className="flex gap-2">
+					<Select value={windowDays === 1 ? "1" : "7"} onValueChange={setSmooth}>
+						<SelectTrigger size="sm" className="w-36" aria-label="Smoothing">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="1">Daily</SelectItem>
+							<SelectItem value="7">7-day average</SelectItem>
+						</SelectContent>
+					</Select>
+					<Select value={String(days)} onValueChange={setRange}>
+						<SelectTrigger size="sm" className="w-32" aria-label="Date range">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{[14, 28, 56, 90].map((d) => (
+								<SelectItem key={d} value={String(d)}>
+									Last {d} days
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</div>
 			}
 			contentClassName="space-y-3"
 		>

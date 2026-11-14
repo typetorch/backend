@@ -55,7 +55,7 @@ function retentionColumns(days: number[]): DataColumn<Row>[] {
 		...days.map(
 			(d): DataColumn<Row> => ({
 				id: `day${d}`,
-				header: `Day ${d}`,
+				header: `D${d}`,
 				title: `Share of the cohort that played again exactly ${d} days after joining, in percent`,
 				accessor: (r) => {
 					const rate = r.rates[d];
@@ -65,7 +65,7 @@ function retentionColumns(days: number[]): DataColumn<Row>[] {
 				format: (_v, r) => heatText(r.rates[d] ?? null, r.kept?.[d]),
 				align: "center",
 				className: "p-0.5",
-				minWidth: 84,
+				minWidth: 60,
 			}),
 		),
 	];
@@ -98,13 +98,16 @@ function Body({ data }: { data: RetentionResult }) {
 	);
 }
 
+/** Every day from 1 to 30 (hide some under Columns). */
+export const RETENTION_DAYS = Array.from({ length: 30 }, (_, i) => i + 1);
+
 export default function Retention() {
-	const q = useAnalytics("retention", { days: [1, 3, 7, 14, 30] });
+	const q = useAnalytics("retention", { days: RETENTION_DAYS });
 	return (
 		<>
 			<PageHeader
 				title="Retention"
-				description="New players by the day they joined, and how many came back on day 1, 3, 7, 14 and 30. Days not over yet show –."
+				description="New players by the day they joined, and how many came back on each day from 1 to 30 (D1 = the day after joining). Days not over yet show –; hide days under Columns."
 			/>
 			<QueryState query={q} isEmpty={(d) => d.cohorts.length === 0} empty="No new players joined in this range.">
 				{(data) => <Body data={data} />}
