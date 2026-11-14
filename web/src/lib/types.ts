@@ -464,6 +464,153 @@ export interface ConfusionResult {
 	};
 }
 
+// The Recordings page (first-session recordings: map layers, replay, quit autopsy, time to first action) ----------------
+
+/** A map's top-down grid: x to the right, z down; `cell` studs per cell. */
+export interface RecFrame {
+	minX: number;
+	minZ: number;
+	maxX: number;
+	maxZ: number;
+	cell: number;
+	cols: number;
+	rows: number;
+}
+
+/** [column, row, count] */
+export type RecCell = [number, number, number];
+
+export interface RecSampling {
+	recorded: number;
+	used: number;
+	sampled: boolean;
+	failed: number;
+	capped: boolean;
+	eventsCapped: boolean;
+}
+
+export interface RecMapLayer {
+	id: string;
+	label: string;
+	source: "recording" | "events";
+	count: number;
+	sessions: number;
+	values: { value: string; count: number }[];
+	cells: RecCell[];
+	cellsCut: number;
+	examples: string[];
+}
+
+export interface RecordingLayersResult {
+	mapKey: string;
+	maps: { map: string; samples: number; sessions: number; events: number }[];
+	map: string | null;
+	frame: RecFrame | null;
+	background: RecCell[];
+	layers: RecMapLayer[];
+	catalog: { kind: string; name: string; count: number }[];
+	sampling: RecSampling;
+	notes: string[];
+}
+
+export interface RecSessionSummary {
+	sid: string;
+	pid: string;
+	art: string;
+	dev: string;
+	why: string | null;
+	start: number;
+	seconds: number;
+	samples: number;
+	inputs: number;
+	maps: string[];
+	signals: { idle: number; camera_spin: number; repeated_clicks: number };
+}
+
+export interface RecordingSessionsResult {
+	total: number;
+	sessions: RecSessionSummary[];
+	sampling: RecSampling;
+}
+
+export interface RecInput {
+	t: number;
+	type: string;
+	target?: string;
+	code?: number;
+	processed?: boolean;
+}
+
+export interface RecordingReplayResult {
+	found: boolean;
+	sid: string;
+	pid?: string;
+	job?: string;
+	art?: string;
+	dev?: string;
+	why?: string | null;
+	start?: number;
+	duration?: number;
+	gaps?: number;
+	chunks?: number;
+	/** [t ms, x, y, z, yaw (0 = facing -Z), lookY] */
+	samples?: [number, number | null, number | null, number | null, number | null, number | null][];
+	inputs?: RecInput[];
+	events?: { t: number; kind: string; name: string; state?: string | null; props?: Record<string, unknown> }[];
+	signals?: { t: number; kind: "idle" | "camera_spin" | "repeated_clicks"; amount: number; target?: string; zone?: string }[];
+	maps?: { t: number; map: string }[];
+	map?: string;
+	frame?: RecFrame | null;
+	failed?: string;
+}
+
+export interface QuitAutopsyRow {
+	reason: "screen" | "died" | "idle" | "dead_clicks" | "stuck" | "tutorial" | "place" | "none";
+	value?: string;
+	left: number;
+	leftShare: number;
+	stayed: number;
+	stayedShare: number;
+	lift: number | null;
+	examples: string[];
+}
+
+export interface QuitAutopsyResult {
+	windowSeconds: number;
+	left: number;
+	stayed: number;
+	byWhy: { why: string; sessions: number }[];
+	rows: QuitAutopsyRow[];
+	sampling: RecSampling;
+}
+
+export type FirstActionKey = "move" | "screen" | "button" | "prompt" | "round";
+
+export interface FirstActionStat {
+	action: FirstActionKey;
+	sessions: number;
+	reached: number;
+	share: number;
+	median: number | null;
+	p25: number | null;
+	p75: number | null;
+	histogram: { label: string; count: number }[];
+}
+
+export interface FirstActionSplit {
+	value: string;
+	sessions: number;
+	stats: { action: FirstActionKey; reached: number; share: number; median: number | null }[];
+}
+
+export interface FirstActionResult {
+	sessions: number;
+	stats: FirstActionStat[];
+	byDevice: FirstActionSplit[];
+	byBuild: FirstActionSplit[];
+	sampling: RecSampling;
+}
+
 export interface TopEventsResult {
 	events: { kind: string; name: string; count: number; players: number }[];
 }
@@ -1139,6 +1286,11 @@ export interface QueryResults {
 	experiment: ExperimentResult;
 	"experiment-players": ExperimentPlayers;
 	confusion: ConfusionResult;
+	"recording-layers": RecordingLayersResult;
+	"recording-sessions": RecordingSessionsResult;
+	"recording-replay": RecordingReplayResult;
+	"quit-autopsy": QuitAutopsyResult;
+	"first-action": FirstActionResult;
 	"top-events": TopEventsResult;
 	servers: unknown;
 	deployReport: unknown;
