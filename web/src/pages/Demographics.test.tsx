@@ -63,6 +63,7 @@ describe("demographics labels", () => {
 	test("which filters Roblox can't take, and the window's label", () => {
 		expect(filtersRobloxCannotTake({ range: "7d", dev: "phone", players: "new" })).toEqual([]);
 		expect(filtersRobloxCannotTake({ range: "7d", branch: "dev", art: "a1", exp: "onb", variant: "short" })).toEqual(["branch", "artifact", "experiment variant"]);
+		expect(filtersRobloxCannotTake({ range: "7d", country: "US", lang: "en", age: "<1d", prem: "true", source: "direct" })).toEqual(["language", "account age", "Premium", "join source"]);
 		expect(windowLabel({ from: "2026-10-18T00:00:00.000Z", to: "2026-11-15T00:00:00.000Z", days: 28 })).toBe("2026-10-18 - 2026-11-14 (28 days, UTC)");
 		expect(windowLabel({ from: "2026-11-14T00:00:00.000Z", to: "2026-11-15T00:00:00.000Z", days: 1 })).toBe("2026-11-14 (UTC)");
 	});

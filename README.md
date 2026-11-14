@@ -963,7 +963,7 @@ reached it (drop-offs: their last step and when; playtime funnels: their playtim
 
 `web/` (Vite, React, shadcn/ui; history kept from its own repo with `git subtree`). `bun run web:install` and `bun run
 web:build` build it into `web/dist`, and the backend serves it at `/` (the Docker image builds it for you). Pages: Overview,
-Roblox, Retention, **Demographics** (who plays: Roblox's age, gender, language, country, platform and OS cards over the filter bar's full UTC days, its device and new / returning filters sent as Roblox's Platform / IsNewUser; and from our join events country, language, device, Roblox account age and Premium, every filter applying), Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
+Roblox, Retention, **Demographics** (who plays: Roblox's age, gender, language, country, platform and OS cards over the filter bar's full UTC days, its device, new / returning and country filters sent as Roblox's Platform / IsNewUser / Country (country matched on Roblox's own values: the ISO code or the English name; a country Roblox doesn't report is listed as not applied); and from our join events country, language, device, Roblox account age and Premium, every filter applying), Funnels, Players (the list, and under it one player's detail: Roblox profile card, Spending, Playtime,
 Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
@@ -980,6 +980,14 @@ with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua 
 on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
 runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,
 Network, Audit).
+
+**Audience.** The filter bar's **Audience** button opens country, language, account age, Premium and join source
+filters (the [audience filters](#programmatic-api): player-level, from the players' join rows in the range; in the URL as
+`country`, `lang`, `age`, `prem`, `source`, so a view of one campaign's players is shareable). Countries and languages
+list the values the `demographics` query saw over the range (named with `Intl.DisplayNames`; asked only once the popover
+opens), account age, Premium and join source the framework's fixed values. The button names what is picked ("United
+States, Premium"). Every page's queries get them; the Demographics page's Roblox cards take the country as Roblox's
+Country, and list the others as not applied.
 
 **Date range.** The filter bar's range: Last 1 hour, Last 6 hours, Today, Last 7 / 30 / 90 days, or Custom (dates). The hour
 presets send an exact instant (`from` = an ISO time on a whole minute); the day presets and custom ranges send dates, as before.
@@ -1146,6 +1154,16 @@ const { servers } = await fleet.servers({ branch: "prod" });
   is exact, e.g. the explorer's "Last 1 hour"), `art`,
   `branch`, `channel`, `dev`, `players` (`"new"` = first-ever sessions, `"returning"`), `variant`
   (`{ experiment, variant }`), `sexp`, `place`. Without `from`, a query covers its default number of days.
+  **Audience filters** (player-level): `country` (ISO codes, `"US"`), `lang` (language codes without the region, `"en"`;
+  join `locale`, framework 2026-11-15 on, so older joins match no language), `age` (Roblox account-age buckets: `<1d`,
+  `1-7d`, `7-30d`, `30-90d`, `90-365d`, `1-3y`, `3y+`), `prem` (`true` / `false`) and `source` (the join's `from`:
+  `direct`, `teleport`, `teleport_game`, `referral`, `share`, `follow`). A player matches when one of their
+  `session` / `join` rows in the range says so (all set audience filters on that one row), and then **all** their rows
+  count: `where()` adds `e.pid IN (SELECT aj.pid FROM <events> aj WHERE <join rows in the range> AND ...)`, the same in
+  DuckDB and Basin. Values are checked strictly (codes, the bucket list, `[a-z0-9_]` sources) before they become SQL
+  literals. Queries over server or fleet rows (`perf-server`, `servers`, `deployReport`, the server parts of
+  `benchmarks` / `realtime`) don't take them, as they don't take `dev`. Over `GET /v1/experiments/<key>/players` they are
+  `country`, `lang`, `age`, `source` (repeatable) and `prem=true|false`.
 - **writeBackendSettings** runs `typetorch backend setup --url <url>` in `gameDir` (the game's `node_modules/@typetorch/cli`,
   0.9+, or `cli: [...]`), with the game key and the admin token in the child's environment (`TYPETORCH_API_KEY`,
   `TYPETORCH_ADMIN_TOKEN`), never on the command line. The CLI checks the address and both keys first (`GET <url>/healthz`,

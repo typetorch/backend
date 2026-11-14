@@ -20,7 +20,19 @@ export interface Filters {
 	variant?: { experiment: string; variant: string | string[] };
 	sexp?: string | string[];
 	place?: number;
+	/** Audience (player-level, from the players' join rows in the range): ISO country code(s). */
+	country?: string | string[];
+	/** Language code(s) without the region ("en"). */
+	lang?: string | string[];
+	age?: AccountAge | AccountAge[];
+	prem?: boolean;
+	/** Join source(s) (`from` of the join: direct, teleport, ...). */
+	source?: string | string[];
 }
+
+/** The Roblox account-age buckets the framework sends on joins. */
+export const ACCOUNT_AGES = ["<1d", "1-7d", "7-30d", "30-90d", "90-365d", "1-3y", "3y+"] as const;
+export type AccountAge = (typeof ACCOUNT_AGES)[number];
 
 export interface Rate {
 	rate: number;
@@ -2123,8 +2135,8 @@ export interface RobloxDemographics {
 	source: "roblox";
 	window: { from: string; to: string; days: number; note?: string };
 	metric: "DailyActiveUsers";
-	applied: { filter: "device" | "players"; dimension: "Platform" | "IsNewUser"; values: string[] }[];
-	notApplied: { filter: "device" | "players"; reason: string }[];
+	applied: { filter: "device" | "players" | "country"; dimension: "Platform" | "IsNewUser" | "Country"; values: string[] }[];
+	notApplied: { filter: "device" | "players" | "country"; reason: string }[];
 	breakdowns: Record<RobloxDemographicBreakdown, { rows: RobloxDemographicRow[]; total: number } | { error: string }>;
 	fetchedAt: string;
 	cached: boolean;

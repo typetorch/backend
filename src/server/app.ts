@@ -1297,17 +1297,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	}
 
 	/**
-	 * GET /v1/roblox/demographics?from&to&dev&players: Creator Hub's Demographics cards from Roblox
-	 * (server/roblox-analytics.ts) over the filter bar's range (its full UTC days, default the last 28), with its device and
-	 * new / returning filters as Roblox's Platform / IsNewUser. The other filters have no Roblox equivalent.
+	 * GET /v1/roblox/demographics?from&to&dev&players&country: Creator Hub's Demographics cards from Roblox
+	 * (server/roblox-analytics.ts) over the filter bar's range (its full UTC days, default the last 28), with its device,
+	 * new / returning and country filters as Roblox's Platform / IsNewUser / Country. The other filters have no Roblox
+	 * equivalent.
 	 */
 	async function robloxDemographics(url: URL, ip: string): Promise<Response> {
-		const allowed = new Set(["from", "to", "dev", "players"]);
+		const allowed = new Set(["from", "to", "dev", "players", "country"]);
 		for (const key of url.searchParams.keys()) {
 			if (!allowed.has(key)) return json(400, { error: `unknown parameter ${JSON.stringify(key.slice(0, 40))}` });
 			if (url.searchParams.getAll(key).length > 1) return json(400, { error: `one ${key}` });
 		}
-		let input: { from: number; to: number; dev?: string[]; players?: "new" | "returning" };
+		let input: { from: number; to: number; dev?: string[]; players?: "new" | "returning"; country?: string[] };
 		try {
 			const p = (k: string) => url.searchParams.get(k) ?? undefined;
 			const raw = (k: string) => {
@@ -1316,11 +1317,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			};
 			const dev = p("dev")?.split(",").filter(Boolean);
 			const players = p("players");
+			const country = p("country")?.split(",").filter(Boolean);
 			const f = normalizeFilters(
-				{ ...(raw("from") !== undefined ? { from: raw("from") as string | number } : {}), ...(raw("to") !== undefined ? { to: raw("to") as string | number } : {}), ...(dev?.length ? { dev: dev as Device[] } : {}), ...(players ? { players: players as "new" | "returning" } : {}) },
+				{
+					...(raw("from") !== undefined ? { from: raw("from") as string | number } : {}),
+					...(raw("to") !== undefined ? { to: raw("to") as string | number } : {}),
+					...(dev?.length ? { dev: dev as Device[] } : {}),
+					...(players ? { players: players as "new" | "returning" } : {}),
+					...(country?.length ? { country } : {}),
+				},
 				{ now: clock(), defaultDays: 28 },
 			);
-			input = { from: f.from, to: f.to, ...(f.dev?.length ? { dev: f.dev } : {}), ...(f.players ? { players: f.players } : {}) };
+			input = { from: f.from, to: f.to, ...(f.dev?.length ? { dev: f.dev } : {}), ...(f.players ? { players: f.players } : {}), ...(f.country?.length ? { country: f.country } : {}) };
 		} catch (error) {
 			return json(400, { error: String((error as Error).message).slice(0, 200) });
 		}
