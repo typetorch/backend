@@ -194,11 +194,16 @@ describe("the Maps page", () => {
 	test("2D / 3D, the layer toggles, dots or heat cells", async () => {
 		wrap(OWNER);
 		await waitFor(() => expect(scene().dataset.layers).toBe("ev:custom:down,ev:custom:loot"), { timeout: 8000 });
-		expect(scene().dataset.mode).toBe("2d");
+		// 3D by default (user 2026-11-15); 2D on the switch
+		expect(scene().dataset.mode).toBe("3d");
 		expect(scene().dataset.cells).toBe("2,1");
 		expect(scene().dataset.points).toBe("0,0");
+		fireEvent.click(screen.getByRole("button", { name: /2D/ }));
+		expect(scene().dataset.mode).toBe("2d");
+		expect(location).toContain("mode=2d");
 		fireEvent.click(screen.getByRole("button", { name: /3D/ }));
 		expect(scene().dataset.mode).toBe("3d");
+		expect(location).not.toContain("mode=");
 		fireEvent.click(screen.getByRole("button", { name: /down \(5\)/ }));
 		expect(scene().dataset.layers).toBe("ev:custom:loot");
 		fireEvent.click(screen.getByRole("button", { name: /down \(5\)/ }));
@@ -267,11 +272,11 @@ describe("the Maps page", () => {
 		cleanup();
 		view = { ...VIEW, maps: [...VIEW.maps, map({ name: "Low", hash: "d".repeat(64), bounds: { min: [0, -1, 0], max: [10, 5, 10] } })] };
 		GEOMETRY.Low = ttmp([{ pos: [0, 0, 0], size: [4, 1, 4] }]);
-		wrap(OWNER, "/maps?mode=3d&band=10..20&map=Low");
+		wrap(OWNER, "/maps?mode=2d&band=10..20&map=Low");
 		await waitFor(() => expect(scene().dataset.parts).toBe("1"), { timeout: 8000 });
 		await waitFor(() => expect(location).not.toContain("band="), { timeout: 8000 });
 		expect(scene().dataset.band).toBe("all");
-		expect(location).toContain("mode=3d");
+		expect(location).toContain("mode=2d");
 	});
 
 	test("a floor choice carries to the next map's floor of the same number", async () => {

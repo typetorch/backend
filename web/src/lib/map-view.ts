@@ -2,7 +2,7 @@
  * The map view's state in the URL (Maps and Recordings pages), next to the filter bar's parameters, so a view is
  * shareable and survives switching maps:
  *
- *   mode=3d          2D (default) or 3D
+ *   mode=2d          3D (default since 2026-11-15) or 2D
  *   draw=points      heat cells (default) or points (the Recordings page's old `view=dots` reads as points)
  *   cell=0.5|1|2     heat cell size in studs (absent: the page's default)
  *   band=f2          the Y band: floor 2 of the map's detected floors; `band=10..40` a free range; `band=player`
@@ -33,7 +33,8 @@ export function readMapView(params: URLSearchParams): MapViewState {
 	const cell = Number(params.get("cell"));
 	const draw = params.get("draw") ?? params.get("view");
 	return {
-		mode: params.get("mode") === "3d" ? "3d" : "2d",
+		// 3D unless the URL asks for 2D (user 2026-11-15: "maps show as 3d by default", every map view)
+		mode: params.get("mode") === "2d" ? "2d" : "3d",
 		draw: draw === "points" || draw === "dots" ? "points" : "heat",
 		cell: params.has("cell") && (CELL_SIZES as readonly number[]).includes(cell) ? (cell as CellSize) : null,
 		band: readBand(params.get("band")),
@@ -67,7 +68,7 @@ export function bandParam(band: BandChoice): string | null {
 /** The URL patch for a part of the state (null removes a key: the default). */
 export function mapViewPatch(state: Partial<MapViewState>): Record<string, string | null> {
 	const patch: Record<string, string | null> = {};
-	if (state.mode !== undefined) patch.mode = state.mode === "3d" ? "3d" : null;
+	if (state.mode !== undefined) patch.mode = state.mode === "2d" ? "2d" : null;
 	if (state.draw !== undefined) {
 		patch.draw = state.draw === "points" ? "points" : null;
 		patch.view = null;

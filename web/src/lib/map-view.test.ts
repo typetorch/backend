@@ -9,12 +9,12 @@ const floors = [
 
 describe("the map view in the URL", () => {
 	test("defaults: 2D, heat, the page's cell, every height, no decorative meshes or markers", () => {
-		expect(readMapView(new URLSearchParams(""))).toEqual({ mode: "2d", draw: "heat", cell: null, band: { kind: "all" }, decorative: false, markers: false, hidden: [] });
+		expect(readMapView(new URLSearchParams(""))).toEqual({ mode: "3d", draw: "heat", cell: null, band: { kind: "all" }, decorative: false, markers: false, hidden: [] });
 	});
 
 	test("reads every key; the Recordings page's old view=dots is points; bad values fall back", () => {
-		const s = readMapView(new URLSearchParams("mode=3d&draw=points&cell=0.5&band=f2&decor=1&markers=1&hide=ev:custom:down,ev:custom:loot"));
-		expect(s).toEqual({ mode: "3d", draw: "points", cell: 0.5, band: { kind: "floor", index: 1 }, decorative: true, markers: true, hidden: ["ev:custom:down", "ev:custom:loot"] });
+		const s = readMapView(new URLSearchParams("mode=2d&draw=points&cell=0.5&band=f2&decor=1&markers=1&hide=ev:custom:down,ev:custom:loot"));
+		expect(s).toEqual({ mode: "2d", draw: "points", cell: 0.5, band: { kind: "floor", index: 1 }, decorative: true, markers: true, hidden: ["ev:custom:down", "ev:custom:loot"] });
 		expect(readMapView(new URLSearchParams("view=dots")).draw).toBe("points");
 		expect(readMapView(new URLSearchParams("cell=3&mode=4d")).cell).toBeNull();
 		expect(readBand("10..40")).toEqual({ kind: "range", lo: 10, hi: 40 });
@@ -25,7 +25,7 @@ describe("the map view in the URL", () => {
 	});
 
 	test("writes only what differs from the default, and round-trips", () => {
-		expect(mapViewPatch({ mode: "2d", draw: "heat", cell: null, band: { kind: "all" }, decorative: false, markers: false, hidden: [] })).toEqual({
+		expect(mapViewPatch({ mode: "3d", draw: "heat", cell: null, band: { kind: "all" }, decorative: false, markers: false, hidden: [] })).toEqual({
 			mode: null,
 			draw: null,
 			view: null,
@@ -35,10 +35,10 @@ describe("the map view in the URL", () => {
 			markers: null,
 			hide: null,
 		});
-		const patch = mapViewPatch({ mode: "3d", draw: "points", cell: 2, band: { kind: "range", lo: 3, hi: 9 }, decorative: true, hidden: ["a"] });
+		const patch = mapViewPatch({ mode: "2d", draw: "points", cell: 2, band: { kind: "range", lo: 3, hi: 9 }, decorative: true, hidden: ["a"] });
 		const params = new URLSearchParams();
 		for (const [k, v] of Object.entries(patch)) if (v) params.set(k, v);
-		expect(readMapView(params)).toMatchObject({ mode: "3d", draw: "points", cell: 2, band: { kind: "range", lo: 3, hi: 9 }, decorative: true, hidden: ["a"] });
+		expect(readMapView(params)).toMatchObject({ mode: "2d", draw: "points", cell: 2, band: { kind: "range", lo: 3, hi: 9 }, decorative: true, hidden: ["a"] });
 	});
 
 	test("the band on a map: its own floor N, a free range only when it fits, else all", () => {

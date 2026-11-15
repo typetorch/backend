@@ -200,15 +200,15 @@ describe("Recordings on the real map", () => {
 	it("Points / Heatmap and 2D / 3D switch the scene and stay in the URL; the cell picker asks for its size", async () => {
 		mount("/recordings?layers=path");
 		await waitFor(() => expect(scene().dataset.parts).toBe("2"), { timeout: 8000 });
-		expect(scene().dataset.mode).toBe("2d");
+		expect(scene().dataset.mode).toBe("3d");
 		expect(scene().dataset.points).toBe("0");
 		fireEvent.click(within(screen.getByRole("group", { name: "Draw as" })).getByRole("button", { name: "Points" }));
 		await waitFor(() => expect(scene().dataset.points).toBe("1"));
 		expect(JSON.parse(scene().dataset.cells as string)).toEqual([[]]);
 		expect(location).toContain("draw=points");
-		fireEvent.click(screen.getByRole("button", { name: /3D/ }));
-		await waitFor(() => expect(scene().dataset.mode).toBe("3d"));
-		expect(location).toContain("mode=3d");
+		fireEvent.click(screen.getByRole("button", { name: /2D/ }));
+		await waitFor(() => expect(scene().dataset.mode).toBe("2d"));
+		expect(location).toContain("mode=2d");
 		fireEvent.click(screen.getByRole("button", { name: "1 stud" }));
 		await waitFor(() => expect(lastLayers()).toMatchObject({ cell: 1 }));
 		expect(location).toContain("cell=1");
