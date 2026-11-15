@@ -1477,8 +1477,19 @@ new / returning, variant).
 - **Positioned events (`px`, `py`, `pz`).** Any event whose props carry numeric `px` and `pz` (studs, world space; `py`
   optional) is drawn on its map, not only in the first minute: `ev:<kind>:<name>` layers, e.g. `ev:custom:down` split by
   `cause`. The map comes from the same rule, in SQL (a running count of map events per server and per player).
-- **Frames.** Each map's top-down x / z frame covers its samples and positioned events; there is no map image, so the
-  background is the density of every recorded sample on the map (the walkable area).
+- **Frames.** Each map's top-down x / z frame covers its samples and positioned events. Cells are a multiple of 4 studs
+  (at most `grid`, 96, across), or exactly `cell` studs (0.5, 1, 2 or 4: the real-map view; same origin and extent,
+  `maxCells` 20,000; positioned events stay at the 4-stud cells SQL counts them in and say so with the layer's `cell`).
+  A recording layer's cell has a 4th value, the samples' average height (the 3D map's walking height). `background:
+  false` leaves out the silhouette (the density of every recorded sample on the map, drawn when there is no export).
+- **The page** (**Recordings**). A map with an export (the Maps page; names match the recordings' map values without
+  case or punctuation, no map = the lobby's export) is drawn on its real geometry through `MapScene`, 2D or 3D: the
+  layers as world cells or points (cell index -> studs from the frame's `minX` / `minZ` and cell size; heights from the
+  cell, else the floor under it from the geometry), a 2D click opens the cell's sessions, and the replay draws its path,
+  the current position and the camera cone. The cell picker (0.5 / 1 / 2 studs, default 2) asks the query for that
+  cell. Without an export (or when the map list can't be read): the SVG silhouette at the query's own grid. Points /
+  Heatmap, 2D / 3D and the cell size live in the URL. Quit autopsy and First actions (the slowest sessions to reach each
+  action, and some that never did) open their example sessions in the replay.
 - **Speed.** Positioned events are counted per 4-stud cell in SQL; recordings are decoded in the server and kept in an
   in-memory cache (96 MB, about 3 M samples) keyed by each session's chunk rows: Parquet days never change and decode
   once, a session still being written today decodes again when a chunk arrives. Past `maxSessions` (3,000) the
@@ -2159,8 +2170,7 @@ fleet's servers report):
   Everything else with geometry in Workspace (not Terrain, not the camera) is the **lobby**, listed as `(lobby)`.
   Terrain is skipped.
 - **Every part counts**, transparent or not: parts at transparency 0.95 or more are flagged `invisible`, never dropped
-  (invisible walls shape where players walk). MeshParts and unions are exported as boxes of their size and flagged, so
-  the view can tint them.
+  (invisible walls shape where players walk). MeshParts and unions are exported as boxes of their size and flagged.
 - **Rate limits.** One export at a time (409 while one runs), at most one every 30 s (429 with Retry-After). Roblox
   allows 5 task creations a minute per key owner: a 429 from Roblox waits (its Retry-After, else 12 s x the attempt) and
   tries again, up to 5 times; nothing else is retried. The task's own timeout is 180 s; the export runs in the
@@ -2178,7 +2188,10 @@ fleet's servers report):
 **Alignment.** For each map, the positioned events on it (`px`/`pz` props of events carrying the map prop, last 30 days)
 against the map's box grown by 8 studs, the override's offset applied: `aligned` at 80% inside or more, `partial` from
 20%, `off` below that with a `suggestedOffset` (the events' median minus the box's center on x and z; on y the events'
-low end minus 3 studs minus the box's floor), `unknown` under 10 events. The **manual override**
+low end minus 3 studs minus the box's floor), `unknown` under 10 events. When that's `unknown`, the page runs the same
+check on the **recordings' positions** on that map (the `recording-layers` silhouette's cells, the filter bar's range;
+`web/src/lib/maps.ts` `alignmentOf`) and says which source it used. Gnome (2026-11-15, 7 days of recordings): all six
+maps aligned, 100% inside (HedgeMaze 46,268 positions, recordings frame x 636..1008, z -164..164 inside its export's box). The **manual override**
 (`PUT /v1/maps/<name>/override { path?, offset? }`, owners) sets the model to export (an instance path such as
 `ReplicatedStorage.assets.maps.Mall`, used at the next export) and/or an offset (applied at once, to the geometry, never
 to the events); `DELETE` removes it.
@@ -2212,11 +2225,24 @@ for owners with its progress, the names no model was found for), a map picker, *
 this page: one instanced mesh per shape, so thousands of parts draw in a few calls; 3D: orbit with the mouse and fly
 with W A S D Q E; 2D: the same scene from above through an orthographic camera, north up, pan and zoom, crisp at any
 zoom), a **Y band** (floors found from the geometry's flat walkable slabs, or a free range: geometry above and below is
-cut away, so indoor floors show in 2D), invisible parts and a mesh tint, and the **layers**: one per positioned event, as
-dots or heat cells of **0.5, 1 or 2 studs** (the filter bar applies), with the alignment card (owners apply the
-suggested offset or set a model path). Layers are plain data in world coordinates (`web/src/lib/maps.ts` `MapLayer`:
-`points`, `paths`, `cells` + `cellSize`), so other pages (the recordings explorer's paths, replays, quits) draw on the
-same `MapScene` component. Not checked against Studio: the corner wedge's orientation.
+cut away, so indoor floors show in 2D), and the **layers**: one per positioned event, as dots or heat cells of **0.5, 1
+or 2 studs** (the filter bar applies), with the alignment card (owners apply the suggested offset or set a model path).
+Layers are plain data in world coordinates (`web/src/lib/maps.ts` `MapLayer`: `points`, `paths`, `polygons`, `cells` +
+`cellSize`), so the Recordings page draws its layers and replays on the same `MapScene` component. Not checked against
+Studio: the corner wedge's orientation.
+
+**What's drawn** (any game; `web/src/lib/maps.ts` `partKind` / `isDrawn`): the collision geometry. Every part that
+collides (flag 8), visible or invisible, in its own color (invisible ones see-through, so walls read as walls), plus
+visible non-colliding parts that aren't meshes or unions (small decoration). Off by default, each behind a toggle:
+**decorative meshes** (meshes and unions that don't collide: their boxes are only bounding volumes, often huge) and
+**markers and triggers** (invisible parts that don't collide). No tint: a mesh or union drawn as a box gets a thin dark
+outline instead. Gnome's HedgeMaze (581 parts): drawn by default 267 (the floor and 12 other visible colliding parts,
+245 invisible walls, 9 small decorations); hidden 13 hedge meshes (whole maze quadrants such as 154 x 20 x 154) and 301
+markers.
+
+**The view in the URL** (`web/src/lib/map-view.ts`, both pages): `map`, `mode=3d`, `draw=points`, `cell`, `band`
+(`f2` = floor 2, `10..40` a free range), `decor=1`, `markers=1`, `hide` (layers off). Switching maps keeps all of it; a
+floor applies to the new map's floor of that number, and a free range that doesn't fit the new map's heights resets.
 
 ## Player feedback
 

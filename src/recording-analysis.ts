@@ -314,9 +314,16 @@ export function frameFor(b: Bounds, grid = 96, baseCell = 4): Frame {
 	return { minX, minZ, maxX: minX + cols * cell, maxZ: minZ + rows * cell, cell, cols, rows };
 }
 
-/** Counts per frame cell. Points outside the frame are counted in `outside`. */
+/** [column, row, count, average height?] */
+export type GridCell = [number, number, number, number?];
+
+/**
+ * Counts per frame cell. Points outside the frame are counted in `outside`. A point added with its height (`y`) adds to
+ * the cell's average height, returned as the cell's 4th value (the 3D map puts the cell at walking height).
+ */
 export class Grid {
 	private counts = new Map<number, number>();
+	private heights = new Map<number, [number, number]>();
 	total = 0;
 	outside = 0;
 	constructor(readonly frame: Frame) {}
@@ -327,25 +334,42 @@ export class Grid {
 		if (ix < 0 || iz < 0 || ix >= f.cols || iz >= f.rows || !Number.isFinite(ix) || !Number.isFinite(iz)) return undefined;
 		return [ix, iz];
 	}
-	add(x: number, z: number, w = 1): boolean {
+	add(x: number, z: number, w = 1, y?: number): boolean {
 		const c = this.cellOf(x, z);
 		if (!c) {
 			this.outside += w;
 			return false;
 		}
-		this.addCell(c[0], c[1], w);
+		this.addCell(c[0], c[1], w, y);
 		return true;
 	}
-	addCell(ix: number, iz: number, w = 1): void {
+	addCell(ix: number, iz: number, w = 1, y?: number): void {
 		const key = iz * this.frame.cols + ix;
 		this.counts.set(key, (this.counts.get(key) ?? 0) + w);
 		this.total += w;
+		if (y !== undefined && Number.isFinite(y)) {
+			const h = this.heights.get(key);
+			if (h) {
+				h[0] += y * w;
+				h[1] += w;
+			} else this.heights.set(key, [y * w, w]);
+		}
 	}
-	/** [ix, iz, count], row by row; at most `max` cells (the largest), sorted back into row order. */
-	cells(max = Number.POSITIVE_INFINITY): [number, number, number][] {
+	/**
+	 * [ix, iz, count] (plus the average height, to 0.1 stud, when the cell's points had one), row by row; at most `max`
+	 * cells (the largest), sorted back into row order.
+	 */
+	cells(max = Number.POSITIVE_INFINITY): GridCell[] {
 		let entries = [...this.counts];
 		if (entries.length > max) entries = entries.sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, max);
-		return entries.sort((a, b) => a[0] - b[0]).map(([key, n]) => [key % this.frame.cols, Math.floor(key / this.frame.cols), n]);
+		return entries
+			.sort((a, b) => a[0] - b[0])
+			.map(([key, n]) => {
+				const h = this.heights.get(key);
+				const cell: GridCell = [key % this.frame.cols, Math.floor(key / this.frame.cols), n];
+				if (h && h[1] > 0) cell.push(Math.round((h[0] / h[1]) * 10) / 10);
+				return cell;
+			});
 	}
 	get size(): number {
 		return this.counts.size;
@@ -426,13 +450,13 @@ export function addRecordingLayers(
 	const want = new Set(wanted);
 	const stateOk = (state: string | null) =>
 		(!filters.zone || statePart(state, "zone") === filters.zone) && (!filters.screen || statePart(state, "screen") === filters.screen);
-	const add = (id: RecordingLayerId, track: Track, x: number, z: number, value?: string) => {
+	const add = (id: RecordingLayerId, track: Track, x: number, y: number, z: number, value?: string) => {
 		const layer = out.get(id);
 		if (!layer) return;
 		if (value !== undefined) layer.values.set(value, (layer.values.get(value) ?? 0) + 1);
 		const keep = filters.values?.[id];
 		if (keep?.length && (value === undefined || !keep.includes(value))) return;
-		if (layer.grid.add(x, z)) {
+		if (layer.grid.add(x, z, 1, y)) {
 			layer.sessions.add(track.sid);
 			if (layer.examples.length < 50 && !layer.examples.includes(track.sid)) layer.examples.push(track.sid);
 		}
@@ -445,7 +469,7 @@ export function addRecordingLayers(
 			for (let i = 0; i < track.t.length; i++) {
 				if (!onMap(s, i)) continue;
 				if ((filters.zone || filters.screen) && !stateOk(cursor.at(track.t[i]))) continue;
-				add("path", track, track.x[i], track.z[i]);
+				add("path", track, track.x[i], track.y[i], track.z[i]);
 			}
 		}
 		const pointAt = (t: number): number => {
@@ -458,7 +482,7 @@ export function addRecordingLayers(
 			const i = pointAt(t);
 			if (!onMap(s, i)) return;
 			if ((filters.zone || filters.screen) && !stateOk(stateAt(s.events, t))) return;
-			add(id, track, track.x[i], track.z[i], value);
+			add(id, track, track.x[i], track.y[i], track.z[i], value);
 		};
 		for (const input of track.inputs) {
 			const id = INPUT_LAYER[input.type];
@@ -470,7 +494,7 @@ export function addRecordingLayers(
 		if (want.has("quit") && s.why === LEFT) {
 			let i = track.t.length - 1;
 			while (i >= 0 && Number.isNaN(track.x[i])) i--;
-			if (onMap(s, i) && (!(filters.zone || filters.screen) || stateOk(stateAt(s.events, track.end)))) add("quit", track, track.x[i], track.z[i]);
+			if (onMap(s, i) && (!(filters.zone || filters.screen) || stateOk(stateAt(s.events, track.end)))) add("quit", track, track.x[i], track.y[i], track.z[i]);
 		}
 	}
 	return out;

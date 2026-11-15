@@ -2,14 +2,15 @@
  * Recordings: new players' first-session recordings without Roblox Studio. Four tabs:
  *   Map layers   pick a map, toggle layers (path density, idle spots, deaths, screens, buttons, quits, positioned events),
  *                filter by values, zone and screen; click a cell for the sessions there
- *   Replay       a session list (also reached from a cell, a quit, the First session page's signals), then a top-down replay
+ *   Replay       a session list (also reached from a cell, a quit, the First session page's signals), then a replay
  *   Quit autopsy the last seconds before quitting, classified, against the players who stayed
  *   First actions seconds from spawn to the first move, screen, button, prompt and round, by device and build
- * The tab, map, layers, view and session live in the URL next to the shared filters.
+ * A map with an export (the Maps page) is drawn on its real geometry, 2D or 3D (recordings/RealMap); without one, the
+ * SVG silhouette of the recorded positions. The tab, map, layers, view (lib/map-view.ts: Points / Heatmap, 2D / 3D,
+ * cell size) and session live in the URL next to the shared filters.
  */
 import { ArrowLeft, Play } from "lucide-react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router";
 import { Metric, PageHeader, QueryState, Section, ShareBar } from "@/components/common";
 import { ToggleChip } from "@/components/ToggleChip";
 import { Badge } from "@/components/ui/badge";
@@ -18,33 +19,16 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtInt, fmtNum, fmtPct, fmtTime, shortId } from "@/lib/format";
-import { useAnalytics } from "@/lib/hooks";
+import { useAnalytics, usePageParams } from "@/lib/hooks";
 import type { FirstActionSplit, FirstActionStat, QuitAutopsyRow, RecFrame, RecSampling, RecordingLayersResult } from "@/lib/types";
 import { MapView, type ToView } from "./recordings/MapView";
 import { ACTION_LABELS, NO_MAP, REASON_LABELS, RECORDING_LAYERS, cellBox, layerColor, layerName, mapName } from "./recordings/map";
-import { ReplayPlayer } from "./recordings/ReplayPlayer";
+import { RealLayersMap, RealReplayMap, REAL_MAP_CELL, useExportFor, useMapView, ViewSwitches } from "./recordings/RealMap";
+import { ReplayPlayer, type ReplayScene } from "./recordings/ReplayPlayer";
 
 const TABS = ["layers", "replay", "autopsy", "first"] as const;
 type Tab = (typeof TABS)[number];
 export const DEFAULT_LAYERS = ["path", "quit"];
-
-/** Page URL parameters (kept next to the filter bar's). */
-function usePageParams() {
-	const [params, setParams] = useSearchParams();
-	const set = useCallback(
-		(patch: Record<string, string | null | undefined>) =>
-			setParams((current) => {
-				const copy = new URLSearchParams(current);
-				for (const [k, v] of Object.entries(patch)) {
-					if (v) copy.set(k, v);
-					else copy.delete(k);
-				}
-				return copy;
-			}),
-		[setParams],
-	);
-	return [params, set] as const;
-}
 
 function SamplingNote({ sampling, notes = [] }: { sampling: RecSampling; notes?: string[] }) {
 	const lines = [...notes];
@@ -167,32 +151,48 @@ function LayersTab({ openReplay }: { openReplay: (sid: string) => void }) {
 	const map = params.get("map") ?? undefined;
 	const rawLayers = params.get("layers") ?? DEFAULT_LAYERS.join(",");
 	const active = rawLayers === "none" ? [] : rawLayers.split(",").filter(Boolean);
-	const view = params.get("view") === "dots" ? "dots" : "heat";
+	const [viewState] = useMapView();
 	const [values, setValues] = useState<Record<string, string[]>>({});
 	const [split, setSplit] = useState<Record<string, string>>({});
 	const [zone, setZone] = useState("");
 	const [screen, setScreen] = useState("");
-	const [cell, setCell] = useState<[number, number] | null>(null);
+	// The picked cell: column, row and the cell size they're in (a pick from another cell size is dropped).
+	const [cell, setCell] = useState<[number, number, number] | null>(null);
+	// The real map (an export of the shown map) takes finer cells and no silhouette. The shown map is the URL's, else the
+	// last answer's (the query's default map): its first answer can come back at the query's own grid.
+	const [lastMap, setLastMap] = useState<string | null>(null);
+	const exp = useExportFor(map ?? lastMap);
+	const real = exp.info !== null;
+	const cellSize = viewState.cell ?? REAL_MAP_CELL;
 	const options = useMemo(
 		() => ({
 			...(map !== undefined ? { map } : {}),
+			...(real ? { cell: cellSize, background: false } : {}),
 			layers: active,
 			values: pick(values, active, (v) => v.length > 0),
 			split: pick(split, active.filter((id) => id.startsWith("ev:")), (v) => v !== ""),
 			...(zone ? { zone } : {}),
 			...(screen ? { screen } : {}),
 		}),
-		[map, active.join(","), values, split, zone, screen],
+		[map, active.join(","), values, split, zone, screen, real, cellSize],
 	);
-	const q = useAnalytics("recording-layers", options, { keepPrevious: true });
+	const q = useAnalytics("recording-layers", options, { keepPrevious: true, enabled: !exp.loading });
+	if (q.data && q.data.map !== lastMap && map === undefined) setLastMap(q.data.map);
 	const toggle = (id: string) => set({ layers: (active.includes(id) ? active.filter((x) => x !== id) : [...active, id]).join(",") || "none" });
 	return (
 		<QueryState query={q} isEmpty={(d) => d.sampling.recorded === 0 && d.catalog.length === 0} empty="No recorded first sessions or positioned events in this range.">
 			{(data) => {
+				// Cells are drawn from the answer's own frame (origin and cell size), so an answer at another cell size (the
+				// previous one, while the next loads) still lands in the right place.
 				const frame = data.frame;
+				const picked: [number, number] | null = frame && cell && cell[2] === frame.cell ? [cell[0], cell[1]] : null;
+				const pickCell = (c: number, r: number) => frame && setCell([c, r, frame.cell]);
 				const drawn = data.layers.map((l, i) => ({ id: l.id, label: layerName(l.id), color: layerColor(l.id, i), cells: l.cells }));
+				const svg = frame ? (
+					<MapView frame={frame} background={data.background} layers={drawn} mode={viewState.draw === "points" ? "dots" : "heat"} selected={picked} onCellClick={pickCell} label={`Map ${mapName(data.map ?? "")}`} />
+				) : null;
 				const cellLayer = active.find((id) => (RECORDING_LAYERS as readonly string[]).includes(id) && id !== "path") ?? "path";
-				const box = frame && cell ? cellBox(frame, cell[0], cell[1]) : null;
+				const box = frame && picked ? cellBox(frame, picked[0], picked[1]) : null;
 				return (
 					<div className="space-y-4">
 						<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Maps">
@@ -224,31 +224,30 @@ function LayersTab({ openReplay }: { openReplay: (sid: string) => void }) {
 						<div className="flex flex-wrap items-center gap-2">
 							<FilterInput label="Zone" value={zone} onChange={setZone} />
 							<FilterInput label="Screen" value={screen} onChange={setScreen} />
-							<div className="ml-auto flex gap-1" role="group" aria-label="View">
-								<ToggleChip pressed={view === "heat"} onClick={() => set({ view: null })}>
-									Heatmap
-								</ToggleChip>
-								<ToggleChip pressed={view === "dots"} onClick={() => set({ view: "dots" })}>
-									Dots
-								</ToggleChip>
+							<div className="ml-auto">
+								<ViewSwitches real={real} cell {...(data.frame && !real ? { autoCell: data.frame.cell } : {})} />
 							</div>
 						</div>
 						<SamplingNote sampling={data.sampling} notes={data.notes} />
 						{frame ? (
 							<div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
 								<div className="min-w-0 space-y-1">
-									<MapView
-										frame={frame}
-										background={data.background}
-										layers={drawn}
-										mode={view}
-										selected={cell}
-										onCellClick={(c, r) => setCell([c, r])}
-										label={`Map ${mapName(data.map ?? "")}`}
-									/>
-									<p className="text-xs text-muted-foreground">
-										Top-down: x to the right, z down; one cell is {fmtNum(frame.cell, 0)} studs. The grey silhouette is every recorded position on this map. Click a cell for its sessions.
-									</p>
+									{real && exp.info ? (
+										<>
+											<RealLayersMap info={exp.info} frame={frame} layers={data.layers} selected={picked} onCellClick={pickCell} label={`Map ${mapName(data.map ?? "")}`} fallback={svg} />
+											<p className="text-xs text-muted-foreground">
+												The real map (its export, {exp.info.name === "(lobby)" ? "the lobby" : exp.info.name}). Recorded positions are binned at {fmtNum(frame.cell, 1)} stud cells (the picker) and sit at their recorded height in 3D
+												{data.layers.some((l) => l.cell !== undefined) ? "; positioned events stay in the 4-stud cells they are counted in" : ""}. In 2D, click a cell for its sessions.
+											</p>
+										</>
+									) : (
+										<>
+											{svg}
+											<p className="text-xs text-muted-foreground">
+												Top-down: x to the right, z down; one cell is {fmtNum(frame.cell, 0)} studs. No export of this map (the Maps page), so the grey silhouette is every recorded position on it. Click a cell for its sessions.
+											</p>
+										</>
+									)}
 								</div>
 								<div className="space-y-3">
 									<Legend layers={data.layers} />
@@ -340,8 +339,18 @@ export function SessionList({ options, openReplay, compact = false }: { options:
 	);
 }
 
-/** The replay's map: the map layer's frame and silhouette when the session fits in it, else the session's own frame. */
-function ReplayMap({ map, overlay, fallback }: { map: string; overlay: (toView: ToView) => ReactNode; fallback: RecFrame | null }) {
+/**
+ * The replay's map: the real map when it has an export; else the map layer's frame and silhouette when the session fits
+ * in it, else the session's own frame.
+ */
+function ReplayMap({ map, overlay, fallback, scene }: { map: string; overlay: (toView: ToView) => ReactNode; fallback: RecFrame | null; scene: ReplayScene }) {
+	const exp = useExportFor(map);
+	if (exp.loading) return <p className="text-sm text-muted-foreground">Loading the map…</p>;
+	const svg = <SvgReplayMap map={map} overlay={overlay} fallback={fallback} />;
+	return exp.info ? <RealReplayMap info={exp.info} scene={scene} label={`Replay on ${mapName(map)}`} fallback={svg} /> : svg;
+}
+
+function SvgReplayMap({ map, overlay, fallback }: { map: string; overlay: (toView: ToView) => ReactNode; fallback: RecFrame | null }) {
 	const q = useAnalytics("recording-layers", { map, layers: [] });
 	const shared = q.data?.map === map ? q.data.frame : null;
 	const fits = shared && fallback && fallback.minX >= shared.minX - shared.cell && fallback.maxX <= shared.maxX + shared.cell && fallback.minZ >= shared.minZ - shared.cell && fallback.maxZ <= shared.maxZ + shared.cell;
@@ -394,18 +403,25 @@ function ReplayTab({ openReplay }: { openReplay: (sid: string) => void }) {
 
 function ReplayView({ sid, back }: { sid: string; back: () => void }) {
 	const q = useAnalytics("recording-replay", { sid });
+	const map = q.data?.map;
+	const exp = useExportFor(map);
 	return (
 		<div className="space-y-3">
-			<Button type="button" size="sm" variant="ghost" onClick={back}>
-				<ArrowLeft /> All sessions
-			</Button>
+			<div className="flex flex-wrap items-center gap-2">
+				<Button type="button" size="sm" variant="ghost" onClick={back}>
+					<ArrowLeft /> All sessions
+				</Button>
+				<div className="ml-auto">
+					<ViewSwitches real={exp.info !== null} draw={false} />
+				</div>
+			</div>
 			<QueryState query={q} isEmpty={(d) => !d.found} empty="This session has no recording in the selected range (widen the date range).">
 				{(data) =>
 					data.failed ? (
 						<p className="text-sm text-muted-foreground">The recording did not decode: {data.failed}</p>
 					) : (
 						<Section title={`Session ${shortId(data.sid)}`} description={`Player ${data.pid ?? "?"}, ${fmtTime(data.start ?? 0)}, ${fmtNum((data.duration ?? 0) / 1000, 1)} s recorded.`}>
-							<ReplayPlayer key={data.sid} replay={data} renderMap={(map, overlay, fallback) => <ReplayMap map={map} overlay={overlay} fallback={fallback} />} />
+							<ReplayPlayer key={data.sid} replay={data} renderMap={(map, overlay, fallback, scene) => <ReplayMap map={map} overlay={overlay} fallback={fallback} scene={scene} />} />
 						</Section>
 					)
 				}
@@ -579,7 +595,21 @@ function SplitTable({ title, rows }: { title: string; rows: FirstActionSplit[] }
 	);
 }
 
-function FirstActionsTab() {
+function Examples({ ids, openReplay, label }: { ids: string[]; openReplay: (sid: string) => void; label: string }) {
+	if (!ids.length) return null;
+	return (
+		<span className="inline-flex flex-wrap items-center gap-1">
+			<span className="text-xs text-muted-foreground">{label}</span>
+			{ids.map((sid) => (
+				<button key={sid} type="button" className="font-mono text-xs underline" onClick={() => openReplay(sid)} aria-label={`Replay ${sid}`}>
+					{shortId(sid, 6)}
+				</button>
+			))}
+		</span>
+	);
+}
+
+function FirstActionsTab({ openReplay }: { openReplay: (sid: string) => void }) {
 	const q = useAnalytics("first-action");
 	return (
 		<QueryState query={q} isEmpty={(d) => d.sessions === 0} empty="No recorded first sessions in this range.">
@@ -598,6 +628,7 @@ function FirstActionsTab() {
 									<TableHead className="text-right">Median</TableHead>
 									<TableHead className="text-right">Middle half</TableHead>
 									<TableHead>Distribution (&lt;1 s ... 2 min+)</TableHead>
+									<TableHead>Replays</TableHead>
 								</TableRow>
 							</TableHeader>
 							<TableBody>
@@ -611,6 +642,12 @@ function FirstActionsTab() {
 										<TableCell className="text-right tabular-nums">{s.p25 === null ? "-" : `${fmtNum(s.p25, 1)}-${fmtNum(s.p75, 1)} s`}</TableCell>
 										<TableCell>
 											<Histogram stat={s} />
+										</TableCell>
+										<TableCell className="whitespace-normal">
+											<div className="flex flex-wrap gap-x-3 gap-y-1">
+												<Examples ids={s.examples?.slowest ?? []} openReplay={openReplay} label="slowest" />
+												<Examples ids={s.examples?.never ?? []} openReplay={openReplay} label="never" />
+											</div>
 										</TableCell>
 									</TableRow>
 								))}
@@ -650,7 +687,7 @@ export default function Recordings() {
 				<TabsContent value="layers">{tab === "layers" ? <LayersTab openReplay={openReplay} /> : null}</TabsContent>
 				<TabsContent value="replay">{tab === "replay" ? <ReplayTab openReplay={openReplay} /> : null}</TabsContent>
 				<TabsContent value="autopsy">{tab === "autopsy" ? <AutopsyTab openReplay={openReplay} /> : null}</TabsContent>
-				<TabsContent value="first">{tab === "first" ? <FirstActionsTab /> : null}</TabsContent>
+				<TabsContent value="first">{tab === "first" ? <FirstActionsTab openReplay={openReplay} /> : null}</TabsContent>
 			</Tabs>
 		</>
 	);

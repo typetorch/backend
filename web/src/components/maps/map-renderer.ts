@@ -8,17 +8,20 @@
  *     the wheel zooms toward the cursor. Vector geometry redrawn at the device's pixel ratio: crisp at any zoom.
  *   - The Y band: two clipping planes hide geometry above and below it (walls are cut like a floor plan); layer marks
  *     outside the band are left out.
- *   - Parts: solid (transparency < 0.5), glassy (< 0.95, see-through), invisible (>= 0.95; drawn faint only when asked,
- *     never dropped). MeshParts and unions are their boxes; `tintMeshes` paints them violet so they stand out.
- *   - Layers (world coordinates): points (fixed-size dots), paths (lines), heat cells (flat squares at the cell's height,
- *     colored by count on a log scale).
+ *   - Parts, by the draw rule (lib/maps.ts partKind / isDrawn): everything that collides, visible or not, and visible
+ *     non-colliding parts that aren't meshes or unions; non-colliding meshes / unions only with `decorative`, invisible
+ *     non-colliding parts only with `markers`. Real part colors, never a tint: solid (transparency < 0.5), glassy (< 0.95,
+ *     see-through), invisible walls (collide, >= 0.95: their color, half see-through), markers (faint). MeshParts and
+ *     unions are their boxes, marked by a thin dark outline (not a fill color, which would read like the game's).
+ *   - Layers (world coordinates): points (fixed-size dots), paths (lines), polygons (filled, a camera cone), heat cells
+ *     (flat squares at the cell's height, colored by count on a log scale).
  * Shapes follow Roblox's: a cylinder's axis is the part's X; a wedge's slope faces -Z (its tall face is +Z); the corner
  * wedge's peak is over its (+X, -Z) corner (not checked against Studio).
  */
 import * as THREE from "three";
 import { MapControls } from "three/addons/controls/MapControls.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { FLAGS, heatColor, type Bounds, type MapGeometry, type MapLayer, type Vec3 } from "@/lib/maps";
+import { FLAGS, heatColor, isDrawn, partKind, type Bounds, type MapGeometry, type MapLayer, type MapPoint, type Vec3 } from "@/lib/maps";
 
 export type MapMode = "2d" | "3d";
 
@@ -26,12 +29,19 @@ export interface SceneOptions {
 	mode: MapMode;
 	offset: Vec3;
 	band: [number, number] | null;
-	showInvisible: boolean;
-	tintMeshes: boolean;
+	/** Non-colliding meshes and unions. */
+	decorative: boolean;
+	/** Invisible non-colliding parts. */
+	markers: boolean;
 }
 
-const MESH_TINT = new THREE.Color("#9b5de5");
-const INVISIBLE_COLOR = new THREE.Color("#ff6b6b");
+/** A unit box's 12 edges (24 endpoints), for the mesh / union outlines. */
+const BOX_EDGES = (() => {
+	const c = [-0.5, 0.5];
+	const out: number[] = [];
+	for (const a of c) for (const b of c) out.push(-0.5, a, b, 0.5, a, b, a, -0.5, b, a, 0.5, b, a, b, -0.5, a, b, 0.5);
+	return out;
+})();
 
 function wedgeGeometry(): THREE.BufferGeometry {
 	const A = [-0.5, -0.5, -0.5], B = [0.5, -0.5, -0.5], C = [0.5, -0.5, 0.5], D = [-0.5, -0.5, 0.5], E = [-0.5, 0.5, 0.5], F = [0.5, 0.5, 0.5];
@@ -56,7 +66,7 @@ function shapeGeometries(): THREE.BufferGeometry[] {
 	return [new THREE.SphereGeometry(0.5, 18, 12), new THREE.BoxGeometry(1, 1, 1), cylinder, wedgeGeometry(), cornerWedgeGeometry()];
 }
 
-type Look = "solid" | "glassy" | "invisible";
+type Look = "solid" | "glassy" | "wall" | "marker";
 
 export class MapRenderer {
 	readonly renderer: THREE.WebGLRenderer;
@@ -70,11 +80,12 @@ export class MapRenderer {
 	private readonly shapes = shapeGeometries();
 	private readonly clip = [new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6)];
 	private readonly materials: Record<Look, THREE.MeshLambertMaterial>;
+	private readonly outlineMaterial: THREE.LineBasicMaterial;
 	private grid: THREE.GridHelper | null = null;
 	private geometry: MapGeometry | null = null;
 	private bounds: Bounds | null = null;
 	private layers: MapLayer[] = [];
-	private options: SceneOptions = { mode: "3d", offset: [0, 0, 0], band: null, showInvisible: false, tintMeshes: false };
+	private options: SceneOptions = { mode: "3d", offset: [0, 0, 0], band: null, decorative: false, markers: false };
 	private readonly keys = new Set<string>();
 	private flying = 0;
 	private disposed = false;
@@ -92,8 +103,10 @@ export class MapRenderer {
 		this.materials = {
 			solid: new THREE.MeshLambertMaterial({ ...base }),
 			glassy: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.35, depthWrite: false }),
-			invisible: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.12, depthWrite: false }),
+			wall: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.55, depthWrite: false }),
+			marker: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.18, depthWrite: false }),
 		};
+		this.outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, clippingPlanes: this.clip });
 		this.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
 		const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 		sun.position.set(0.4, 1, 0.25);
@@ -140,7 +153,7 @@ export class MapRenderer {
 		const geometryChanged = geometry !== this.geometry;
 		const modeChanged = options.mode !== this.options.mode;
 		const offsetChanged = options.offset.some((v, i) => v !== this.options.offset[i]);
-		const looksChanged = options.showInvisible !== this.options.showInvisible || options.tintMeshes !== this.options.tintMeshes;
+		const looksChanged = options.decorative !== this.options.decorative || options.markers !== this.options.markers;
 		this.geometry = geometry;
 		this.bounds = bounds;
 		this.layers = layers;
@@ -161,15 +174,21 @@ export class MapRenderer {
 	private buildParts(): void {
 		for (const child of [...this.parts.children]) {
 			this.parts.remove(child);
-			(child as THREE.InstancedMesh).dispose();
+			if (child instanceof THREE.InstancedMesh) child.dispose();
+			else if (child instanceof THREE.LineSegments) child.geometry.dispose();
 		}
 		const g = this.geometry;
 		if (!g) return;
+		const toggles = { decorative: this.options.decorative, markers: this.options.markers };
 		const buckets = new Map<string, number[]>();
+		const outlined: number[] = [];
 		for (let i = 0; i < g.count; i++) {
+			const flags = g.flags[i] as number;
+			if (!isDrawn(flags, toggles)) continue;
 			const t = (g.transparency[i] as number) / 255;
-			const look: Look = (g.flags[i] as number) & FLAGS.invisible ? "invisible" : t >= 0.5 ? "glassy" : "solid";
-			if (look === "invisible" && !this.options.showInvisible) continue;
+			const kind = partKind(flags);
+			const look: Look = kind === "marker" ? "marker" : flags & FLAGS.invisible ? "wall" : t >= 0.5 ? "glassy" : "solid";
+			if (flags & (FLAGS.mesh | FLAGS.union)) outlined.push(i);
 			const key = `${Math.min(g.shape[i] as number, 4)}:${look}`;
 			let list = buckets.get(key);
 			if (!list) buckets.set(key, (list = []));
@@ -180,28 +199,44 @@ export class MapRenderer {
 		const q = new THREE.Quaternion();
 		const s = new THREE.Vector3();
 		const color = new THREE.Color();
+		const matrixOf = (i: number, shape: number) => {
+			p.set(g.position[i * 3] as number, g.position[i * 3 + 1] as number, g.position[i * 3 + 2] as number);
+			q.set(g.rotation[i * 4] as number, g.rotation[i * 4 + 1] as number, g.rotation[i * 4 + 2] as number, g.rotation[i * 4 + 3] as number);
+			if (q.lengthSq() < 1e-6) q.identity();
+			else q.normalize();
+			s.set(Math.max(0.05, Math.abs(g.size[i * 3] as number)), Math.max(0.05, Math.abs(g.size[i * 3 + 1] as number)), Math.max(0.05, Math.abs(g.size[i * 3 + 2] as number)));
+			if (shape === 0) s.setScalar(Math.min(s.x, s.y, s.z));
+			return m.compose(p, q, s);
+		};
 		for (const [key, list] of buckets) {
 			const [shape, look] = key.split(":") as [string, Look];
 			const mesh = new THREE.InstancedMesh(this.shapes[Number(shape)] as THREE.BufferGeometry, this.materials[look], list.length);
 			list.forEach((i, k) => {
-				p.set(g.position[i * 3] as number, g.position[i * 3 + 1] as number, g.position[i * 3 + 2] as number);
-				q.set(g.rotation[i * 4] as number, g.rotation[i * 4 + 1] as number, g.rotation[i * 4 + 2] as number, g.rotation[i * 4 + 3] as number);
-				if (q.lengthSq() < 1e-6) q.identity();
-				else q.normalize();
-				s.set(Math.max(0.05, Math.abs(g.size[i * 3] as number)), Math.max(0.05, Math.abs(g.size[i * 3 + 1] as number)), Math.max(0.05, Math.abs(g.size[i * 3 + 2] as number)));
-				if (Number(shape) === 0) s.setScalar(Math.min(s.x, s.y, s.z));
-				mesh.setMatrixAt(k, m.compose(p, q, s));
-				if (look === "invisible") color.copy(INVISIBLE_COLOR);
-				else {
-					color.setRGB((g.color[i * 3] as number) / 255, (g.color[i * 3 + 1] as number) / 255, (g.color[i * 3 + 2] as number) / 255, THREE.SRGBColorSpace);
-					if (this.options.tintMeshes && (g.flags[i] as number) & (FLAGS.mesh | FLAGS.union)) color.lerp(MESH_TINT, 0.7);
-				}
+				mesh.setMatrixAt(k, matrixOf(i, Number(shape)));
+				color.setRGB((g.color[i * 3] as number) / 255, (g.color[i * 3 + 1] as number) / 255, (g.color[i * 3 + 2] as number) / 255, THREE.SRGBColorSpace);
 				mesh.setColorAt(k, color);
 			});
 			mesh.instanceMatrix.needsUpdate = true;
 			if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 			mesh.computeBoundingSphere();
 			this.parts.add(mesh);
+		}
+		// Meshes and unions drawn as boxes: a thin outline says "a bounding box, not the real shape".
+		if (outlined.length) {
+			const positions = new Float32Array(outlined.length * BOX_EDGES.length);
+			const v = new THREE.Vector3();
+			outlined.forEach((i, k) => {
+				const matrix = matrixOf(i, 1);
+				for (let e = 0; e < BOX_EDGES.length; e += 3) {
+					v.set(BOX_EDGES[e] as number, BOX_EDGES[e + 1] as number, BOX_EDGES[e + 2] as number).applyMatrix4(matrix);
+					positions.set([v.x, v.y, v.z], k * BOX_EDGES.length + e);
+				}
+			});
+			const lines = new THREE.BufferGeometry();
+			lines.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+			const outline = new THREE.LineSegments(lines, this.outlineMaterial);
+			outline.renderOrder = 5;
+			this.parts.add(outline);
 		}
 	}
 
@@ -248,11 +283,21 @@ export class MapRenderer {
 				mesh.renderOrder = order++;
 				this.marks.add(mesh);
 			}
+			for (const polygon of layer.polygons ?? []) {
+				if (polygon.length < 3 || !polygon.every((p) => this.inBand(p.y))) continue;
+				const vertices: number[] = [];
+				for (let k = 1; k < polygon.length - 1; k++) for (const p of [polygon[0], polygon[k], polygon[k + 1]] as MapPoint[]) vertices.push(p.x, p.y, p.z);
+				const g = new THREE.BufferGeometry();
+				g.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+				const fill = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4, depthTest: !flat, depthWrite: false, side: THREE.DoubleSide }));
+				fill.renderOrder = order++;
+				this.marks.add(fill);
+			}
 			const points = (layer.points ?? []).filter((p) => this.inBand(p.y));
 			if (points.length && !cells.length) {
 				const g = new THREE.BufferGeometry();
 				g.setAttribute("position", new THREE.Float32BufferAttribute(points.flatMap((p) => [p.x, p.y, p.z]), 3));
-				const dots = new THREE.Points(g, new THREE.PointsMaterial({ color, size: 7, sizeAttenuation: false, depthTest: !flat }));
+				const dots = new THREE.Points(g, new THREE.PointsMaterial({ color, size: layer.pointSize ?? 7, sizeAttenuation: false, depthTest: !flat }));
 				dots.renderOrder = order++;
 				this.marks.add(dots);
 			}
@@ -402,6 +447,7 @@ export class MapRenderer {
 		this.buildMarks();
 		for (const s of this.shapes) s.dispose();
 		for (const m of Object.values(this.materials)) m.dispose();
+		this.outlineMaterial.dispose();
 		this.grid?.dispose();
 		this.renderer.dispose();
 		this.renderer.domElement.remove();

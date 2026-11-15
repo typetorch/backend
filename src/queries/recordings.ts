@@ -21,6 +21,7 @@ import {
 	FIRST_ACTION_DEFAULTS,
 	AUTOPSY_DEFAULTS,
 	Grid,
+	type GridCell,
 	LAYER_LABELS,
 	NO_MAP,
 	PointSet,
@@ -47,6 +48,7 @@ import {
 	type Bounds,
 	type FirstActionStat,
 	type FirstActions,
+	type FirstAction,
 	type Frame,
 	type LayerSession,
 	type MapSources,
@@ -652,8 +654,26 @@ export interface LayersOptions extends RecordingBaseOptions {
 	screen?: string;
 	/** Cells along the frame's longer side. Default 96. */
 	grid: number;
-	/** Most cells per layer (the largest). Default 4000. */
+	/**
+	 * Studs per cell instead of `grid` (LAYER_CELL_SIZES: 0.5, 1, 2 or 4), for the explorer's real-map view. The frame
+	 * keeps its origin (a multiple of the base cell); positioned event layers stay at the base cell (their SQL bins it),
+	 * so they carry their own `cell`.
+	 */
+	cell?: LayerCellSize;
+	/** Most cells per layer (the largest). Default 4000 (20,000 with `cell`). */
 	maxCells: number;
+	/** The silhouette (every sample on the map). Default true; the real-map view leaves it out. */
+	background: boolean;
+}
+
+export const LAYER_CELL_SIZES = [0.5, 1, 2, 4] as const;
+export type LayerCellSize = (typeof LAYER_CELL_SIZES)[number];
+
+/** `frame` with `cell` studs per cell (same origin and extent: a frame's extent is a multiple of the base cell). */
+export function refineFrame(frame: Frame, cell: number): Frame {
+	const cols = Math.max(1, Math.ceil((frame.maxX - frame.minX) / cell - 1e-9));
+	const rows = Math.max(1, Math.ceil((frame.maxZ - frame.minZ) / cell - 1e-9));
+	return { minX: frame.minX, minZ: frame.minZ, maxX: frame.minX + cols * cell, maxZ: frame.minZ + rows * cell, cell, cols, rows };
 }
 
 export interface MapLayer {
@@ -664,7 +684,10 @@ export interface MapLayer {
 	count: number;
 	sessions: number;
 	values: { value: string; count: number }[];
-	cells: [number, number, number][];
+	/** [column, row, count, average Y?] (recording layers carry the samples' average height). */
+	cells: GridCell[];
+	/** Studs per cell when it isn't the frame's (positioned events with a finer `cell`); same origin. */
+	cell?: number;
 	/** Cells left out (past maxCells). */
 	cellsCut: number;
 	/** Recorded sessions that added to it (a few, for the replay). */
@@ -676,8 +699,8 @@ export interface LayersResult {
 	maps: { map: string; samples: number; sessions: number; events: number }[];
 	map: string | null;
 	frame: Frame | null;
-	/** Every recorded sample on the map (unfiltered): the walkable area's silhouette. */
-	background: [number, number, number][];
+	/** Every recorded sample on the map (unfiltered): the walkable area's silhouette (empty with `background: false`). */
+	background: GridCell[];
 	layers: MapLayer[];
 	/** Positioned events in the range, per kind and name. */
 	catalog: { kind: string; name: string; count: number }[];
@@ -709,6 +732,12 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 	defaultDays: 7,
 	options(input = {}) {
 		const layers = stringList(input.layers, "layers", 40) ?? [...RECORDING_LAYERS];
+		let cell: LayerCellSize | undefined;
+		if (input.cell !== undefined && input.cell !== null && (input.cell as unknown) !== "") {
+			const n = Number(input.cell);
+			if (!(LAYER_CELL_SIZES as readonly number[]).includes(n)) throw new Error(`cell must be one of ${LAYER_CELL_SIZES.join(", ")}`);
+			cell = n as LayerCellSize;
+		}
 		for (const id of layers) parseLayerId(id);
 		const split: Record<string, string> = {};
 		if (input.split !== undefined && input.split !== null) {
@@ -727,7 +756,9 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 			zone: stringOption(input.zone, "zone", 64),
 			screen: stringOption(input.screen, "screen", 64),
 			grid: Math.round(numberOption(input.grid, "grid", 96, 8, 256)),
-			maxCells: Math.round(numberOption(input.maxCells, "maxCells", 4000, 10, 20_000)),
+			...(cell !== undefined ? { cell } : {}),
+			maxCells: Math.round(numberOption(input.maxCells, "maxCells", cell !== undefined ? 20_000 : 4000, 10, 20_000)),
+			background: input.background === undefined || input.background === null ? true : input.background === true || (input.background as unknown) === "true",
 		};
 	},
 	statements(ctx, f, o) {
@@ -766,11 +797,14 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 			.filter((m) => m.samples > 0 || m.events > 0)
 			.sort((a, b) => b.samples + b.events - (a.samples + a.events) || a.map.localeCompare(b.map));
 		const map = o.map !== undefined ? o.map : defaultMap(prepared);
-		const frame = map !== null ? prepared.frames.get(map) : undefined;
-		if (map === null || !frame) return { ...result, maps, map, sampling, notes };
+		const auto = map !== null ? prepared.frames.get(map) : undefined;
+		if (map === null || !auto) return { ...result, maps, map, sampling, notes };
+		const frame = o.cell !== undefined ? refineFrame(auto, o.cell) : auto;
+		// Positioned events come binned at BASE_CELL: finer frames keep them at that size (same origin).
+		const eventFrame = frame.cell % BASE_CELL === 0 ? frame : refineFrame(frame, BASE_CELL);
 		const mapIndex = prepared.names.indexOf(map);
 		const background = new Grid(frame);
-		for (const s of prepared.sessions) for (let i = 0; i < s.maps.length; i++) if (s.maps[i] === mapIndex && !Number.isNaN(s.track.x[i])) background.add(s.track.x[i], s.track.z[i]);
+		if (o.background) for (const s of prepared.sessions) for (let i = 0; i < s.maps.length; i++) if (s.maps[i] === mapIndex && !Number.isNaN(s.track.x[i])) background.add(s.track.x[i], s.track.z[i]);
 		const wantedRec = o.layers.filter((id) => parseLayerId(id).kind === "recording") as RecordingLayerId[];
 		const recLayers = addRecordingLayers(prepared.sessions, mapIndex, frame, wantedRec, { zone: o.zone, screen: o.screen, values: o.values });
 		const layers: MapLayer[] = [];
@@ -792,7 +826,7 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 					examples: l.examples.slice(0, 20),
 				});
 			} else {
-				const grid = new Grid(frame);
+				const grid = new Grid(eventFrame);
 				const values = new Map<string, number>();
 				const keep = o.values[id];
 				const split = o.split[id] !== undefined;
@@ -812,6 +846,7 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 					sessions: 0,
 					values: valueList(values),
 					cells,
+					...(eventFrame !== frame ? { cell: eventFrame.cell } : {}),
 					cellsCut: grid.size - cells.length,
 					examples: [],
 				});
@@ -971,12 +1006,14 @@ export const recordingSessions = defineQuery<SessionsOptions, SessionsResult>({
 
 /** A session had a point of `layer` inside the box on map `index` (a one-cell frame exactly over the box). */
 function boxHit(s: LayerSession, index: number, b: Bounds, layer: RecordingLayerId): boolean {
-	// A 1-stud grid exactly over the box (the page's boxes are whole cells); points outside it don't count.
-	const minX = Math.floor(b.minX);
-	const minZ = Math.floor(b.minZ);
-	const cols = Math.max(1, Math.ceil(b.maxX) - minX);
-	const rows = Math.max(1, Math.ceil(b.maxZ) - minZ);
-	const frame: Frame = { minX, minZ, maxX: minX + cols, maxZ: minZ + rows, cell: 1, cols, rows };
+	// A half-stud grid exactly over the box (the page's boxes are whole cells of 0.5 studs or more); points outside it
+	// don't count.
+	const half = (v: number, round: (v: number) => number) => round(v * 2) / 2;
+	const minX = half(b.minX, Math.floor);
+	const minZ = half(b.minZ, Math.floor);
+	const cols = Math.max(1, (half(b.maxX, Math.ceil) - minX) * 2);
+	const rows = Math.max(1, (half(b.maxZ, Math.ceil) - minZ) * 2);
+	const frame: Frame = { minX, minZ, maxX: minX + cols / 2, maxZ: minZ + rows / 2, cell: 0.5, cols, rows };
 	return (addRecordingLayers([s], index, frame, [layer], {}).get(layer)?.grid.total ?? 0) > 0;
 }
 
@@ -1215,7 +1252,8 @@ export interface FirstActionSplit {
 
 export interface FirstActionResult {
 	sessions: number;
-	stats: FirstActionStat[];
+	/** Per action, a few sessions to replay (the slowest to reach it, and some that never did). */
+	stats: (FirstActionStat & { examples: { slowest: string[]; never: string[] } })[];
 	byDevice: FirstActionSplit[];
 	byBuild: FirstActionSplit[];
 	sampling: Sampling;
@@ -1277,10 +1315,26 @@ export const firstAction = defineQuery<FirstActionQueryOptions, FirstActionResul
 		return {
 			...result,
 			sessions: per.filter((p) => p.actions.spawn !== null).length,
-			stats: firstActionStats(per.map((p) => p.actions)),
+			stats: firstActionStats(per.map((p) => p.actions)).map((stat) => ({ ...stat, examples: firstActionExamples(per, stat.action) })),
 			byDevice: split((s) => s.dev),
 			byBuild: split((s) => s.art || "(none)"),
 			sampling: { recorded: all.length, used: loaded.length, sampled: chosen.length < all.length, failed, capped: all.length >= Math.min(20_000, ctx.dialect.maxRows), eventsCapped },
 		};
 	},
 });
+
+/** A few sessions to replay per action: the slowest that reached it, and ones that never did (spawned only). */
+export function firstActionExamples(per: readonly { s: { sid: string }; actions: FirstActions }[], action: FirstAction, max = 3): { slowest: string[]; never: string[] } {
+	const counted = per.filter((p) => p.actions.spawn !== null);
+	const slowest = counted
+		.filter((p) => p.actions.seconds[action] !== null)
+		.sort((a, b) => (b.actions.seconds[action] as number) - (a.actions.seconds[action] as number) || (a.s.sid < b.s.sid ? -1 : 1))
+		.slice(0, max)
+		.map((p) => p.s.sid);
+	const never = counted
+		.filter((p) => p.actions.seconds[action] === null)
+		.map((p) => p.s.sid)
+		.sort()
+		.slice(0, max);
+	return { slowest, never };
+}

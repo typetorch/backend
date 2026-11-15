@@ -5,10 +5,13 @@
  *   - The export card: the last export (when, place version, parts), "out of date" when Roblox has a newer place
  *     version, the Export button for owners (its progress while it runs), the map names no model was found for.
  *   - The map picker, 2D / 3D, the Y band (detected floors or a free range: geometry above and below is cut away, so an
- *     indoor floor shows in 2D), invisible parts, mesh tint.
+ *     indoor floor shows in 2D), and what's drawn: the collision geometry by default (lib/maps.ts isDrawn), with
+ *     toggles for decorative meshes and for markers.
  *   - Layers: one per positioned event; dots or heat cells of 0.5, 1 or 2 studs (the filter bar applies).
- *   - Alignment: whether the events land on the geometry; owners apply the suggested offset or set a model path.
- * The three.js scene (components/maps/MapScene) loads only when a map is shown.
+ *   - Alignment: whether the positioned events land on the geometry, else the recordings' positions on that map;
+ *     owners apply the suggested offset or set a model path.
+ * The map and the whole view (lib/map-view.ts) live in the URL: switching maps keeps the view. The three.js scene
+ * (components/maps/MapScene) loads only when a map is shown.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Box, Download, Map as MapIcon, RefreshCw } from "lucide-react";
@@ -20,19 +23,36 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { isReadOnly, useAuth } from "@/lib/auth";
-import { useAnalytics } from "@/lib/hooks";
+import { useAnalytics, usePageParams } from "@/lib/hooks";
 import { fmtAgo, fmtBytes, fmtInt, fmtPct } from "@/lib/format";
-import { CELL_SIZES, detectFloors, eventLayers, LOBBY, mapsApi, partsText, type CellSize, type MapInfo, type MapLayer, type MapsView, type Vec3 } from "@/lib/maps";
+import { bandFits, mapViewPatch, readMapView, resolveBand, type MapViewState } from "@/lib/map-view";
+import {
+	alignmentOf,
+	CELL_SIZES,
+	countKinds,
+	detectFloors,
+	eventLayers,
+	LOBBY,
+	MAPS_KEY,
+	mapsApi,
+	nameKey,
+	partsText,
+	recordingSamples,
+	type MapInfo,
+	type MapLayer,
+	type MapsView,
+	type Vec3,
+} from "@/lib/maps";
 
 const MapScene = lazy(() => import("@/components/maps/MapScene"));
 
-export const MAPS_KEY = ["maps"] as const;
+export { MAPS_KEY };
 
 const ALIGN_TEXT: Record<MapInfo["alignment"]["state"], { label: string; tone: string }> = {
-	aligned: { label: "Aligned with the events", tone: "bg-[var(--status-good)]/15 text-[var(--status-good)]" },
+	aligned: { label: "Aligned with where players are", tone: "bg-[var(--status-good)]/15 text-[var(--status-good)]" },
 	partial: { label: "Partly aligned", tone: "bg-[var(--status-warn)]/15 text-[var(--status-warn)]" },
-	off: { label: "Not aligned: the events are elsewhere", tone: "bg-destructive/15 text-destructive" },
-	unknown: { label: "Alignment unknown (too few positioned events)", tone: "bg-muted text-muted-foreground" },
+	off: { label: "Not aligned: players are elsewhere", tone: "bg-destructive/15 text-destructive" },
+	unknown: { label: "Alignment unknown (too few positions)", tone: "bg-muted text-muted-foreground" },
 };
 
 export default function Maps() {
@@ -45,7 +65,8 @@ export default function Maps() {
 	});
 	// Owners only (the server says so too; a viewer's session never gets the Export button or the override form).
 	const view = list.data && isReadOnly(auth) ? { ...list.data, canExport: false } : list.data;
-	const [picked, setPicked] = useState<string | null>(null);
+	const [params, setParams] = usePageParams();
+	const picked = params.get("map");
 	const maps = view?.maps ?? [];
 	const map = maps.find((m) => m.name === picked) ?? maps[0] ?? null;
 
@@ -77,7 +98,7 @@ export default function Maps() {
 				<>
 					<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Map">
 						{maps.map((m) => (
-							<ToggleChip key={m.name} pressed={m.name === map?.name} onClick={() => setPicked(m.name)}>
+							<ToggleChip key={m.name} pressed={m.name === map?.name} onClick={() => setParams({ map: m.name })}>
 								{m.name === LOBBY ? "Lobby" : m.name}
 								{m.kind === "map" && m.alignment.state === "off" ? <AlertTriangle className="text-[var(--status-warn)]" aria-label="not aligned" /> : null}
 							</ToggleChip>
@@ -167,13 +188,13 @@ function ExportCard({ view, onExport, exportError, starting }: { view: MapsView;
 }
 
 function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
-	const [mode, setMode] = useState<"2d" | "3d">("2d");
-	const [cell, setCell] = useState<CellSize>(1);
-	const [heat, setHeat] = useState(true);
-	const [hidden, setHidden] = useState<Set<string>>(new Set());
-	const [showInvisible, setShowInvisible] = useState(false);
-	const [tint, setTint] = useState(true);
-	const [band, setBand] = useState<[number, number] | null>(null);
+	const [params, setParams] = usePageParams();
+	const state = readMapView(params);
+	const set = (patch: Partial<MapViewState>) => setParams(mapViewPatch(patch));
+	const mode = state.mode;
+	const cell = state.cell ?? 1;
+	const heat = state.draw === "heat";
+	const hidden = useMemo(() => new Set(state.hidden), [state.hidden.join(",")]);
 	const isMap = map.kind === "map";
 
 	const geometry = useQuery({
@@ -188,8 +209,16 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 		[layers, hidden, heat],
 	);
 	const floors = useMemo(() => (geometry.data ? detectFloors(geometry.data, map.offset[1]) : []), [geometry.data, map.offset]);
+	const kinds = useMemo(() => (geometry.data ? countKinds(geometry.data) : null), [geometry.data]);
 	const lo = map.bounds ? Math.floor(map.bounds.min[1] + map.offset[1]) : 0;
 	const hi = map.bounds ? Math.ceil(map.bounds.max[1] + map.offset[1]) : 100;
+	const band = resolveBand(state.band, floors, lo, hi);
+	// A free range from another map that doesn't fit this one's heights: back to all (floors and the rest carry over).
+	const misfit = state.band.kind === "range" && !bandFits(state.band, lo, hi);
+	useEffect(() => {
+		if (misfit) setParams({ band: null });
+	}, [misfit, setParams]);
+	const toggleLayer = (id: string) => set({ hidden: hidden.has(id) ? state.hidden.filter((x) => x !== id) : [...state.hidden, id] });
 
 	return (
 		<div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
@@ -199,7 +228,7 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 						<ErrorState error={geometry.error} />
 					) : (
 						<Suspense fallback={<LoadingBlock rows={6} />}>
-							<MapScene geometry={geometry.data ?? null} bounds={map.bounds} mode={mode} layers={shown} offset={map.offset} band={band} showInvisible={showInvisible} tintMeshes={tint} />
+							<MapScene geometry={geometry.data ?? null} bounds={map.bounds} mode={mode} layers={shown} offset={map.offset} band={band} decorative={state.decorative} markers={state.markers} label={`Map ${map.name}`} />
 						</Suspense>
 					)}
 				</div>
@@ -213,52 +242,58 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 				<Section title="View">
 					<div className="space-y-3 text-sm">
 						<div className="flex gap-1.5" role="group" aria-label="View">
-							<ToggleChip pressed={mode === "2d"} onClick={() => setMode("2d")}>
+							<ToggleChip pressed={mode === "2d"} onClick={() => set({ mode: "2d" })}>
 								<MapIcon /> 2D
 							</ToggleChip>
-							<ToggleChip pressed={mode === "3d"} onClick={() => setMode("3d")}>
+							<ToggleChip pressed={mode === "3d"} onClick={() => set({ mode: "3d" })}>
 								<Box /> 3D
 							</ToggleChip>
 						</div>
 						<div className="space-y-1.5">
 							<div className="text-xs font-medium text-muted-foreground">Height (Y band)</div>
 							<div className="flex flex-wrap gap-1.5" role="group" aria-label="Floors">
-								<ToggleChip pressed={band === null} onClick={() => setBand(null)}>
+								<ToggleChip pressed={band === null} onClick={() => set({ band: { kind: "all" } })}>
 									All
 								</ToggleChip>
 								{floors.length > 1
 									? floors.map((f, i) => (
-											<ToggleChip key={f.y} pressed={band?.[0] === f.band[0] && band?.[1] === f.band[1]} onClick={() => setBand(f.band)} title={`walkable at y ${f.y}`}>
+											<ToggleChip key={f.y} pressed={state.band.kind === "floor" && state.band.index === i} onClick={() => set({ band: { kind: "floor", index: i } })} title={`walkable at y ${f.y}`}>
 												Floor {i + 1}
 											</ToggleChip>
 										))
 									: null}
 							</div>
-							<BandSlider lo={lo} hi={hi} band={band} onChange={setBand} />
+							<BandSlider lo={lo} hi={hi} band={band} onChange={(b) => set({ band: b ? { kind: "range", lo: b[0], hi: b[1] } : { kind: "all" } })} />
 						</div>
-						<label className="flex items-center gap-2">
-							<input type="checkbox" checked={showInvisible} onChange={(e) => setShowInvisible(e.target.checked)} /> Invisible parts ({fmtInt(map.invisible)})
-						</label>
-						<label className="flex items-center gap-2">
-							<input type="checkbox" checked={tint} onChange={(e) => setTint(e.target.checked)} /> Tint meshes and unions ({fmtInt(map.meshes + map.unions)})
-						</label>
+						<div className="space-y-1.5" role="group" aria-label="Drawn">
+							<label className="flex items-center gap-2">
+								<input type="checkbox" checked={state.decorative} onChange={(e) => set({ decorative: e.target.checked })} /> Decorative meshes{kinds ? ` (${fmtInt(kinds.decorMesh)})` : ""}
+							</label>
+							<label className="flex items-center gap-2">
+								<input type="checkbox" checked={state.markers} onChange={(e) => set({ markers: e.target.checked })} /> Markers and triggers{kinds ? ` (${fmtInt(kinds.marker)})` : ""}
+							</label>
+							<p className="text-xs text-muted-foreground" data-testid="draw-rule">
+								Drawn: every part that collides ({kinds ? `${fmtInt(kinds.collide)}, ${fmtInt(kinds.collideInvisible)} of them invisible walls, see-through` : "invisible walls see-through"}) and small visible decoration
+								{kinds ? ` (${fmtInt(kinds.decor)})` : ""}, in their own colors. Decorative meshes are meshes and unions that don't collide, drawn as their bounding boxes (outlined, often much bigger than the real shape); markers are invisible parts that don't collide.
+							</p>
+						</div>
 					</div>
 				</Section>
 				{isMap ? (
 					<Section title="Layers" description="Events with px / pz props on this map; the filter bar applies.">
 						<div className="space-y-3 text-sm">
 							<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Draw as">
-								<ToggleChip pressed={heat} onClick={() => setHeat(true)}>
+								<ToggleChip pressed={heat} onClick={() => set({ draw: "heat" })}>
 									Heat cells
 								</ToggleChip>
-								<ToggleChip pressed={!heat} onClick={() => setHeat(false)}>
+								<ToggleChip pressed={!heat} onClick={() => set({ draw: "points" })}>
 									Dots
 								</ToggleChip>
 							</div>
 							<div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Cell size">
 								<span className="text-xs text-muted-foreground">Cell</span>
 								{CELL_SIZES.map((c) => (
-									<ToggleChip key={c} pressed={cell === c} onClick={() => setCell(c)}>
+									<ToggleChip key={c} pressed={cell === c} onClick={() => set({ cell: c === 1 ? null : c })}>
 										{c} stud{c === 1 ? "" : "s"}
 									</ToggleChip>
 								))}
@@ -270,21 +305,9 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 							) : layers.length ? (
 								<div className="flex flex-wrap gap-1.5" role="group" aria-label="Layers">
 									{layers.map((l) => {
-										const on = !hidden.has(l.id);
-										const n = (l.cells ?? []).reduce((s, c) => s + c.n, 0);
+										const n = (l.cells ?? []).reduce((sum, c) => sum + c.n, 0);
 										return (
-											<ToggleChip
-												key={l.id}
-												pressed={on}
-												onClick={() =>
-													setHidden((prev) => {
-														const next = new Set(prev);
-														if (on) next.add(l.id);
-														else next.delete(l.id);
-														return next;
-													})
-												}
-											>
+											<ToggleChip key={l.id} pressed={!hidden.has(l.id)} onClick={() => toggleLayer(l.id)}>
 												<span className="inline-block size-2.5 rounded-full" style={{ background: l.color }} aria-hidden />
 												{l.label} ({fmtInt(n)})
 											</ToggleChip>
@@ -298,10 +321,27 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 						</div>
 					</Section>
 				) : null}
-				{isMap ? <AlignmentCard map={map} canEdit={view.canExport} /> : null}
+				{isMap ? <AlignmentCard map={map} view={view} canEdit={view.canExport} /> : null}
 			</div>
 		</div>
 	);
+}
+
+/**
+ * The map's alignment: the backend's (positioned events, last 30 days) when it has enough of them, else the recordings'
+ * positions on that map (the recording-layers query's silhouette, the filter bar's range) through the same check.
+ */
+export function useAlignment(map: MapInfo, view: Pick<MapsView, "names">): { alignment: MapInfo["alignment"]; source: "events" | "recordings"; loading: boolean } {
+	const server = map.alignment;
+	const needed = map.kind === "map" && server.state === "unknown";
+	const guess = view.names.find((n) => nameKey(n.name) === nameKey(map.name))?.name ?? map.name;
+	const first = useAnalytics("recording-layers", { map: guess, layers: [] }, { enabled: needed });
+	const recorded = first.data?.maps.find((m) => nameKey(m.map) === nameKey(map.name))?.map;
+	const second = useAnalytics("recording-layers", { map: recorded, layers: [] }, { enabled: needed && recorded !== undefined && recorded !== guess });
+	const data = recorded !== undefined && recorded !== guess ? second.data : first.data;
+	const computed = useMemo(() => (data?.frame ? alignmentOf(map.bounds, recordingSamples(data.frame, data.background), map.offset) : null), [data, map.bounds, map.offset]);
+	if (!needed || !computed || computed.state === "unknown") return { alignment: server, source: "events", loading: needed && (first.isLoading || second.isLoading) };
+	return { alignment: computed, source: "recordings", loading: false };
 }
 
 function BandSlider({ lo, hi, band, onChange }: { lo: number; hi: number; band: [number, number] | null; onChange: (band: [number, number] | null) => void }) {
@@ -318,9 +358,9 @@ function BandSlider({ lo, hi, band, onChange }: { lo: number; hi: number; band: 
 	);
 }
 
-function AlignmentCard({ map, canEdit }: { map: MapInfo; canEdit: boolean }) {
+function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; canEdit: boolean }) {
 	const client = useQueryClient();
-	const a = map.alignment;
+	const { alignment: a, source, loading } = useAlignment(map, view);
 	const [path, setPath] = useState(map.override?.path ?? "");
 	const [offset, setOffset] = useState<string[]>(map.offset.map(String));
 	const save = useMutation({
@@ -338,8 +378,9 @@ function AlignmentCard({ map, canEdit }: { map: MapInfo; canEdit: boolean }) {
 		<Section title="Alignment">
 			<div className="space-y-2 text-sm">
 				<span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${text.tone}`}>{text.label}</span>
-				<p className="text-xs text-muted-foreground">
-					{fmtInt(a.samples)} positioned events (last 30 days); {fmtPct(a.inside, 0)} inside the map's box.
+				<p className="text-xs text-muted-foreground" data-testid="alignment-source">
+					{source === "recordings" ? `${fmtInt(a.samples)} recorded positions on this map (recordings, this range)` : `${fmtInt(a.samples)} positioned events (last 30 days)`}; {fmtPct(a.inside, 0)} inside the map's box.
+					{loading ? " Checking the recordings…" : ""}
 					{map.offset.some((v) => v !== 0) ? ` Offset ${map.offset.join(", ")} applied.` : ""}
 				</p>
 				{a.state === "off" && a.suggestedOffset ? (
