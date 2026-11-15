@@ -139,6 +139,17 @@ describe("the export API's door", () => {
 		expect((await h.call("/v1/admin/migrate", { method: "POST", ...json({ action: "pause" }), headers: { ...web, ...XT, "content-type": "application/json" } })).status).toBe(403);
 	});
 
+	test("a named API key, even an admin one, can't export or run the migration (the env admin token only)", async () => {
+		const made = await asJson(await h.call("/v1/admin/keys", { method: "POST", headers: { ...bearer(ADMIN), "content-type": "application/json" }, body: JSON.stringify({ name: "ops-admin", role: "admin" }) }));
+		const key = String(made.key);
+		expect(key.startsWith("ttk_")).toBe(true);
+		for (const route of ["/v1/admin/export/manifest", "/v1/admin/export/erased", "/v1/admin/export/rows?table=events&day=2026-10-09"]) {
+			expect((await h.call(route, { headers: bearer(key) })).status).toBe(403);
+		}
+		expect((await h.call("/v1/admin/migrate", { headers: bearer(key) })).status).toBe(200);
+		expect((await h.call("/v1/admin/migrate", { method: "POST", headers: { ...bearer(key), "content-type": "application/json" }, body: JSON.stringify({ action: "pause" }) })).status).toBe(403);
+	});
+
 	test("the manifest's shape on an empty server; bad parameters are 400; unknown routes 404", async () => {
 		const m = await asJson(await h.call("/v1/admin/export/manifest", { headers: bearer(ADMIN) }));
 		expect(m).toMatchObject({ version: 1, server: { now: T0 }, tables: { events: [], recordings: [] }, live: { day: null, rows: 0, lastRt: null }, erased: 0 });

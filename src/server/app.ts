@@ -3154,6 +3154,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const admin = manage();
 				if (admin instanceof Response) return admin;
 				if (admin.via !== "bearer") return json(403, { error: "the export API takes the admin token as a Bearer (the CLI, the migration job), not a browser session" });
+				// Every row and the pid <-> UserId table in one go: the env admin token only, never a named API key (even an admin one).
+				if (isNamedKey(admin)) return json(403, { error: "the export API takes the env admin token (TYPETORCH_ADMIN_TOKEN), not a named API key" });
 				return exportApi.handle(req, path, url);
 			}
 			if (path === "/v1/admin/migrate") {
@@ -3161,6 +3163,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const admin = manage();
 				if (admin instanceof Response) return admin;
 				if (method === "GET") return json(200, await migrator.status());
+				// Starting a move makes this server import another one's data: the env admin token or an owner, never a named API key.
+				if (isNamedKey(admin)) return json(403, { error: "the migration is run with the env admin token (the CLI) or by an owner, not a named API key" });
 				return migrateAction(req);
 			}
 			if (path === "/v1/admin/alert-rules") {
