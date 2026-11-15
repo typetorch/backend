@@ -172,7 +172,7 @@ describe("moving to another server", () => {
 		const st = await until(next, ["done", "failed"]);
 		expect(st.error).toBeNull();
 		expect(st.state).toBe("done");
-		expect(st.steps.map((s) => [s.name, s.state])).toEqual(["erased", "identities", "fleet", "events", "recordings", "live", "rollups", "verify"].map((n) => [n, "done"]));
+		expect(st.steps.map((s) => [s.name as string, s.state as string])).toEqual(["erased", "identities", "fleet", "events", "recordings", "live", "rollups", "verify"].map((n) => [n, "done"]));
 		const days = st.days.filter((d) => d.table === "events").map((d) => d.day);
 		expect(days).toEqual([0, 1, 2, 3].map((i) => dayString(TODAY - i)));
 		expect(st.days.filter((d) => d.state !== "match")).toEqual([]);

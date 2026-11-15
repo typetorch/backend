@@ -262,7 +262,12 @@ export class ExportApi {
 		const file = dayFilePath(w, table, day);
 		const fileRows = file ? Number((await w.read((c) => readRows(c, `SELECT COUNT(*) AS n FROM read_parquet(${pathLit(file)})`), EXPORT_TIMEOUT_MS))[0]?.n ?? 0) : 0;
 		const filePages = Math.ceil(fileRows / size);
-		const live = await this.liveSorted(w, table, day);
+		// The live part: counted for a page of the day file (cheap), sorted into a copy only when a page falls in it.
+		const inDay = `t >= ${day * DAY_MS} AND t < ${(day + 1) * DAY_MS}`;
+		const live =
+			page < filePages
+				? { path: null, rows: Number((await w.read((c) => readRows(c, `SELECT COUNT(*) AS n FROM live.${table} WHERE ${inDay} AND ${notErased}`), EXPORT_TIMEOUT_MS))[0]?.n ?? 0) }
+				: await this.liveSorted(w, table, day);
 		const pages = filePages + Math.ceil(live.rows / size);
 		const out = join(this.dir(w), `page-${Date.now()}-${++this.seq}.ndjson`);
 		let sent = 0;
