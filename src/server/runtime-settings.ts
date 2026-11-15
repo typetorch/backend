@@ -52,6 +52,10 @@ export interface RuntimeValues {
 	webViewers: number[];
 	ipPerMinute: number;
 	jobPerMinute: number;
+	/** Plans/35 D: raw/incoming bytes over which ingest answers busy (503); 0 = off. */
+	busyBytes: number;
+	/** Plans/35 D: ingest requests in flight over which ingest answers busy (503); 0 = off. */
+	busyRequests: number;
 	errorsIpPerMinute: number;
 	fleetNewJobsPerMinute: number;
 	keepDays: number;
@@ -128,6 +132,8 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "webViewers", env: "TYPETORCH_WEB_VIEWERS", group: "access", kind: "users", maxEntries: VIEWERS_MAX, label: "Viewers (read-only)", help: "Roblox UserIds who may sign in with Roblox and see everything but change nothing (the web role). Owners from the access list are admins either way." },
 	{ key: "ipPerMinute", env: "TYPETORCH_IP_PER_MINUTE", group: "limits", kind: "number", min: 100, max: 1_000_000, unit: "requests / min", label: "Ingest per address", help: "Game requests per address per minute (servers share egress addresses)." },
 	{ key: "jobPerMinute", env: "TYPETORCH_JOB_PER_MINUTE", group: "limits", kind: "number", min: 10, max: 100_000, unit: "requests / min", label: "Ingest per server", help: "Ingest batches per game server (JobId) per minute." },
+	{ key: "busyBytes", env: "TYPETORCH_BUSY_BYTES", group: "limits", kind: "number", min: 1024 * 1024, max: 1024 ** 4, zero: "off", unit: "bytes", label: "Busy: raw backlog", help: "Ingest answers 503 busy (with Retry-After, before reading the body) while the raw files waiting for the loader hold more than this. Game servers keep the batch and retry later. 0 = off." },
+	{ key: "busyRequests", env: "TYPETORCH_BUSY_REQUESTS", group: "limits", kind: "number", min: 1, max: 100_000, zero: "off", unit: "requests", label: "Busy: requests in flight", help: "Ingest answers 503 busy while more than this many ingest requests are being handled at once. Heartbeats, error logs and identities are never refused this way. 0 = off." },
 	{ key: "errorsIpPerMinute", env: "TYPETORCH_ERRORS_IP_PER_MINUTE", group: "limits", kind: "number", min: 60, max: 1_000_000, unit: "requests / min", label: "Error logs per address", help: "POST /v1/errors per address per minute." },
 	{ key: "fleetNewJobsPerMinute", env: "TYPETORCH_NEW_JOBS_PER_MINUTE", group: "limits", kind: "number", min: 100, max: 1_000_000, unit: "servers / min", label: "New servers per minute", help: "Never-seen JobIds let in per minute (fleet and error logs, counted apart)." },
 	{ key: "keepDays", env: "TYPETORCH_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 36_500, zero: "forever", unit: "days", label: "Analytics history", help: "Days of Parquet day files kept; 0 keeps them forever. Applied at the nightly export." },
@@ -366,6 +372,8 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		webViewers: [...config.webViewers],
 		ipPerMinute: config.ipPerMinute,
 		jobPerMinute: config.jobPerMinute,
+		busyBytes: config.busyBytes,
+		busyRequests: config.busyRequests,
 		errorsIpPerMinute: config.errorsIpPerMinute,
 		fleetNewJobsPerMinute: config.fleetNewJobsPerMinute,
 		keepDays: config.keepDays,

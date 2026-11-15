@@ -626,6 +626,98 @@ export class Warehouse {
 		});
 	}
 
+	// Moving to another server (plans/35 A) ---------------------------------------------------------------------------
+
+	/** Read connections running a query right now (the migration job waits while any does). */
+	get queriesRunning(): number {
+		return this.pool.size - this.free.length;
+	}
+
+	/** Bumped whenever the live tables change. */
+	get version(): number {
+		return this.liveVersion;
+	}
+
+	/** The erased pids (a copy). */
+	erasedPids(): string[] {
+		return [...this.erased];
+	}
+
+	/**
+	 * Runs `fn` on a pooled read connection under the read lock (never the writer), interrupted after `timeoutMs`. The
+	 * export API reads this way, so it never waits on or blocks the loader beyond what a query does.
+	 */
+	read<T>(fn: (c: DuckDBConnection) => Promise<T>, timeoutMs = this.options.queryTimeoutSeconds * 1000): Promise<T> {
+		return this.lock.read(async () => {
+			const c = await this.connection();
+			const timer = setTimeout(() => c.interrupt(), timeoutMs);
+			try {
+				return await fn(c);
+			} finally {
+				clearTimeout(timer);
+				this.release(c);
+			}
+		});
+	}
+
+	/**
+	 * Merges rows (NDJSON files in the stored row format, `rt` included) into the day file of `day`: the late-row merge of
+	 * the nightly export (old file + the rows -> exact duplicates dropped keeping the first receive time, sorted, written to
+	 * a temp file, renamed), as one warehouse job, so it never races the loader, the nightly export or an erasure. Rows of
+	 * erased players and rows outside the day are dropped. Rows never pass through live.duckdb. Re-merging the same rows
+	 * changes nothing. Returns the day file's rows before and after.
+	 */
+	mergeDay(table: "events" | "recordings", day: number, files: string[]): Promise<{ before: number; after: number }> {
+		return this.jobs.run(async () => {
+			const date = dayString(day);
+			const target = join(table === "events" ? this.layout.events : this.layout.recordings, `${date}.parquet`);
+			const cols = storedColumns(table)
+				.map((c) => `"${c}"`)
+				.join(", ");
+			const contract = fieldsOf(table)
+				.map((field) => `"${field.name}"`)
+				.join(", ");
+			const notErased = `(pid IS NULL OR pid NOT IN (SELECT pid FROM live.erased))`;
+			const inDay = `t >= ${day * DAY_MS} AND t < ${(day + 1) * DAY_MS}`;
+			const had = existsSync(target);
+			const before = had ? Number((await readRows(this.writer, `SELECT COUNT(*) AS n FROM read_parquet(${pathLit(target)})`))[0].n) : 0;
+			const parts: string[] = [];
+			if (had) parts.push(`SELECT ${cols} FROM read_parquet(${pathLit(target)}) WHERE ${notErased}`);
+			const present = files.filter((f) => existsSync(f) && statSync(f).size > 0);
+			if (present.length) {
+				parts.push(
+					`SELECT ${cols} FROM read_json([${present.map(pathLit).join(", ")}], format = 'newline_delimited', columns = ${readJsonColumns(table)}) r WHERE ${inDay} AND ${notErased}`,
+				);
+			}
+			if (!present.length) return { before, after: before };
+			const tmp = `${target}.merge.tmp`;
+			rmSync(tmp, { force: true });
+			const written = await this.writer.run(
+				`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${parts.join(" UNION ALL ")}) x GROUP BY ALL ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)`,
+			);
+			const after = written.rowsChanged;
+			if (after === 0 && !had) {
+				rmSync(tmp, { force: true });
+				return { before, after };
+			}
+			renameSync(tmp, target);
+			return { before, after };
+		});
+	}
+
+	/** Rebuilds the rollups of finished days (imported day files), then players.parquet. One warehouse job. */
+	rebuildRollups(days: number[]): Promise<number> {
+		return this.jobs.run(async () => {
+			let built = 0;
+			for (const day of days) {
+				await this.rollupDay(day);
+				built++;
+			}
+			if (built) await this.rebuildPlayers();
+			return built;
+		});
+	}
+
 	// Right to Erasure ------------------------------------------------------------------------------------------------
 
 	isErased(pid: string): boolean {
