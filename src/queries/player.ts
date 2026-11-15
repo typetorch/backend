@@ -17,6 +17,8 @@ import { checkPid, defineQuery, intOption, iso, num, round, SERVER_PURCHASE, str
 export const PLAYER_MAX_DAYS = 400;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
+/** Recording chunks are read from this long before the window: a session that began before it has its chunks there. */
+const RECORDING_SLACK_MS = 6 * HOUR_MS;
 
 export type PlayerBucketUnit = "minute" | "5 minutes" | "hour" | "day";
 
@@ -55,6 +57,8 @@ export interface PlayerSession {
 	art: string;
 	/** The game server's JobId the session ran on (the smallest one when a session spans several, as `dev` and `art`). */
 	job: string | null;
+	/** It has a first-session recording (chunks in the recordings table): the Recordings page can replay it. */
+	recorded: boolean;
 }
 
 export interface PlayerPurchase {
@@ -162,7 +166,12 @@ export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 				`SELECT bk, COUNT(*) AS purchases, SUM(COALESCE(robux, 0)) AS robux FROM (SELECT ${bucketOf("e.t", w.bucketMs)} AS bk, ` +
 				`${ctx.dialect.jsonNumber("e.props", PROP_KEYS.purchaseRobux)} AS robux, e.src AS esrc FROM ${table} e WHERE ${cond} AND e.kind = 'purchase') y ` +
 				`WHERE ${SERVER_PURCHASE} GROUP BY bk ORDER BY bk ${lim(buckets)}`,
-			sessions: `WITH ${sessionsCte} SELECT sid, t0, t1, n, isnew, dev, art, job FROM s ORDER BY t0 DESC, sid ${lim(o.sessions + 1)}`,
+			// Which sessions have a recording: one join on the player's recording chunks, not a query per session.
+			sessions:
+				`WITH ${sessionsCte}, rec AS (SELECT r.sid AS sid FROM ${ctx.table("recordings", w.from - RECORDING_SLACK_MS, w.to)} r ` +
+				`WHERE r.pid = ${lit(o.pid)} AND r.t >= ${int(w.from - RECORDING_SLACK_MS)} AND r.t < ${int(w.to)} AND r.sid IS NOT NULL AND r.sid <> '' GROUP BY r.sid) ` +
+				`SELECT s.sid AS sid, s.t0 AS t0, s.t1 AS t1, s.n AS n, s.isnew AS isnew, s.dev AS dev, s.art AS art, s.job AS job, ` +
+				`CASE WHEN rec.sid IS NULL THEN 0 ELSE 1 END AS recorded FROM s LEFT JOIN rec ON rec.sid = s.sid ORDER BY s.t0 DESC, s.sid ${lim(o.sessions + 1)}`,
 			purchases:
 				`SELECT e.t AS t, e.name AS name, e.sid AS sid, e.props AS props FROM ${table} e WHERE ${cond} AND e.kind = 'purchase' AND (e.src IS NULL OR e.src <> 'client') ` +
 				`ORDER BY e.t DESC, e.sid ${lim(o.purchases + 1)}`,
@@ -224,6 +233,7 @@ export const playerStats = defineQuery<PlayerStatsOptions, PlayerStatsResult>({
 				dev: strOrNull(r.dev),
 				art: str(r.art),
 				job: strOrNull(r.job),
+				recorded: num(r.recorded) === 1,
 			})),
 			sessionsTruncated: rows.sessions.length > o.sessions,
 			purchases: rows.purchases.slice(0, o.purchases).map((r) => {

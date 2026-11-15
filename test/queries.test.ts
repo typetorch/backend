@@ -702,6 +702,22 @@ describe("player stats (the Players page's player detail)", () => {
 		expect(one.series[0].start).toBe(new Date(NOW - 3_600_000).toISOString());
 	});
 
+	test("recorded: true on the sessions with recording chunks (in one join), false on the rest", async () => {
+		const recorded = [...new Set(fx.recordings.filter((r) => r.t >= NOW - 30 * DAY).map((r) => `${r.pid}|${r.sid}`))];
+		expect(recorded.length).toBeGreaterThan(0);
+		const [pid, sid] = (recorded[0] as string).split("|") as [string, string];
+		const r = await store.query("player-stats", {}, { pid });
+		const flagged = r.sessions.filter((s) => s.recorded).map((s) => s.sid);
+		expect(flagged).toEqual(recorded.filter((k) => k.startsWith(`${pid}|`)).map((k) => k.split("|")[1]));
+		expect(flagged).toContain(sid);
+		expect(r.sessions.some((s) => !s.recorded)).toBe(r.sessions.length > flagged.length);
+		// Nobody else's recordings: the payer has none.
+		const payerRecorded = fx.recordings.some((x) => x.pid === payer);
+		expect((await store.query("player-stats", {}, { pid: payer })).sessions.some((s) => s.recorded)).toBe(payerRecorded);
+		const sql = store.render("player-stats", {}, { pid }).statements.sessions;
+		expect(sql).toContain("LEFT JOIN rec ON rec.sid = s.sid");
+	});
+
 	test("bounds: the window is cut to 400 days; list limits mark truncation; bad options are refused", async () => {
 		const wide = await store.query("player-stats", { from: "2020-01-01" }, { pid: payer });
 		expect(wide.window.clamped).toBe(true);
