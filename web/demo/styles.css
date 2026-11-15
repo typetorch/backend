@@ -1,0 +1,6 @@
+/*
+ * The explorer's styles for the demo. Vite's root is web/demo, so Tailwind would only scan web/demo for class names and
+ * leave out every class the explorer (web/src) uses: point it at the explorer's sources too.
+ */
+@import "../src/index.css";
+@source "../src";

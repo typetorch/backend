@@ -14,3 +14,11 @@ dist/
 CHANGELOG.md
 *.log
 .scratch/
+
+# the public demo (web/demo): its build, the prepared data pack (never committed) and the deploy tool's state
+dist-demo/
+demo/public/
+demo/data/
+demo/deploy/node_modules/
+demo/deploy/.wrangler/
+demo/deploy/.cloudflare/

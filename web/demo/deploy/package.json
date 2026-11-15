@@ -1,0 +1,14 @@
+{
+	"name": "@typetorch/demo-deploy",
+	"private": true,
+	"type": "module",
+	"description": "Deploys web/dist-demo (the public demo of the TypeTorch explorer) as the Cloudflare Worker typetorch-demo on demo.typetorch.dev.",
+	"scripts": {
+		"deploy": "cf deploy",
+		"check": "cf deploy --dry-run"
+	},
+	"devDependencies": {
+		"cf": "1.0.0-beta.25",
+		"wrangler": "4.152.0"
+	}
+}
