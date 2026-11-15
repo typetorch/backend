@@ -33,6 +33,7 @@ is the same command.
 - [Audit log](#audit-log)
 - [Backups and restore](#backups-and-restore) ([Disk space](#disk-space))
 - [Move to another server](#move-to-another-server) (the export API, the migration job, the runbook; [to Basin and back](#move-analytics-to-basin-and-back))
+- [Several ingest servers (optional)](#several-ingest-servers-optional) (past one core of ingest: ingest nodes, a queue bucket, one DuckDB)
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
 - [The explorer](#the-explorer)
@@ -148,6 +149,9 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_MAX_BODY`, `TYPETORCH_MAX_INFLATE` | 2 MB, 16 MB | Ingest body caps (gzip, inflated). |
 | `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
 | `TYPETORCH_BUSY_BYTES`, `TYPETORCH_BUSY_REQUESTS` | 512 MB, `256` | [The busy 503](#limits-and-the-busy-503): ingest answers `503` + `Retry-After` while `raw/incoming` holds more than this many bytes, or more than this many ingest requests are in flight (`0` = off). Also on the Settings page. |
+| `TYPETORCH_ROLE` | `all` | [Several ingest servers](#several-ingest-servers-optional) (optional): `all` is one server with everything (no bucket); `main` also loads the ingest nodes' files from the queue bucket; `ingest` only takes game batches and writes them to the bucket. |
+| `TYPETORCH_QUEUE_BUCKET`, `TYPETORCH_QUEUE_ENDPOINT`, `TYPETORCH_QUEUE_ACCESS_KEY_ID`, `TYPETORCH_QUEUE_SECRET_ACCESS_KEY`, `TYPETORCH_QUEUE_PREFIX`, `TYPETORCH_QUEUE_REGION` | none, `incoming/`, none | The queue bucket (S3 API, e.g. R2: endpoint `https://<account id>.r2.cloudflarestorage.com`) for `main` and `ingest` (the first four required there); ignored with a warning when the role is `all`. The secret is never printed. `REGION` only for an S3 bucket outside `us-east-1` (R2: leave it). |
+| `TYPETORCH_MAIN_URL`, `TYPETORCH_INGEST_ROTATE_SECONDS` | none, `5` | Ingest nodes: the main server's address (the erased pids come from it) and the seconds between the Parquet files they upload (also at 64 MB). |
 | `TYPETORCH_MIGRATE_ROWS_PER_SECOND` | `20000` | The [migration job](#move-to-another-server)'s default rows per second (a `start` may name its own). |
 | `CLOUDFLARE_ACCOUNT_ID`, `BASIN_BUCKET`, `BASIN_SQL_TOKEN`, `BASIN_NAMESPACE` | unset, `typetorch` | Optional Basin SQL read settings (the `TT_BASIN_*` names work too): with them a [move to Basin](#move-analytics-to-basin-and-back) compares each day's row count in Basin. Never logged or returned. |
 | `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds per minute the fleet API lets in, and (counted on their own) the error logs. |
@@ -1048,6 +1052,91 @@ more. `erased`, `identities` and `fleet` are done as "not applicable".
 From Basin: two count queries, a histogram per big day, and about one page query per 10,000 events (250 recording chunks),
 each scanning its window from the cursor on: every row is scanned a few times. `rowsPerSecond` paces it. To Basin: Pipelines
 bills what it takes in; with read settings, the verify step adds two count queries per check (they read `t` only).
+
+## Several ingest servers (optional)
+
+Plans/35 C. **Most games never need this: one server (the default, `TYPETORCH_ROLE` unset) runs ingest, DuckDB, the fleet
+and the explorer together, and nothing here changes it.** With no role set the backend reads no bucket setting, starts no
+queue work and behaves exactly as before.
+
+**When you need it:** past what one core ingests. One backend takes about 10,000 events a second on one core
+([Load tests](#load-tests)); at the rates two live games showed (0.17-0.58 event rows per player-second) that is roughly
+17k-60k players online. Before that, [shed load or resize the machine](https://www.typetorch.dev/guides/emergency-scale-ups).
+Past a few hundred thousand players online, move analytics to [Basin](#cloudflare-basin-setup) instead.
+
+```
+Roblox servers ── events ──► load balancer / DNS ─► ingest node x N   (auth, limits, validate; raw file before the 202)
+      │            (backend.ingest)                        │ a Parquet file per table every 5 s, uploaded, then deleted locally
+      │                                                    ▼
+      │                                            queue bucket (S3 API, e.g. R2): <prefix>events/, recordings/, identities/
+      │                                                    │
+      └── heartbeats, errors, deploys ──► main server ◄────┘ each loader tick: list, download, load with its own rows, delete
+          (backend.url)                   fleet (SQLite), error logs, the explorer, the ONE DuckDB
+```
+
+- **Ingest nodes** (`TYPETORCH_ROLE=ingest`) serve only `POST /v1/ingest`, `POST /v1/identity`, `GET /v1/auth/check` (the
+  game key answers role `game`) and `/healthz`; anything else is a `404` saying "this is an ingest node; the explorer and the
+  fleet API are on the main server". The same validation, body caps, rate limits (`TYPETORCH_IP_PER_MINUTE`,
+  `TYPETORCH_JOB_PER_MINUTE`: **per node**, so each takes the full limit) and [busy 503](#limits-and-the-busy-503) (its
+  backlog: rows accepted and not yet in the bucket) as a server. An accepted batch is on the node's disk before the `202`.
+  Every `TYPETORCH_INGEST_ROTATE_SECONDS` (5, or at 64 MB) the raw files are closed and written as one Parquet file per table
+  (identity rows: NDJSON), uploaded to `<prefix><table>/<node>-<ms>-<n>.parquet`, and deleted only after the bucket
+  confirmed the upload. A crash, a full disk or a bucket outage leaves the files on the node; the next rotation (or start)
+  uploads them again under the same key. The node id is made once per data folder (`data/ingest/node-id`).
+- **Erasure on the nodes:** each node pulls the erased pids from the main server every minute (`GET
+  <TYPETORCH_MAIN_URL>/v1/admin/export/erased`, the admin token, no redirects followed) and drops their rows and identity
+  rows; the list is kept on disk, so a node whose main server is down keeps working on the last one. The main server filters
+  again at load, so a row a node took in the minute before it heard of an erasure never lands.
+- **The main server** (`TYPETORCH_ROLE=main`) is a normal server (it takes ingest too, from game servers still pointed at
+  it) whose loader also lists the bucket each tick, downloads up to 64 files / 256 MB, loads them **in the same transaction**
+  as its own raw files, upserts the identity files into the identity table, then deletes them from the bucket. The keys it
+  committed are remembered (`live.loaded_remote`, a week), so a file still in the bucket after a crash or a failed delete is
+  only deleted, never loaded twice; a row that still arrives twice is an exact duplicate, which the nightly export drops.
+  Its busy 503 counts the bucket backlog it has seen. A bucket it can't reach never stops its own ingest: the files wait,
+  the Backend stats page says so, and a `queue_bucket_down` backend alert (critical) is raised after a minute. A file it
+  can't load (not Parquet, a schema from another version) is skipped for 10 minutes with a `queue_file_bad` alert.
+- **Stats:** `GET /v1/admin/stats` on the main server gains `queue: { role, pendingFiles, pendingBytes, lastLoadAt, files,
+  errors, lastError, lastErrorAt, bucket, truncated, identities }` (only when the role isn't `all`); the explorer's
+  **Backend stats** page shows it. A node's numbers are in its `GET /healthz` with the admin token (`queue`, `ingest`).
+- **Not on a node:** no `live.duckdb`, no day files, no nightly jobs, no explorer, no fleet, no named API keys (only
+  `TYPETORCH_API_KEY` / `TYPETORCH_API_KEY_PREVIOUS` are accepted there). DuckDB only writes the Parquet files.
+- **Bun only:** the bucket client is Bun's built-in `S3Client` (no extra dependency); the Docker image runs Bun.
+
+### Setting it up
+
+1. **A bucket** with the S3 API, e.g. Cloudflare R2: create a bucket (`tt-queue`) and an API token with Object Read & Write
+   on it (its access key id and secret). No lifecycle rule is needed: the main server deletes what it loaded.
+2. **The main server**: your existing backend, plus `TYPETORCH_ROLE=main` and the four bucket settings. Redeploy it first.
+3. **The ingest nodes**: the same image, each with its own volume (`/data`; one node per data folder: a rolling deploy's
+   new container waits for the old one, as the main server does), and:
+
+   | Variable | Main | Ingest node |
+   |---|---|---|
+   | `TYPETORCH_ROLE` | `main` | `ingest` |
+   | `TYPETORCH_API_KEY`, `TYPETORCH_ADMIN_TOKEN` | as now | **the same values** as the main server (the node checks the game key and pulls the erased pids with the admin token) |
+   | `TYPETORCH_QUEUE_BUCKET`, `TYPETORCH_QUEUE_ENDPOINT`, `TYPETORCH_QUEUE_ACCESS_KEY_ID`, `TYPETORCH_QUEUE_SECRET_ACCESS_KEY` | required | required |
+   | `TYPETORCH_QUEUE_PREFIX` | optional (`incoming/`) | the same as the main server |
+   | `TYPETORCH_MAIN_URL` | - | required: the main server's address, e.g. `https://backend.example.com` |
+   | `TYPETORCH_INGEST_ROTATE_SECONDS` | - | optional (`5`) |
+   | `TYPETORCH_TRUST_PROXY`, `TYPETORCH_TRUSTED_PROXIES`, `TYPETORCH_CLOUDFLARE` | as now | as for the main server (the rate limits are per client address) |
+
+   `TYPETORCH_ROLE=main` or `ingest` without the bucket settings (or a node without `TYPETORCH_MAIN_URL`) refuses to start
+   and says which variable is missing; the values are never printed. Bucket settings on a server without a role are ignored
+   with a warning.
+4. **One address for the nodes**: a load balancer, or DNS round-robin (several A records), in front of them, e.g.
+   `https://ingest.example.com`. Nodes keep no shared state, so any request may go to any node.
+5. **Point the game at it** (CLI 0.19, framework 0.7.2): `typetorch backend setup --ingest https://ingest.example.com`. It
+   checks `/healthz` and the game key there, and writes `backend.ingest` into the signed record: game servers send events to
+   the ingest address and everything else to `backend.url` within a minute. `--ingest none` moves events back to the main
+   server; without the flag the record's ingest address is kept.
+6. Watch the main server's **Backend stats** page (the queue tiles) and each node's `/healthz` with the admin token.
+
+**On Coolify:** a node is a **Dockerfile** app on this repo (every variable reaches it; the compose file lists only the
+usual ones), with a persistent storage at `/data` and its own domain or a shared one behind your load balancer. Its health
+check is the same `GET /healthz`. The main server keeps its app; add the role and bucket variables to it (with **Docker
+Compose**, add a line per variable to `compose.yaml`'s `environment`, or switch it to the Dockerfile resource). To go back to
+one server: `typetorch backend setup --ingest none`, wait for the bucket to empty (the queue tiles), stop the nodes, remove
+`TYPETORCH_ROLE` and the bucket settings from the main server.
 
 ## The event bus
 
