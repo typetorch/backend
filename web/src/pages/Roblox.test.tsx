@@ -110,6 +110,8 @@ describe("Roblox page", () => {
 		expect(await screen.findByText("5 h 30 min")).toBeTruthy(); // 330 min of playtime
 		for (const label of ["Players", "New players", "Playtime", "Playtime per player"]) expect(screen.getByText(label)).toBeTruthy();
 		expect(screen.getByText("30 sessions in the last 1 hour, 3 still running.")).toBeTruthy();
+		// Explore opens the Session time page with the same filters.
+		expect(screen.getByRole("link", { name: "Explore session time" }).getAttribute("href")).toBe("/session-time?range=1h");
 	}, 60_000);
 
 	it("realtimeHours and windowLabel", () => {

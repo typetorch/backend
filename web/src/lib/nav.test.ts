@@ -61,10 +61,11 @@ describe("the nav config", () => {
 		expect(NAV_GROUPS.slice(1).every((g) => g.label)).toBe(true);
 	});
 
-	it("lists Roblox last under Players & gameplay, not under Observe & troubleshoot", () => {
+	it("lists Roblox last under Players & gameplay (Session time, its explore view, just before it), not under Observe & troubleshoot", () => {
 		const labels = (id: string) => NAV_GROUPS.find((g) => g.id === id)?.items.map((i) => i.label) ?? [];
 		expect(labels("players").at(-1)).toBe("Roblox");
-		expect(labels("players").at(-2)).toBe("Experiments");
+		expect(labels("players").at(-2)).toBe("Session time");
+		expect(labels("players").at(-3)).toBe("Experiments");
 		expect(labels("observe")).not.toContain("Roblox");
 		expect(findNavItem("/roblox")?.path).toBe("/roblox");
 	});
