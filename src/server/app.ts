@@ -170,6 +170,7 @@ import type { MapPositionsResult } from "../queries/maps.ts";
 import type { LiveEventLiftResult } from "../queries/live-event-lift.ts";
 import { GeoIpUpdater } from "./geoip.ts";
 import { IngestBusy } from "./busy.ts";
+import { MainQueue, s3Bucket, type QueueBucket, type QueueStats } from "./queue.ts";
 import { ExportApi } from "./export.ts";
 import { MigrateError, Migration, type StartBody } from "./migrate.ts";
 import { randomBytes } from "node:crypto";
@@ -194,6 +195,8 @@ export interface AppOptions {
 	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
 	/** The migration job's knobs (tests: small pages, no waits; server/migrate.ts). */
 	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries" | "basin">>;
+	/** Plans/35 C (TYPETORCH_ROLE=main): the queue bucket (default: Bun's S3Client on TYPETORCH_QUEUE_*), and how long it must fail before the alert. */
+	queue?: { bucket?: QueueBucket; downAfterMs?: number };
 }
 
 /**
@@ -245,6 +248,8 @@ export interface App {
 	readonly migration: Migration;
 	/** Plans/35 D: the busy 503's counters. */
 	readonly busy: IngestBusy;
+	/** Plans/35 C: the queue bucket's consumer (TYPETORCH_ROLE=main only). */
+	readonly queue?: MainQueue;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
 	/** The explorer's session store (tests make sessions directly, e.g. a viewer's without Roblox in the loop). */
@@ -350,6 +355,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			clock,
 			log,
 			hooks: { statement: (ms) => metrics.duckQuery(ms), loaded: (rows) => metrics.rowsLoaded(rows) },
+			...(config.role === "main" ? { remote: true } : {}),
 		});
 	// DuckDB first. Held by another process (a rolling deploy's previous container): start in handover instead of failing,
 	// and take it over once it lets go (see "Rolling deploys" below). Any other error stops the start as before.
@@ -410,7 +416,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		clock,
 		log,
 		keepDays: () => runtime.get("auditKeepDays"),
-		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, config.basinRead?.token, ...(migration?.secrets() ?? [])],
+		secrets: () => [config.adminToken, ...config.apiKeys, config.queue?.secretAccessKey, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, config.basinRead?.token, ...(migration?.secrets() ?? [])],
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	// Scheduled live events (live-events.ts): the schedule the owner signs with the CLI, and each event's lift report.
@@ -494,6 +500,52 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				log,
 			})
 		: undefined;
+	// Plans/35 C (TYPETORCH_ROLE=main only): the queue bucket ingest nodes write to. `all` never makes one.
+	const mainQueue =
+		config.role === "main" && config.queue
+			? new MainQueue({
+					bucket: options.queue?.bucket ?? s3Bucket(config.queue),
+					prefix: config.queue.prefix,
+					dir: join(config.dataDir, "raw", "remote"),
+					isErased: (pid) => warehouse?.isErased(pid) === true,
+					upsertIdentities: async (rows) => void (await identities.upsert(rows)),
+					onBucketDown: async ({ error, since }) => {
+						const message = `the queue bucket can't be reached (${error}): ingest nodes' files wait in it; this server goes on with its own ingest`;
+						if (fleet) await fleet.serverAlert({ level: "critical", code: "queue_bucket_down", message, branch: null, artifact: null, seq: null, details: { since } });
+						else log(`alert: ${message}`);
+					},
+					onBadFile: async ({ key, error }) => {
+						const message = `a queue file can't be loaded (${key}: ${error}); it is skipped for 10 minutes, then tried again`;
+						if (fleet) await fleet.serverAlert({ level: "warning", code: "queue_file_bad", message, branch: null, artifact: null, seq: null, details: { key } });
+					},
+					...(options.queue?.downAfterMs !== undefined ? { downAfterMs: options.queue.downAfterMs } : {}),
+					clock,
+					log,
+				})
+			: undefined;
+	/**
+	 * One loader tick. `all`: the raw files, as always. `main`: the bucket is listed and its files downloaded first (no
+	 * DuckDB lock held meanwhile), loaded with the raw files in one transaction, then deleted from the bucket. A bucket that
+	 * fails never stops the server's own rows.
+	 */
+	async function loadTick(w: Warehouse): Promise<{ files: number; rows: number }> {
+		if (!mainQueue) return w.load();
+		const { files: remote, done } = await mainQueue.fetch(await w.remoteCommitted());
+		let result: { files: number; rows: number; remoteKeys: string[] };
+		try {
+			result = await w.loadWithRemote(remote);
+		} catch (error) {
+			if (!remote.length) throw error;
+			// A queue file the warehouse can't take: it waits; the server's own raw files go in now.
+			mainQueue.failedLoad(remote, error);
+			const own = await w.load();
+			result = { ...own, remoteKeys: [] };
+		}
+		const loaded = remote.filter((f) => result.remoteKeys.includes(f.key));
+		await mainQueue.finish(loaded, done);
+		await w.forgetRemote();
+		return { files: result.files + loaded.length, rows: result.rows };
+	}
 	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
 	// Plans/34: what each game server declared (commands, streams, columns), its stream frames, the live map watch.
 	// Memory only; the remote-debug hub asks it whether a game.<name> command was declared.
@@ -609,7 +661,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const busy = new IngestBusy({
 		maxBytes: () => runtime.get("busyBytes"),
 		maxRequests: () => runtime.get("busyRequests"),
-		pendingBytes: () => warehouse?.raw.pendingBytes(),
+		pendingBytes: () => {
+			const raw = warehouse?.raw.pendingBytes();
+			// Plans/35 C, main: the bucket backlog it has seen counts too.
+			return raw === undefined || !mainQueue ? raw : raw + mainQueue.backlogBytes();
+		},
 		clock,
 	});
 	// Plans/35 A: the export API (this server as the old one) and the migration job (this server as the new one).
@@ -1908,6 +1964,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		} else if (analytics === "handover" || analytics === "failed") {
 			out.analytics = { state: analytics, waitingSeconds: Math.round((Date.now() - handover.since) / 1000), giveUpSeconds: config.handoverSeconds };
 		}
+		if (mainQueue) out.queue = { ...mainQueue.stats };
 		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier.configured ? { webhook: notifier.stats } : {}) };
 		// Plans/25: counters and what is held in memory (never an answer).
 		if (remoteDebug) out.remoteDebug = { ...remoteDebug.stats, ...remoteDebug.memory, ...(waker?.enabled ? { wake: waker.stats } : { wake: "off" }) };
@@ -3156,7 +3213,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (admin instanceof Response) return admin;
 				const window = parseStatsWindow(url.searchParams.get("window"));
 				if (!window) return json(400, { error: `window must be one of ${STATS_WINDOWS.join(", ")}` });
-				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName(), ingest: busy.view() });
+				const queue: { queue?: QueueStats } = mainQueue ? { queue: { ...mainQueue.stats } } : {};
+				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName(), ingest: busy.view(), ...queue });
 			}
 			// Plans/35 A: the export API (the admin token as a Bearer only) and the migration job.
 			if (path.startsWith("/v1/admin/export/")) {
@@ -3326,7 +3384,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			setInterval(() => {
 				if (loading) return;
 				loading = true;
-				w.load()
+				loadTick(w)
 					.catch((e) => log(`loader failed: ${(e as Error).message}`))
 					.finally(() => (loading = false));
 			}, config.loadSeconds * 1000),
@@ -3508,6 +3566,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		notify,
 		migration: migrator,
 		busy,
+		...(mainQueue ? { queue: mainQueue } : {}),
 		bus,
 		errors,
 		access,
@@ -3524,7 +3583,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		sessionCount: () => sessions.size,
 		sessions,
 		handle,
-		load: () => (warehouse ? warehouse.load() : Promise.resolve({ files: 0, rows: 0 })),
+		load: () => (warehouse ? loadTick(warehouse) : Promise.resolve({ files: 0, rows: 0 })),
 		nightly: () => (warehouse ? warehouse.nightly() : Promise.resolve({ days: [], pruned: 0, compacted: false })),
 		stop() {
 			stopped ??= stopNow();

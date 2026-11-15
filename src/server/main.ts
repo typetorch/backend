@@ -11,6 +11,7 @@
 import { runtimeName } from "../runtime.ts";
 import { startApp, type App } from "./app.ts";
 import { describeConfig, loadConfig } from "./config.ts";
+import { startIngestNode, type IngestNode } from "./ingest-node.ts";
 import { handleShutdown } from "./lifecycle.ts";
 
 async function main(): Promise<void> {
@@ -21,6 +22,16 @@ async function main(): Promise<void> {
 	const config = loadConfig();
 	for (const warning of config.warnings) console.warn(`[backend] ${warning}`);
 	const log = (line: string) => console.log(`[backend] ${line}`);
+	// Plans/35 C: an ingest node is its own small server (no DuckDB warehouse, no fleet, no explorer).
+	if (config.role === "ingest") {
+		let node: Promise<IngestNode> | undefined;
+		const lifecycle = handleShutdown({ stop: async () => (await node?.catch(() => undefined))?.stop(), log, exit: (code) => process.exit(code) });
+		node = startIngestNode(config, { log: (line) => console.log(`[ingest] ${line}`) });
+		const started = await node;
+		if (lifecycle.requested) return;
+		console.log(`[ingest] listening on ${config.host}:${started.port} (${runtimeName()}); node ${started.node || "(waiting for the data folder)"}; ${describeConfig(config)}`);
+		return;
+	}
 	// Signals are handled from the first moment (as PID 1 in a container an unhandled SIGTERM would be ignored): one that
 	// comes during the start stops the app as soon as it is up.
 	let starting: Promise<App> | undefined;

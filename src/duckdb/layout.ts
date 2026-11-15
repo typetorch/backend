@@ -60,6 +60,15 @@ export function storedColumns(table: "events" | "recordings"): string[] {
 	return [...fieldsOf(table).map((f) => f.name), ...SERVER_COLUMNS.map((c) => c.name)];
 }
 
+/** A stored column's DuckDB type (contract fields and rt). */
+export function storedType(kind: "events" | "recordings", column: string): string {
+	const field = fieldsOf(kind).find((f) => f.name === column);
+	if (field) return duckdbType(field.type);
+	const server = SERVER_COLUMNS.find((c) => c.name === column);
+	if (!server) throw new Error(`no stored column ${column}`);
+	return server.type;
+}
+
 /** `CREATE TABLE` for a stored table. */
 export function createTableSql(table: string, kind: "events" | "recordings"): string {
 	const cols = [...fieldsOf(kind).map((f) => `"${f.name}" ${duckdbType(f.type)}`), ...SERVER_COLUMNS.map((c) => `"${c.name}" ${c.type}`)];
