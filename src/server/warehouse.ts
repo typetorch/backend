@@ -11,7 +11,7 @@ import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { createGunzip, createGzip } from "node:zlib";
-import { createTableSql, dataLayout, dayFiles, dayString, fieldsOf, pathLit, readJsonColumns, storedColumns, tableExpression, type DataLayout } from "../duckdb/layout.ts";
+import { createTableSql, dataLayout, dayFiles, dayString, fieldsOf, pathLit, readJsonColumns, storedColumns, storedType, tableExpression, type DataLayout } from "../duckdb/layout.ts";
 import { DataFolderLocked, isLockConflict } from "../duckdb/lock.ts";
 import { runQuery } from "../queries/index.ts";
 import { PROP_KEYS } from "../schema.ts";
@@ -20,6 +20,7 @@ import { DAY_MS, duckdb, lit } from "../sql/dialect.ts";
 import type { Filters } from "../sql/filters.ts";
 import { DuckDbStore, readRows, type TableResolver } from "../store/duckdb.ts";
 import { RawLog, type ReadyFile } from "./raw.ts";
+import type { RemoteFile } from "./queue.ts";
 
 /** The pooled store of a logical query: each statement's time goes to the metrics hook. */
 class MeteredStore extends DuckDbStore {
@@ -113,6 +114,11 @@ export interface WarehouseOptions {
 	log?: (line: string) => void;
 	/** Server metrics (server/metrics.ts): every statement on a read connection with its time, every row the loader puts in. */
 	hooks?: { statement?(ms: number): void; loaded?(rows: number): void };
+	/**
+	 * Plans/35 C, TYPETORCH_ROLE=main: the loader also takes queue bucket files (loadWithRemote), and live.loaded_remote
+	 * remembers the keys it committed until the bucket let go of them. Off (`all`): none of it exists.
+	 */
+	remote?: boolean;
 }
 
 export interface WarehouseStats {
@@ -214,6 +220,7 @@ export class Warehouse {
 		await this.writer.run("CREATE TABLE IF NOT EXISTS live.loaded_files (name VARCHAR PRIMARY KEY, loaded_at BIGINT)");
 		await this.writer.run("CREATE TABLE IF NOT EXISTS live.erased (pid VARCHAR PRIMARY KEY, erased_at BIGINT, rewritten BOOLEAN)");
 		await this.writer.run("CREATE TABLE IF NOT EXISTS live.exports (target VARCHAR PRIMARY KEY, tmp VARCHAR)");
+		if (this.options.remote) await this.writer.run("CREATE TABLE IF NOT EXISTS live.loaded_remote (key VARCHAR PRIMARY KEY, loaded_at BIGINT)");
 		this.erased = new Set((await readRows(this.writer, "SELECT pid FROM live.erased")).map((r) => String(r.pid)));
 		this.stats.erasedPids = this.erased.size;
 		// Every read connection is free here (open, or compaction under the write lock).
@@ -247,43 +254,83 @@ export class Warehouse {
 	/** Rotates the raw files and loads every ready file into the live tables. */
 	load(maxBytes = 256 * 1024 * 1024): Promise<{ files: number; rows: number }> {
 		return this.jobs.run(async () => {
-			const started = performance.now();
-			await this.raw.rotate();
-			let files = 0;
-			let rows = 0;
-			const ready = this.raw.ready();
-			for (const table of TABLES) {
-				let batch: ReadyFile[] = [];
-				let bytes = 0;
-				const flush = async () => {
-					if (!batch.length) return;
-					rows += await this.loadBatch(table, batch);
-					files += batch.length;
-					batch = [];
-					bytes = 0;
-				};
-				for (const file of ready.filter((f) => f.table === table)) {
-					if (file.bytes === 0) {
-						unlinkSync(file.path);
-						continue;
-					}
-					batch.push(file);
-					bytes += file.bytes;
-					if (bytes >= maxBytes) await flush();
-				}
-				await flush();
-			}
-			this.stats.loadedFiles += files;
-			this.stats.loadedRows += rows;
-			this.options.hooks?.loaded?.(rows);
-			if (rows) this.liveVersion++;
-			this.stats.lastLoadMs = Math.round(performance.now() - started);
-			this.stats.lastLoadAt = this.clock();
+			const { files, rows } = await this.loadNow(maxBytes, []);
 			return { files, rows };
 		});
 	}
 
-	private async loadBatch(table: "events" | "recordings", files: ReadyFile[]): Promise<number> {
+	/**
+	 * Plans/35 C (main role): `load`, plus queue bucket files (Parquet, the stored columns) in the same transaction as the
+	 * last batch of the table's own raw files. Their keys go to live.loaded_remote in that transaction, so a key committed
+	 * once is never loaded again (only deleted from the bucket; see forgetRemote).
+	 */
+	loadWithRemote(remote: readonly RemoteFile[], maxBytes = 256 * 1024 * 1024): Promise<{ files: number; rows: number; remoteKeys: string[] }> {
+		if (!this.options.remote) throw new Error("this warehouse doesn't take queue files (TYPETORCH_ROLE is not main)");
+		return this.jobs.run(() => this.loadNow(maxBytes, remote));
+	}
+
+	/** Which of these queue keys were committed already (a crash or a failed delete left them in the bucket). */
+	remoteCommitted(keys: readonly string[]): Promise<Set<string>> {
+		if (!this.options.remote || !keys.length) return Promise.resolve(new Set());
+		return this.jobs.run(async () => {
+			const found = new Set<string>();
+			for (let i = 0; i < keys.length; i += 500) {
+				const rows = await readRows(this.writer, `SELECT key FROM live.loaded_remote WHERE key IN (${keys.slice(i, i + 500).map(lit).join(", ")})`);
+				for (const r of rows) found.add(String(r.key));
+			}
+			return found;
+		});
+	}
+
+	/**
+	 * Forgets committed keys after 2 days. Until then a key that shows up again (an ingest node that crashed after its
+	 * upload sends the same file again) is only deleted; after that an exact duplicate would still drop at export.
+	 */
+	forgetRemote(): Promise<void> {
+		if (!this.options.remote) return Promise.resolve();
+		return this.jobs.run(async () => void (await this.writer.run(`DELETE FROM live.loaded_remote WHERE loaded_at < ${this.clock() - 2 * DAY_MS}`)));
+	}
+
+	private async loadNow(maxBytes: number, remote: readonly RemoteFile[]): Promise<{ files: number; rows: number; remoteKeys: string[] }> {
+		const started = performance.now();
+		await this.raw.rotate();
+		let files = 0;
+		let rows = 0;
+		const remoteKeys: string[] = [];
+		const ready = this.raw.ready();
+		for (const table of TABLES) {
+			let batch: ReadyFile[] = [];
+			let bytes = 0;
+			const flush = async (withRemote: readonly RemoteFile[] = []) => {
+				if (!batch.length && !withRemote.length) return;
+				rows += await this.loadBatch(table, batch, withRemote);
+				files += batch.length;
+				remoteKeys.push(...withRemote.map((f) => f.key));
+				batch = [];
+				bytes = 0;
+			};
+			for (const file of ready.filter((f) => f.table === table)) {
+				if (file.bytes === 0) {
+					unlinkSync(file.path);
+					continue;
+				}
+				batch.push(file);
+				bytes += file.bytes;
+				if (bytes >= maxBytes) await flush();
+			}
+			await flush(remote.filter((f) => f.table === table));
+		}
+		this.stats.loadedFiles += files;
+		this.stats.loadedRows += rows;
+		this.options.hooks?.loaded?.(rows);
+		if (rows) this.liveVersion++;
+		this.stats.lastLoadMs = Math.round(performance.now() - started);
+		this.stats.lastLoadAt = this.clock();
+		return { files, rows, remoteKeys };
+	}
+
+	/** One transaction: raw files (NDJSON) and, on a main server, queue files (Parquet); erased players' rows stay out. */
+	private async loadBatch(table: "events" | "recordings", files: ReadyFile[], remote: readonly RemoteFile[] = []): Promise<number> {
 		const cols = storedColumns(table)
 			.map((c) => `"${c}"`)
 			.join(", ");
@@ -291,17 +338,33 @@ export class Warehouse {
 		await this.writer.run("BEGIN TRANSACTION");
 		let rows = 0;
 		try {
-			const result = await this.writer.run(
-				`INSERT INTO live.${table} (${cols}) SELECT ${cols} FROM read_json([${list}], format = 'newline_delimited', columns = ${readJsonColumns(table)}) r ` +
-					`WHERE r.pid IS NULL OR NOT EXISTS (SELECT 1 FROM live.erased x WHERE x.pid = r.pid)`,
-			);
-			rows = result.rowsChanged;
-			await this.writer.run(`INSERT INTO live.loaded_files VALUES ${files.map((f) => `(${lit(f.name)}, ${this.clock()})`).join(", ")}`);
+			if (files.length) {
+				const result = await this.writer.run(
+					`INSERT INTO live.${table} (${cols}) SELECT ${cols} FROM read_json([${list}], format = 'newline_delimited', columns = ${readJsonColumns(table)}) r ` +
+						`WHERE r.pid IS NULL OR NOT EXISTS (SELECT 1 FROM live.erased x WHERE x.pid = r.pid)`,
+				);
+				rows = result.rowsChanged;
+			}
+			if (remote.length) {
+				// Plans/35 C: an ingest node's Parquet files hold the same stored columns (with rt); cast, so a file written
+				// with a narrower type still lands, and filter erased players again (the node's list may be a minute old).
+				const casts = storedColumns(table)
+					.map((c) => `CAST(r."${c}" AS ${storedType(table, c)}) AS "${c}"`)
+					.join(", ");
+				const result = await this.writer.run(
+					`INSERT INTO live.${table} (${cols}) SELECT ${casts} FROM read_parquet([${remote.map((f) => pathLit(f.path)).join(", ")}]) r ` +
+						`WHERE r.pid IS NULL OR NOT EXISTS (SELECT 1 FROM live.erased x WHERE x.pid = r.pid)`,
+				);
+				rows += result.rowsChanged;
+				await this.writer.run(`INSERT OR REPLACE INTO live.loaded_remote VALUES ${remote.map((f) => `(${lit(f.key)}, ${this.clock()})`).join(", ")}`);
+			}
+			if (files.length) await this.writer.run(`INSERT INTO live.loaded_files VALUES ${files.map((f) => `(${lit(f.name)}, ${this.clock()})`).join(", ")}`);
 			await this.writer.run("COMMIT");
 		} catch (error) {
 			await this.writer.run("ROLLBACK").catch(() => {});
 			throw error;
 		}
+		if (!files.length) return rows;
 		await this.archive(files);
 		await this.writer.run(`DELETE FROM live.loaded_files WHERE name IN (${files.map((f) => lit(f.name)).join(", ")})`);
 		return rows;
@@ -494,7 +557,7 @@ export class Warehouse {
 			rmSync(next, { force: true });
 			rmSync(`${next}.wal`, { force: true });
 			await this.writer.run(`ATTACH ${pathLit(next)} AS nxt`);
-			for (const table of ["events", "recordings", "loaded_files", "erased", "exports"]) {
+			for (const table of ["events", "recordings", "loaded_files", "erased", "exports", ...(this.options.remote ? ["loaded_remote"] : [])]) {
 				await this.writer.run(`CREATE TABLE nxt.${table} AS SELECT * FROM live.${table}`);
 			}
 			await this.writer.run("DETACH nxt");

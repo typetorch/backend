@@ -153,6 +153,20 @@ describe("Backend stats page", () => {
 		expect(screen.getByText("Ingest busy (503)")).toBeTruthy();
 	});
 
+	it("shows the ingest nodes' queue only on a main server", async () => {
+		mount();
+		await screen.findByTestId("stats-tiles");
+		expect(screen.queryByTestId("queue-tiles")).toBeNull();
+		cleanup();
+		mount({ ...view, queue: { role: "main", pendingFiles: 12, pendingBytes: 3 * 1024 * 1024, lastLoadAt: NOW - 5000, files: 340, errors: 2, lastError: "list: ServiceUnavailable", lastErrorAt: NOW - 60_000, bucket: "down", truncated: false, identities: 77 } });
+		const tiles = await screen.findByTestId("queue-tiles");
+		expect(within(tiles).getByText("Down")).toBeTruthy();
+		expect(within(tiles).getByText("12 files")).toBeTruthy();
+		expect(within(tiles).getByText("340")).toBeTruthy();
+		expect(within(tiles).getByText("list: ServiceUnavailable")).toBeTruthy();
+		expect(within(tiles).getByText("77 identity rows")).toBeTruthy();
+	});
+
 	it("shows the server's error when the stats can't load", async () => {
 		vi.spyOn(api, "backendStats").mockRejectedValue(new ApiError(403, "read-only access: this needs the admin token or an owner's session", "/v1/admin/stats"));
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

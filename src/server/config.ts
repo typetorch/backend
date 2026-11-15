@@ -20,6 +20,28 @@ import { parseIpRules, type IpRule } from "./ipfilter.ts";
 export type ServerPart = "analytics" | "fleet";
 
 /**
+ * Plans/35 C: what this process is. `all` (the default) is the one server most games run: ingest, DuckDB, the fleet and
+ * the explorer together, no bucket. `main` is `all` plus loading the files ingest nodes put in the queue bucket; `ingest`
+ * only takes game batches and writes them to the bucket.
+ */
+export type ServerRole = "all" | "main" | "ingest";
+
+/** The queue bucket (S3 API, e.g. R2) between ingest nodes and the main server. The secret is never printed. */
+export interface QueueConfig {
+	bucket: string;
+	endpoint: string;
+	accessKeyId: string;
+	secretAccessKey: string;
+	/** Key prefix, "" or ending in "/" (default "incoming/"). */
+	prefix: string;
+	/** TYPETORCH_QUEUE_REGION (optional; S3 needs the bucket's region, R2 takes "auto"). */
+	region?: string;
+}
+
+/** The queue settings (names only), for the role checks and the "ignored" warning. */
+export const QUEUE_ENV = ["TYPETORCH_QUEUE_BUCKET", "TYPETORCH_QUEUE_ENDPOINT", "TYPETORCH_QUEUE_ACCESS_KEY_ID", "TYPETORCH_QUEUE_SECRET_ACCESS_KEY", "TYPETORCH_QUEUE_PREFIX", "TYPETORCH_QUEUE_REGION"] as const;
+
+/**
  * Cloudflare's published edge ranges (https://www.cloudflare.com/ips/), for TYPETORCH_CLOUDFLARE=on;
  * TYPETORCH_CLOUDFLARE_IPS replaces the list. A range missing here only means that edge's address is taken as the client.
  */
@@ -59,6 +81,14 @@ export type GeoIpConfig = { mode: "off" } | { mode: "dbip"; dir: string } | { mo
 export const MIN_SECRET_LENGTH = 32;
 
 export interface ServerConfig {
+	/** Plans/35 C: TYPETORCH_ROLE, `all` unless set (one server, no bucket). */
+	role: ServerRole;
+	/** The queue bucket: set for `main` and `ingest`, never for `all`. */
+	queue?: QueueConfig;
+	/** Ingest nodes: seconds between Parquet files (TYPETORCH_INGEST_ROTATE_SECONDS, default 5; also at 64 MB). */
+	ingestRotateSeconds: number;
+	/** Ingest nodes: the main server's origin (TYPETORCH_MAIN_URL), where the erased pids are pulled from. */
+	mainUrl?: string;
 	dataDir: string;
 	host: string;
 	port: number;
@@ -410,6 +440,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	);
 	for (const p of parts) if (p !== "analytics" && p !== "fleet") throw new Error('TYPETORCH_PARTS lists "analytics" and/or "fleet"');
 	if (parts.size === 0) throw new Error("TYPETORCH_PARTS is empty");
+	const { role, queue, mainUrl } = roleFromEnv(env, warnings);
+	if (role === "main" && !parts.has("analytics")) throw new Error("TYPETORCH_ROLE=main loads the ingest nodes' files into DuckDB: it needs the analytics part (TYPETORCH_PARTS unset, or analytics,fleet)");
 	const universe = env.TYPETORCH_UNIVERSE_ID;
 	if (env.TYPETORCH_ALERT_WEBHOOK_URL && !isHttpsUrl(env.TYPETORCH_ALERT_WEBHOOK_URL)) throw new Error("TYPETORCH_ALERT_WEBHOOK_URL must be an https:// URL");
 	const format = env.TYPETORCH_ALERT_WEBHOOK_FORMAT;
@@ -527,6 +559,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	else geoip = { mode: "file", city: resolve(geoRaw), ...(env.TYPETORCH_GEOIP_ASN ? { asn: resolve(env.TYPETORCH_GEOIP_ASN) } : {}) };
 
 	const config: ServerConfig = {
+		role,
+		ingestRotateSeconds: num(env, "TYPETORCH_INGEST_ROTATE_SECONDS", 5, 1, 300),
 		dataDir,
 		host,
 		port: num(env, "PORT", 8787, 0, 65535),
@@ -603,6 +637,11 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	if (publicUrl) config.publicUrl = publicUrl;
 	if (centralLogin) config.centralLogin = centralLogin;
 	if (webDir) config.webDir = webDir;
+	if (queue) {
+		if (apiKeys.includes(queue.secretAccessKey) || queue.secretAccessKey === adminToken) throw new Error("TYPETORCH_QUEUE_SECRET_ACCESS_KEY must be the bucket's own secret, not TYPETORCH_API_KEY or TYPETORCH_ADMIN_TOKEN");
+		config.queue = queue;
+	}
+	if (mainUrl) config.mainUrl = mainUrl;
 	if (env.ROBLOX_WEBHOOK_SECRET) config.webhookSecret = env.ROBLOX_WEBHOOK_SECRET;
 	if (env.OPENCLOUD_API_KEY) config.openCloudKey = env.OPENCLOUD_API_KEY;
 	const notifyApiKey = env.OPENCLOUD_NOTIFY_KEY || env.OPENCLOUD_API_KEY;
@@ -640,6 +679,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 export function describeConfig(config: ServerConfig): string {
 	const yes = (v: unknown) => (v ? "set" : "not set");
 	return [
+		// Plans/35 C: only named when it isn't the default (one server), so a plain server's startup line is unchanged.
+		...(config.role !== "all" ? [`role=${config.role}`, `queue=${config.queue ? `bucket set, prefix ${JSON.stringify(config.queue.prefix)}` : "not set"}`, ...(config.role === "ingest" ? [`main url=${config.mainUrl ?? "not set"}`, `rotate=${config.ingestRotateSeconds} s`] : [])] : []),
 		`parts=${[...config.parts].join("+")}`,
 		`data=${config.dataDir}`,
 		`api keys=${config.apiKeys.length}`,
@@ -663,6 +704,47 @@ export function describeConfig(config: ServerConfig): string {
 		`backups=${config.backupHours ? `every ${config.backupHours} h, keep ${config.backupKeep}` : "manual only"}`,
 		`disk warning=${config.diskWarnFreePercent ? `under ${config.diskWarnFreePercent}% free (critical under ${config.diskCriticalFreePercent}%)` : "off"}`,
 	].join(", ");
+}
+
+/**
+ * TYPETORCH_ROLE and what it needs (plans/35 C). `all` (unset) reads no queue setting: any that is set only gets a
+ * warning that it is ignored. `main` and `ingest` need the four bucket settings; `ingest` also TYPETORCH_MAIN_URL.
+ * Errors and warnings name variables, never values.
+ */
+function roleFromEnv(env: Record<string, string | undefined>, warnings: string[]): { role: ServerRole; queue?: QueueConfig; mainUrl?: string } {
+	const raw = (env.TYPETORCH_ROLE ?? "all").trim().toLowerCase();
+	if (raw !== "all" && raw !== "main" && raw !== "ingest") throw new Error("TYPETORCH_ROLE is all (the default: one server), main or ingest");
+	const role = raw as ServerRole;
+	const set = QUEUE_ENV.filter((name) => env[name] !== undefined && env[name] !== "");
+	if (role === "all") {
+		const ignored = [...set, ...(env.TYPETORCH_MAIN_URL ? ["TYPETORCH_MAIN_URL"] : []), ...(env.TYPETORCH_INGEST_ROTATE_SECONDS ? ["TYPETORCH_INGEST_ROTATE_SECONDS"] : [])];
+		if (ignored.length) warnings.push(`${ignored.join(", ")} ${ignored.length === 1 ? "is" : "are"} ignored: TYPETORCH_ROLE is all (one server, no queue bucket); set TYPETORCH_ROLE=main or ingest to use several ingest servers`);
+		return { role };
+	}
+	const missing = (["TYPETORCH_QUEUE_BUCKET", "TYPETORCH_QUEUE_ENDPOINT", "TYPETORCH_QUEUE_ACCESS_KEY_ID", "TYPETORCH_QUEUE_SECRET_ACCESS_KEY"] as const).filter((name) => !env[name]);
+	if (missing.length) throw new Error(`TYPETORCH_ROLE=${role} needs the queue bucket: set ${missing.join(", ")} (README "Several ingest servers")`);
+	const bucket = env.TYPETORCH_QUEUE_BUCKET as string;
+	if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error("TYPETORCH_QUEUE_BUCKET must be a bucket name (3-63 lowercase letters, digits, dots and dashes)");
+	const endpoint = originOf(env.TYPETORCH_QUEUE_ENDPOINT as string);
+	if (!endpoint) throw new Error("TYPETORCH_QUEUE_ENDPOINT must be an origin: https://host[:port] (plain http only for localhost / 127.0.0.1), no path, e.g. https://<account id>.r2.cloudflarestorage.com");
+	const accessKeyId = env.TYPETORCH_QUEUE_ACCESS_KEY_ID as string;
+	const secretAccessKey = env.TYPETORCH_QUEUE_SECRET_ACCESS_KEY as string;
+	if (!/^[\x21-\x7e]{4,256}$/.test(accessKeyId)) throw new Error("TYPETORCH_QUEUE_ACCESS_KEY_ID must be 4-256 printable characters, no spaces");
+	if (!/^[\x21-\x7e]{8,512}$/.test(secretAccessKey)) throw new Error("TYPETORCH_QUEUE_SECRET_ACCESS_KEY must be 8-512 printable characters, no spaces");
+	const prefix = env.TYPETORCH_QUEUE_PREFIX ?? "incoming/";
+	if (prefix !== "" && (prefix.length > 200 || !/^([A-Za-z0-9_.-]+\/)+$/.test(prefix) || prefix.split("/").some((part) => part === "." || part === ".."))) {
+		throw new Error('TYPETORCH_QUEUE_PREFIX must be empty or folder names ending in "/" (letters, digits, _ . -), e.g. incoming/');
+	}
+	const region = env.TYPETORCH_QUEUE_REGION;
+	if (region !== undefined && region !== "" && !/^[a-z0-9-]{1,32}$/.test(region)) throw new Error("TYPETORCH_QUEUE_REGION must be a region name, e.g. auto or us-east-1");
+	const queue: QueueConfig = { bucket, endpoint, accessKeyId, secretAccessKey, prefix, ...(region ? { region } : {}) };
+	let mainUrl: string | undefined;
+	if (role === "ingest") {
+		if (!env.TYPETORCH_MAIN_URL) throw new Error("TYPETORCH_ROLE=ingest needs TYPETORCH_MAIN_URL: the main server's address (the erased pids are pulled from it)");
+		mainUrl = originOf(env.TYPETORCH_MAIN_URL.replace(/\/+$/, ""));
+		if (!mainUrl) throw new Error("TYPETORCH_MAIN_URL must be an origin: https://host[:port] (plain http only for localhost / 127.0.0.1), no path");
+	} else if (env.TYPETORCH_MAIN_URL) warnings.push("TYPETORCH_MAIN_URL is ignored: only ingest nodes use it");
+	return { role, queue, ...(mainUrl ? { mainUrl } : {}) };
 }
 
 /** TYPETORCH_ERROR_DROP_RULES: `["message contains \"mesh\"", ...]` or `[{ "id": "mesh", "expr": "...", "on": true }]`. Bad -> none, and a warning. */

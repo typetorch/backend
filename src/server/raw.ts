@@ -9,6 +9,8 @@ import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 
 export type RawTable = "events" | "recordings";
+/** Plans/35 C: an ingest node also keeps the identity rows of its batches as raw files until they are in the bucket. */
+export type SpoolTable = RawTable | "identities";
 
 interface OpenFile {
 	path: string;
@@ -18,8 +20,8 @@ interface OpenFile {
 	dirty: boolean;
 }
 
-export interface ReadyFile {
-	table: RawTable;
+export interface ReadyFile<T extends string = RawTable> {
+	table: T;
 	path: string;
 	name: string;
 	/** When the file was started (ms): the oldest data in it. */
@@ -28,6 +30,7 @@ export interface ReadyFile {
 }
 
 const FILE = /^(events|recordings)-(\d+)-(\d+)\.ndjson(\.open)?$/;
+const SPOOL_FILE = /^(events|recordings|identities)-(\d+)-(\d+)\.ndjson(\.open)?$/;
 
 /** An append after close(): the server is stopping (the request answers 503; the sender retries). */
 export class RawLogClosed extends Error {
@@ -37,8 +40,8 @@ export class RawLogClosed extends Error {
 	}
 }
 
-export class RawLog {
-	private files = new Map<RawTable, OpenFile>();
+export class RawLog<T extends string = RawTable> {
+	private files = new Map<T, OpenFile>();
 	private chain: Promise<unknown> = Promise.resolve();
 	private counter = 0;
 	private syncTimer: ReturnType<typeof setInterval> | undefined;
@@ -50,6 +53,8 @@ export class RawLog {
 		readonly dir: string,
 		private readonly fsyncMs: number,
 		private readonly clock: () => number = Date.now,
+		/** Plans/35 C: an ingest node's log also takes `identities` (the default is the server's: events, recordings). */
+		private readonly pattern: RegExp = FILE,
 	) {
 		mkdirSync(dir, { recursive: true });
 		// Files left open by a previous run hold accepted rows: make them ready.
@@ -72,7 +77,7 @@ export class RawLog {
 	 * RawLogClosed: a file opened then would stay ".open" until a later restart, since the next server may already own
 	 * the folder.
 	 */
-	append(table: RawTable, text: string): Promise<void> {
+	append(table: T, text: string): Promise<void> {
 		return this.serial(async () => {
 			if (this.closed) throw new RawLogClosed();
 			let file = this.files.get(table);
@@ -117,13 +122,13 @@ export class RawLog {
 	}
 
 	/** Ready files, oldest first. */
-	ready(): ReadyFile[] {
-		const out: ReadyFile[] = [];
+	ready(): ReadyFile<T>[] {
+		const out: ReadyFile<T>[] = [];
 		for (const name of readdirSync(this.dir)) {
-			const m = FILE.exec(name);
+			const m = this.pattern.exec(name);
 			if (!m || m[4]) continue;
 			const path = join(this.dir, name);
-			out.push({ table: m[1] as RawTable, path, name, started: Number(m[2]), bytes: statSync(path).size });
+			out.push({ table: m[1] as T, path, name, started: Number(m[2]), bytes: statSync(path).size });
 		}
 		return out.sort((a, b) => a.started - b.started || a.name.localeCompare(b.name));
 	}
@@ -143,10 +148,22 @@ export class RawLog {
 		return bytes;
 	}
 
+	/** Bytes in the open files only (an ingest node rotates early past 64 MB). */
+	openBytes(): number {
+		let bytes = 0;
+		for (const file of this.files.values()) bytes += file.bytes;
+		return bytes;
+	}
+
 	/** Syncs and closes the open files, makes them ready for the loader (this run's or the next one's), refuses appends. */
 	async close(): Promise<void> {
 		this.closed = true;
 		if (this.syncTimer) clearInterval(this.syncTimer);
 		await this.rotate();
 	}
+}
+
+/** The raw log of an ingest node: events, recordings and identities (plans/35 C). */
+export function spoolLog(dir: string, fsyncMs: number, clock: () => number = Date.now): RawLog<SpoolTable> {
+	return new RawLog<SpoolTable>(dir, fsyncMs, clock, SPOOL_FILE);
 }
