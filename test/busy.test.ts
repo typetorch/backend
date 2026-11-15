@@ -167,12 +167,16 @@ describe("the export API's door", () => {
 		expect(empty.headers.get("x-typetorch-last-page")).toBe("1");
 	});
 
-	test("POST /v1/admin/migrate: Basin directions answer 501; bad bodies 400; nothing to pause is 409; the token is never echoed", async () => {
+	test("POST /v1/admin/migrate: bad bodies 400 (Basin directions too); nothing to pause or resolve is 409; the token is never echoed", async () => {
 		const call = (body: unknown) => h.call("/v1/admin/migrate", { method: "POST", ...json(body), headers: { ...bearer(ADMIN), "content-type": "application/json" } });
 		const basin = await call({ action: "start", from: { kind: "basin", accountId: "a", bucket: "b", token: "t".repeat(40), namespace: "typetorch" } });
-		expect(basin.status).toBe(501);
-		expect(await asJson(basin)).toEqual({ error: "not built yet" });
-		expect((await call({ action: "start", to: { kind: "basin", events: "https://x.ingest.cloudflare.com", recordings: "https://y", token: "t".repeat(40) } })).status).toBe(501);
+		expect(basin.status).toBe(400);
+		expect(JSON.stringify(await asJson(basin))).not.toContain("t".repeat(40));
+		expect((await call({ action: "start", from: { kind: "basin", accountId: "0".repeat(32), bucket: "typetorch-analytics", token: "t".repeat(40), namespace: "bad-name" } })).status).toBe(400);
+		expect((await call({ action: "start", to: { kind: "basin", events: "http://x.ingest.cloudflare.com", recordings: "https://y", token: "t".repeat(40) } })).status).toBe(400);
+		expect((await call({ action: "start", to: { kind: "basin", events: "https://x.ingest.cloudflare.com", recordings: "https://y", token: "short" } })).status).toBe(400);
+		expect((await call({ action: "start", from: { kind: "backend", url: "https://old.example.com", token: ADMIN }, to: { kind: "basin" } })).status).toBe(400);
+		expect((await call({ action: "resolve", page: "events:2026-10-09:0:0", choice: "skip" })).status).toBe(409);
 		expect((await call({ action: "start", from: { kind: "backend", url: "http://old.example.com", token: ADMIN } })).status).toBe(400);
 		expect((await call({ action: "start", from: { kind: "backend", url: "https://old.example.com", token: "short" } })).status).toBe(400);
 		expect((await call({ action: "pause" })).status).toBe(409);

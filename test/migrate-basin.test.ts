@@ -100,6 +100,17 @@ afterAll(() => {
 	for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
+test("Basin read settings from the env (either name set); malformed ones are a warning, never echoed", () => {
+	const base = { TYPETORCH_API_KEY: API, TYPETORCH_ADMIN_TOKEN: ADMIN, TYPETORCH_DATA_DIR: fresh(), TYPETORCH_CENTRAL_LOGIN: "off" };
+	expect(loadConfig([], { ...base, CLOUDFLARE_ACCOUNT_ID: BASIN_ACCOUNT, BASIN_BUCKET, BASIN_SQL_TOKEN: SQL_TOKEN }).basinRead).toEqual({ accountId: BASIN_ACCOUNT, bucket: BASIN_BUCKET, token: SQL_TOKEN, namespace: "typetorch" });
+	expect(loadConfig([], { ...base, CLOUDFLARE_ACCOUNT_ID: BASIN_ACCOUNT, TT_BASIN_BUCKET: BASIN_BUCKET, TT_BASIN_SQL_TOKEN: SQL_TOKEN, TT_BASIN_NAMESPACE: "game_a" }).basinRead?.namespace).toBe("game_a");
+	expect(loadConfig([], base).basinRead).toBeUndefined();
+	const bad = loadConfig([], { ...base, CLOUDFLARE_ACCOUNT_ID: BASIN_ACCOUNT, BASIN_SQL_TOKEN: SQL_TOKEN });
+	expect(bad.basinRead).toBeUndefined();
+	expect(bad.warnings.join("\n")).toContain("BASIN_BUCKET");
+	expect(bad.warnings.join("\n")).not.toContain(SQL_TOKEN);
+});
+
 test("cutWindows: a contiguous partition, a big bucket on its own", () => {
 	const h = 3_600_000;
 	expect(cutWindows([], 0, 24 * h, 100)).toEqual([[0, 24 * h]]);
