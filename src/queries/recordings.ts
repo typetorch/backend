@@ -1091,7 +1091,7 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 		const chunkRows = await run({
 				chunks:
 					`SELECT r.sid AS sid, r.pid AS pid, r.job AS job, r.art AS art, r.chunk AS chunk, r.codec AS codec, r.data AS data, r.n AS n, r.t AS t ` +
-					`FROM ${recTable(ctx, f)} r WHERE r.t >= ${int(f.from)} AND r.t < ${int(f.to)} AND r.sid = ${lit(o.sid)} ORDER BY r.chunk ${lim(10_000)}`,
+					`FROM ${recTable(ctx, f)} r WHERE r.t >= ${int(f.from)} AND r.t < ${int(f.to)} AND r.sid = ${lit(o.sid)} AND r.codec = 'tt-rec-1' ORDER BY r.chunk ${lim(10_000)}`,
 		});
 		const first = { chunks: chunkRows.chunks ?? [], events: firstRows.events ?? [] };
 		if (!first.chunks.length) return result;
