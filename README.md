@@ -2453,7 +2453,7 @@ under what one core ingests. Memory stays under ~600 MB including the nightly ex
 these synthetic ones.
 
 A sudden surge (shed load from the CLI, resize the VPS, tune DuckDB for a bigger machine): [Emergency backend
-scale-ups](https://github.com/typetorch/docs/blob/main/guides/emergency-scale-ups.md).
+scale-ups](https://www.typetorch.dev/guides/emergency-scale-ups).
 
 ## Development
 
