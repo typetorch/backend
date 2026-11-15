@@ -8,6 +8,11 @@
  *     the wheel zooms toward the cursor. Vector geometry redrawn at the device's pixel ratio: crisp at any zoom.
  *   - The Y band: two clipping planes hide geometry above and below it (walls are cut like a floor plan); layer marks
  *     outside the band are left out.
+ *   - See-through looks (glassy, invisible walls, markers) are drawn as solid shapes: a depth-only pre-pass, then one blend
+ *     of the nearest surface per pixel (a stencil bit per look), so a part's back and inner faces never show through its
+ *     front. Where the band cuts a part open, its inner faces show as a flat cap (a floor-plan section: solids darker,
+ *     walls and glass less see-through). They are pulled toward the camera (polygon offset): a wall's bottom on the floor's
+ *     top doesn't z-fight it.
  *   - Parts, by the draw rule (lib/maps.ts partKind / isDrawn): everything that collides, visible or not, and visible
  *     non-colliding parts that aren't meshes or unions; non-colliding meshes / unions only with `decorative`, invisible
  *     non-colliding parts only with `markers`. Real part colors, never a tint: solid (transparency < 0.5), glassy (< 0.95,
@@ -43,14 +48,16 @@ const BOX_EDGES = (() => {
 	return out;
 })();
 
+// Triangles wound counter-clockwise seen from outside (front faces out), like three's own shapes: back faces are the
+// inside, which shows only where the band cuts a part open (drawn as the cap).
 function wedgeGeometry(): THREE.BufferGeometry {
 	const A = [-0.5, -0.5, -0.5], B = [0.5, -0.5, -0.5], C = [0.5, -0.5, 0.5], D = [-0.5, -0.5, 0.5], E = [-0.5, 0.5, 0.5], F = [0.5, 0.5, 0.5];
-	return triangles([A, C, B, A, D, C, D, F, C, D, E, F, A, B, F, A, F, E, A, E, D, B, C, F]);
+	return triangles([A, B, C, A, C, D, D, C, F, D, F, E, A, F, B, A, E, F, A, D, E, B, F, C]);
 }
 
 function cornerWedgeGeometry(): THREE.BufferGeometry {
 	const A = [-0.5, -0.5, -0.5], B = [0.5, -0.5, -0.5], C = [0.5, -0.5, 0.5], D = [-0.5, -0.5, 0.5], P = [0.5, 0.5, -0.5];
-	return triangles([A, C, B, A, D, C, B, C, P, A, B, P, A, P, D, D, P, C]);
+	return triangles([A, B, C, A, C, D, B, P, C, A, P, B, A, D, P, D, C, P]);
 }
 
 function triangles(vertices: number[][]): THREE.BufferGeometry {
@@ -60,13 +67,86 @@ function triangles(vertices: number[][]): THREE.BufferGeometry {
 	return g;
 }
 
-function shapeGeometries(): THREE.BufferGeometry[] {
+/** The unit shapes by Roblox shape index: ball, block, cylinder (axis X), wedge, corner wedge. */
+export function shapeGeometries(): THREE.BufferGeometry[] {
 	const cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 20);
 	cylinder.rotateZ(-Math.PI / 2);
 	return [new THREE.SphereGeometry(0.5, 18, 12), new THREE.BoxGeometry(1, 1, 1), cylinder, wedgeGeometry(), cornerWedgeGeometry()];
 }
 
-type Look = "solid" | "glassy" | "wall" | "marker";
+export type Look = "solid" | "glassy" | "wall" | "marker";
+
+/**
+ * The see-through looks in draw order: opacity, how much more opaque their cut (cap) is, and their stencil bit (one blend
+ * per pixel per look). Markers' caps stay faint: they're often big zones the camera is inside, where every back face is
+ * "cap".
+ */
+export const SEE_THROUGH = [
+	{ look: "glassy", opacity: 0.35, cap: 0.5, bit: 1 },
+	{ look: "wall", opacity: 0.55, cap: 0.5, bit: 2 },
+	{ look: "marker", opacity: 0.18, cap: 0, bit: 4 },
+] as const satisfies readonly { look: Exclude<Look, "solid">; opacity: number; cap: number; bit: number }[];
+
+/** Above the 3D layer marks (10+, drawn first so walls tint what's behind them), under the 2D ones (2000+, on top). */
+const PARTS_ORDER = 1000;
+
+/**
+ * Where the band cuts a part open, its inside (back faces) shows. Drawn flat (unlit), it reads as a filled section, the
+ * cut: solids darker (their own color, shade 0.45), see-through parts their full color and less see-through (SEE_THROUGH
+ * cap: half way to opaque), so walls cut by the band stand out in the top-down view.
+ */
+function withCap(material: THREE.MeshLambertMaterial, shade: number, opaque: number): THREE.MeshLambertMaterial {
+	const cap = `if (!gl_FrontFacing) { outgoingLight = diffuseColor.rgb * ${shade.toFixed(3)}; diffuseColor.a = mix(diffuseColor.a, 1.0, ${opaque.toFixed(3)}); }`;
+	material.onBeforeCompile = (shader) => {
+		shader.fragmentShader = shader.fragmentShader.replace("#include <opaque_fragment>", `${cap}\n#include <opaque_fragment>`);
+	};
+	material.customProgramCacheKey = () => cap;
+	return material;
+}
+
+export interface PartMaterials {
+	/** The color pass of each look. */
+	color: Record<Look, THREE.MeshLambertMaterial>;
+	/** The depth-only pre-pass of each see-through look. */
+	depth: Record<Exclude<Look, "solid">, THREE.MeshBasicMaterial>;
+}
+
+/**
+ * The parts' materials. Solid: opaque, both sides (the inside is the cap). See-through: the pre-pass writes the nearest
+ * depth of the look's parts, then the color pass blends only that surface (depth equal, the look's stencil bit not yet
+ * set), once per pixel. Both pulled toward the camera by the same polygon offset, so they match each other and win over
+ * a coplanar floor.
+ */
+export function partMaterials(clippingPlanes: THREE.Plane[]): PartMaterials {
+	const base = { clippingPlanes, side: THREE.DoubleSide } as const;
+	// One pass for both sides (three otherwise draws a transparent double-sided material back, then front); the depth and
+	// the stencil already keep only the nearest surface.
+	const offset = { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4, forceSinglePass: true } as const;
+	const color = { solid: withCap(new THREE.MeshLambertMaterial({ ...base }), 0.45, 0) } as PartMaterials["color"];
+	const depth = {} as PartMaterials["depth"];
+	for (const { look, opacity, cap, bit } of SEE_THROUGH) {
+		depth[look] = new THREE.MeshBasicMaterial({ ...base, ...offset, colorWrite: false, depthWrite: true, transparent: true });
+		color[look] = withCap(
+			new THREE.MeshLambertMaterial({
+				...base,
+				...offset,
+				transparent: true,
+				opacity,
+				depthWrite: false,
+				depthFunc: THREE.LessEqualDepth,
+				stencilWrite: true,
+				stencilRef: bit,
+				stencilFuncMask: bit,
+				stencilWriteMask: bit,
+				stencilFunc: THREE.NotEqualStencilFunc,
+				stencilZPass: THREE.ReplaceStencilOp,
+			}),
+			1,
+			cap,
+		);
+	}
+	return { color, depth };
+}
 
 export class MapRenderer {
 	readonly renderer: THREE.WebGLRenderer;
@@ -79,7 +159,7 @@ export class MapRenderer {
 	private controls: OrbitControls | MapControls;
 	private readonly shapes = shapeGeometries();
 	private readonly clip = [new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6)];
-	private readonly materials: Record<Look, THREE.MeshLambertMaterial>;
+	private readonly materials: PartMaterials;
 	private readonly outlineMaterial: THREE.LineBasicMaterial;
 	private grid: THREE.GridHelper | null = null;
 	private geometry: MapGeometry | null = null;
@@ -93,19 +173,13 @@ export class MapRenderer {
 	private readonly resize: ResizeObserver;
 
 	constructor(private readonly host: HTMLElement) {
-		this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+		this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, stencil: true });
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 		this.renderer.localClippingEnabled = true;
 		this.renderer.domElement.tabIndex = 0;
 		this.renderer.domElement.style.outline = "none";
 		host.appendChild(this.renderer.domElement);
-		const base = { clippingPlanes: this.clip, side: THREE.DoubleSide } as const;
-		this.materials = {
-			solid: new THREE.MeshLambertMaterial({ ...base }),
-			glassy: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.35, depthWrite: false }),
-			wall: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.55, depthWrite: false }),
-			marker: new THREE.MeshLambertMaterial({ ...base, transparent: true, opacity: 0.18, depthWrite: false }),
-		};
+		this.materials = partMaterials(this.clip);
 		this.outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, clippingPlanes: this.clip });
 		this.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
 		const sun = new THREE.DirectionalLight(0xffffff, 1.4);
@@ -210,7 +284,7 @@ export class MapRenderer {
 		};
 		for (const [key, list] of buckets) {
 			const [shape, look] = key.split(":") as [string, Look];
-			const mesh = new THREE.InstancedMesh(this.shapes[Number(shape)] as THREE.BufferGeometry, this.materials[look], list.length);
+			const mesh = new THREE.InstancedMesh(this.shapes[Number(shape)] as THREE.BufferGeometry, this.materials.color[look], list.length);
 			list.forEach((i, k) => {
 				mesh.setMatrixAt(k, matrixOf(i, Number(shape)));
 				color.setRGB((g.color[i * 3] as number) / 255, (g.color[i * 3 + 1] as number) / 255, (g.color[i * 3 + 2] as number) / 255, THREE.SRGBColorSpace);
@@ -220,6 +294,15 @@ export class MapRenderer {
 			if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 			mesh.computeBoundingSphere();
 			this.parts.add(mesh);
+			if (look === "solid") continue;
+			// The look's depth pre-pass, sharing the instances; drawn right before the look's color pass.
+			const rank = SEE_THROUGH.findIndex((s) => s.look === look);
+			const depth = new THREE.InstancedMesh(mesh.geometry, this.materials.depth[look], list.length);
+			depth.instanceMatrix = mesh.instanceMatrix;
+			depth.boundingSphere = mesh.boundingSphere;
+			depth.renderOrder = PARTS_ORDER + rank * 2;
+			mesh.renderOrder = PARTS_ORDER + rank * 2 + 1;
+			this.parts.add(depth);
 		}
 		// Meshes and unions drawn as boxes: a thin outline says "a bounding box, not the real shape".
 		if (outlined.length) {
@@ -261,7 +344,8 @@ export class MapRenderer {
 		}
 		const flat = this.options.mode === "2d";
 		const floorY = this.options.band ? this.options.band[0] : this.bounds ? this.bounds.min[1] + this.options.offset[1] : 0;
-		let order = 10;
+		// 3D: before the see-through parts (a wall tints what's behind it, and hides nothing). 2D: after them, on top.
+		let order = flat ? PARTS_ORDER * 2 : 10;
 		for (const layer of this.layers) {
 			const color = new THREE.Color(layer.color);
 			const cells = (layer.cells ?? []).filter((c) => this.inBand(c.y));
@@ -297,7 +381,7 @@ export class MapRenderer {
 			if (points.length && !cells.length) {
 				const g = new THREE.BufferGeometry();
 				g.setAttribute("position", new THREE.Float32BufferAttribute(points.flatMap((p) => [p.x, p.y, p.z]), 3));
-				const dots = new THREE.Points(g, new THREE.PointsMaterial({ color, size: layer.pointSize ?? 7, sizeAttenuation: false, depthTest: !flat }));
+				const dots = new THREE.Points(g, new THREE.PointsMaterial({ color, size: layer.pointSize ?? 7, sizeAttenuation: false, depthTest: !flat, transparent: flat }));
 				dots.renderOrder = order++;
 				this.marks.add(dots);
 			}
@@ -305,7 +389,7 @@ export class MapRenderer {
 				const kept = path.filter((p) => this.inBand(p.y));
 				if (kept.length < 2) continue;
 				const g = new THREE.BufferGeometry().setFromPoints(kept.map((p) => new THREE.Vector3(p.x, p.y, p.z)));
-				const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: !flat }));
+				const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: !flat, transparent: flat }));
 				line.renderOrder = order++;
 				this.marks.add(line);
 			}
@@ -446,7 +530,7 @@ export class MapRenderer {
 		this.buildParts();
 		this.buildMarks();
 		for (const s of this.shapes) s.dispose();
-		for (const m of Object.values(this.materials)) m.dispose();
+		for (const m of [...Object.values(this.materials.color), ...Object.values(this.materials.depth)]) m.dispose();
 		this.outlineMaterial.dispose();
 		this.grid?.dispose();
 		this.renderer.dispose();
