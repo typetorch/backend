@@ -28,9 +28,9 @@ export function whyLabel(why: string | null | undefined): string {
 
 /** The replay at the current moment in world studs (the real map draws these; the SVG map uses the overlay). */
 export interface ReplayScene {
-	/** The whole path on this map, and the part played so far. */
-	path: MapPoint[];
-	passed: MapPoint[];
+	/** The whole path on this map, and the part played so far (t: ms into the session). */
+	path: (MapPoint & { t?: number })[];
+	passed: (MapPoint & { t?: number })[];
 	pose: Pose | null;
 	/** The camera's direction: [x, z] corners from the character (null without a yaw). */
 	cone: [number, number][] | null;

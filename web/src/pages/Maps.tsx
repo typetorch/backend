@@ -18,6 +18,7 @@ import { AlertTriangle, Box, Download, Map as MapIcon, RefreshCw } from "lucide-
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { EmptyState, ErrorState, LoadingBlock, PageHeader, Section } from "@/components/common";
 import { ToggleChip } from "@/components/ToggleChip";
+import { BandControls } from "@/components/maps/BandControls";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -249,22 +250,7 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 								<Box /> 3D
 							</ToggleChip>
 						</div>
-						<div className="space-y-1.5">
-							<div className="text-xs font-medium text-muted-foreground">Height (Y band)</div>
-							<div className="flex flex-wrap gap-1.5" role="group" aria-label="Floors">
-								<ToggleChip pressed={band === null} onClick={() => set({ band: { kind: "all" } })}>
-									All
-								</ToggleChip>
-								{floors.length > 1
-									? floors.map((f, i) => (
-											<ToggleChip key={f.y} pressed={state.band.kind === "floor" && state.band.index === i} onClick={() => set({ band: { kind: "floor", index: i } })} title={`walkable at y ${f.y}`}>
-												Floor {i + 1}
-											</ToggleChip>
-										))
-									: null}
-							</div>
-							<BandSlider lo={lo} hi={hi} band={band} onChange={(b) => set({ band: b ? { kind: "range", lo: b[0], hi: b[1] } : { kind: "all" } })} />
-						</div>
+						<BandControls choice={state.band.kind === "player" ? { kind: "all" } : state.band} band={band} floors={floors} lo={lo} hi={hi} onChange={(b) => set({ band: b })} />
 						<div className="space-y-1.5" role="group" aria-label="Drawn">
 							<label className="flex items-center gap-2">
 								<input type="checkbox" checked={state.decorative} onChange={(e) => set({ decorative: e.target.checked })} /> Decorative meshes{kinds ? ` (${fmtInt(kinds.decorMesh)})` : ""}
@@ -342,20 +328,6 @@ export function useAlignment(map: MapInfo, view: Pick<MapsView, "names">): { ali
 	const computed = useMemo(() => (data?.frame ? alignmentOf(map.bounds, recordingSamples(data.frame, data.background), map.offset) : null), [data, map.bounds, map.offset]);
 	if (!needed || !computed || computed.state === "unknown") return { alignment: server, source: "events", loading: needed && (first.isLoading || second.isLoading) };
 	return { alignment: computed, source: "recordings", loading: false };
-}
-
-function BandSlider({ lo, hi, band, onChange }: { lo: number; hi: number; band: [number, number] | null; onChange: (band: [number, number] | null) => void }) {
-	const [a, b] = band ?? [lo, hi];
-	return (
-		<div className="grid grid-cols-[auto_1fr_auto] items-center gap-x-2 gap-y-1 text-xs tabular-nums">
-			<span>from</span>
-			<input type="range" aria-label="Band bottom" min={lo} max={hi} step={1} value={a} onChange={(e) => onChange([Math.min(Number(e.target.value), b - 1), b])} />
-			<span className="w-10 text-right">{Math.round(a)}</span>
-			<span>to</span>
-			<input type="range" aria-label="Band top" min={lo} max={hi} step={1} value={b} onChange={(e) => onChange([a, Math.max(Number(e.target.value), a + 1)])} />
-			<span className="w-10 text-right">{Math.round(b)}</span>
-		</div>
-	);
 }
 
 function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; canEdit: boolean }) {

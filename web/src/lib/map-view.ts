@@ -5,7 +5,9 @@
  *   mode=3d          2D (default) or 3D
  *   draw=points      heat cells (default) or points (the Recordings page's old `view=dots` reads as points)
  *   cell=0.5|1|2     heat cell size in studs (absent: the page's default)
- *   band=f2          the Y band: floor 2 of the map's detected floors; `band=10..40` a free range; absent = all
+ *   band=f2          the Y band: floor 2 of the map's detected floors; `band=10..40` a free range; `band=player`
+ *                    follows the replayed player (everything well above them cut away, so roofs don't hide them);
+ *                    absent = all (a replay: player), `band=all` = all even in a replay
  *   decor=1          non-colliding meshes and unions drawn (as boxes)
  *   markers=1        invisible non-colliding parts drawn (markers, triggers)
  *   hide=a,b         layers switched off (Maps page; the Recordings page keeps its `layers` list)
@@ -14,7 +16,7 @@
  */
 import { CELL_SIZES, type CellSize, type DrawToggles, type Floor } from "./maps";
 
-export type BandChoice = { kind: "all" } | { kind: "floor"; index: number } | { kind: "range"; lo: number; hi: number };
+export type BandChoice = { kind: "all" } | { kind: "floor"; index: number } | { kind: "range"; lo: number; hi: number } | { kind: "player" };
 
 export interface MapViewState extends DrawToggles {
 	mode: "2d" | "3d";
@@ -43,6 +45,7 @@ export function readMapView(params: URLSearchParams): MapViewState {
 
 export function readBand(raw: string | null): BandChoice {
 	if (!raw) return { kind: "all" };
+	if (raw === "player") return { kind: "player" };
 	const floor = /^f(\d{1,2})$/.exec(raw);
 	if (floor) return Number(floor[1]) >= 1 ? { kind: "floor", index: Number(floor[1]) - 1 } : { kind: "all" };
 	const range = /^(-?\d+(?:\.\d+)?)\.\.(-?\d+(?:\.\d+)?)$/.exec(raw);
@@ -57,6 +60,7 @@ export function readBand(raw: string | null): BandChoice {
 export function bandParam(band: BandChoice): string | null {
 	if (band.kind === "floor") return `f${band.index + 1}`;
 	if (band.kind === "range") return `${band.lo}..${band.hi}`;
+	if (band.kind === "player") return "player";
 	return null;
 }
 
@@ -76,11 +80,20 @@ export function mapViewPatch(state: Partial<MapViewState>): Record<string, strin
 	return patch;
 }
 
+/** Studs kept above the followed player's feet: their own storey (walls, low ceilings), not the roof over it. */
+export const FOLLOW_HEADROOM = 9;
+
+/** The band that follows a player whose feet are at `feetY`: everything from the map's bottom to just under the roof. */
+export function followBand(feetY: number, lo: number): [number, number] {
+	return [Math.min(lo, feetY - 1), feetY + FOLLOW_HEADROOM];
+}
+
 /**
  * The band to draw on a map: a floor of its own (null while the floors aren't known or it has fewer), a free range when
- * it fits the map's heights [lo, hi], else none (all).
+ * it fits the map's heights [lo, hi], following the player when their feet are known (`feetY`), else none (all).
  */
-export function resolveBand(band: BandChoice, floors: readonly Floor[], lo: number, hi: number): [number, number] | null {
+export function resolveBand(band: BandChoice, floors: readonly Floor[], lo: number, hi: number, feetY?: number | null): [number, number] | null {
+	if (band.kind === "player") return feetY === null || feetY === undefined ? null : followBand(feetY, lo);
 	if (band.kind === "floor") return floors.length > 1 ? (floors[band.index]?.band ?? null) : null;
 	if (band.kind === "range") return bandFits(band, lo, hi) ? [band.lo, band.hi] : null;
 	return null;
