@@ -2836,7 +2836,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		let details = note?.details;
 		let gameKey = false;
 		if (!action) {
-			if (READ_METHODS.has(method) || method === "OPTIONS" || WEB_POST_ALLOWED.test(path)) return;
+			// POST /v1/admin/export/hash only reads (its body is a list of pids): not an audited write.
+			if (READ_METHODS.has(method) || method === "OPTIONS" || WEB_POST_ALLOWED.test(path) || path === "/v1/admin/export/hash") return;
 			gameKey = method === "POST" && (path === "/v1/fleet/deploy" || path === "/v1/fleet/mark") && auth.hasGameKey(req);
 			if (!principal && !gameKey) return;
 			const named = routeAction(method, path);

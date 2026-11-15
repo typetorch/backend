@@ -160,6 +160,8 @@ export class BackendSource implements MigrationSource {
 	private async call(path: string, signal: AbortSignal, init: RequestInit = {}, timeoutMs = 10 * 60_000): Promise<Response> {
 		const tries = this.o.tries ?? 6;
 		let delay = 1000;
+		// A 429 is the old server's own throttle (one export at a time, 120 a minute): waited out, not counted as a failure.
+		let throttled = 0;
 		for (let attempt = 1; ; attempt++) {
 			if (signal.aborted) throw new Stopped();
 			let res: Response;
@@ -181,6 +183,13 @@ export class BackendSource implements MigrationSource {
 			const text = clean(await res.text().catch(() => ""));
 			if (res.status === 401 || res.status === 403) throw new MigrateHttpError(`the old server refused the token (${res.status}): give its admin token (a Bearer, not a browser session)`, res.status, true);
 			if (res.status === 404) throw new MigrateHttpError(`the old server has no ${path.split("?")[0]} (404): update it to a backend with the export API first`, 404, true);
+			if (res.status === 429 && throttled < 10_000) {
+				throttled++;
+				attempt--;
+				const after = Number(res.headers.get("retry-after"));
+				await this.sleep(Number.isFinite(after) && after > 0 ? Math.min(after, 300) * 1000 : 1000, signal);
+				continue;
+			}
 			if ((res.status === 429 || res.status >= 500) && attempt < tries) {
 				const after = Number(res.headers.get("retry-after"));
 				await this.sleep(Number.isFinite(after) && after > 0 ? Math.min(after, 300) * 1000 : delay, signal);
@@ -536,7 +545,8 @@ export class Migration {
 			finishedAt: d.finishedAt,
 			rowsPerSecond: d.rowsPerSecond,
 			rowsDone,
-			rowsTotal: d.rowsTotal,
+			// The total is the manifest's estimate (the old server's numbers move while it runs): never under what was done.
+			rowsTotal: d.state === "done" ? rowsDone : Math.max(d.rowsTotal, rowsDone),
 			steps: d.steps.map((s) => ({ ...s })),
 			days: days.map((r) => ({ table: r.tbl, day: r.day, state: r.state, rowsSource: r.rows_source, rowsTarget: r.rows_target, note: r.note })),
 			waitingFor: d.waitingFor,
@@ -941,14 +951,12 @@ export class Migration {
 	private async verifyDay(day: DayRow): Promise<void> {
 		const exact = dayNumber(day.day) < this.data!.cutoverDay;
 		const here = await this.target.dayHash(day.tbl, day.day);
-		if (exact) {
-			const exclude = await this.excludeList();
-			const source = exclude.length ? await this.source!.dayHash(day.tbl, day.day, exclude, this.controller.signal) : { rows: day.rows_source, hash: day.hash_source };
-			if (here.rows === source.rows && here.hash === source.hash) return this.setDay(day, { state: "match", rows_target: here.rows, verified: 1, note: "" });
-		}
+		const exclude = await this.excludeList();
+		const source = exclude.length ? await this.source!.dayHash(day.tbl, day.day, exclude, this.controller.signal) : { rows: day.rows_source, hash: day.hash_source };
+		if (exact && here.rows === source.rows && here.hash === source.hash) return this.setDay(day, { state: "match", rows_target: here.rows, verified: 1, note: "" });
 		const missing = await this.countMissing(day);
 		if (missing === 0 && !exact) {
-			const extra = here.rows - day.rows_source;
+			const extra = here.rows - source.rows;
 			return this.setDay(day, { state: "match", rows_target: here.rows, verified: 1, note: extra > 0 ? `superset: ${extra} rows only on this server` : "superset" });
 		}
 		if (day.tries < 1) {
