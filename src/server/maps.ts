@@ -5,7 +5,8 @@
  *                                      version, how each was found, override, alignment), the export's state, whether
  *                                      Roblox has a newer place version, the unmatched map names, the history
  *   GET    /v1/maps/<name>/geometry    (every signed-in role)  one map's geometry (`TTMP`, maps/format.ts) with an ETag
- *                                      (its content hash); `(lobby)` is the lobby
+ *                                      (its content hash); `(lobby)` is the lobby. Version 1 (parts only) unless `?v=2`:
+ *                                      then version 2 with the texture section when the map has textures
  *   POST   /v1/maps/export             (owners, audited)       starts an export: `{ names?: string[] }` adds map names to
  *                                      the ones the events carry; 202 with the export's state, 409 while one runs
  *   PUT    /v1/maps/<name>/override    (owners, audited)       `{ path?, offset? }`: the model to use and/or an offset
@@ -15,8 +16,9 @@
  * the place is the universe's root place (else the fleet's). "Out of date": the place's newest version from the Assets
  * API (asset:read on the key; else the newest `pv` the fleet's servers reported in the last day) is newer than the
  * exported one. The alignment check reads positioned events (`map-positions`) over the last ALIGN_DAYS days.
+ * A finished export starts the animation pass (anims/store.ts) through `afterExport`.
  */
-import { MapFormatError } from "../maps/format.ts";
+import { MapFormatError, mapBlobV1 } from "../maps/format.ts";
 import { alignment, overrideFor, type Alignment } from "../maps/match.ts";
 import { mapKey } from "../maps/script.ts";
 import { LOBBY, type MapStore, MapsError } from "../maps/store.ts";
@@ -44,6 +46,8 @@ export interface MapsDeps {
 	positions(days: number): Promise<MapPositionsResult | null>;
 	fetch?: typeof fetch;
 	log?: (line: string) => void;
+	/** After a successful export (the animation pass: plans/36 "The clips"). Never throws into the export. */
+	afterExport?: (input: { apiKey: string; universeId: number; placeId: number; by: string }) => void;
 }
 
 export interface MapsCaller {
@@ -152,7 +156,15 @@ export class MapsRoutes {
 				placeId,
 				names,
 				by: who,
-				onDone: (outcome, details) => caller.auditDone(outcome, details),
+				onDone: (outcome, details) => {
+					caller.auditDone(outcome, details);
+					if (outcome !== "ok") return;
+					try {
+						this.deps.afterExport?.({ ...oc, placeId, by: who });
+					} catch (error) {
+						this.deps.log?.(`maps: the animation pass didn't start: ${String((error as Error)?.message ?? error).slice(0, 200)}`);
+					}
+				},
 			});
 			caller.note({ action: "maps.export", details: { placeId, names: names.length } });
 			return json(202, { export: status, names });
@@ -168,12 +180,20 @@ export class MapsRoutes {
 	private geometry(req: Request, name: string): Response {
 		const map = this.deps.store.find(name);
 		if (!map) return json(404, { error: name === LOBBY ? "no lobby geometry: export the maps first" : `no exported map named ${JSON.stringify(name.slice(0, 100))}` });
-		const etag = `"${map.hash}"`;
+		const v2 = new URL(req.url).searchParams.get("v") === "2";
+		const etag = v2 ? `"${map.hash}.2"` : `"${map.hash}"`;
 		const headers = { etag, "cache-control": "private, no-cache", "x-map-parts": String(map.parts) };
 		const asked = req.headers.get("if-none-match");
 		if (asked && asked.split(",").some((t) => t.trim().replace(/^W\//, "") === etag)) return new Response(null, { status: 304, headers });
-		const blob = this.deps.store.geometry(map);
-		if (!blob) return json(404, { error: "the map's geometry file is missing: export again" });
+		const stored = this.deps.store.geometry(map);
+		if (!stored) return json(404, { error: "the map's geometry file is missing: export again" });
+		let blob: Uint8Array;
+		try {
+			blob = v2 ? stored : mapBlobV1(stored);
+		} catch (error) {
+			if (error instanceof MapFormatError) return json(500, { error: `the stored geometry is unreadable: ${error.message}` });
+			throw error;
+		}
 		return new Response(blob as Uint8Array<ArrayBuffer>, { status: 200, headers: { ...headers, "content-type": "application/octet-stream", "content-length": String(blob.byteLength) } });
 	}
 
