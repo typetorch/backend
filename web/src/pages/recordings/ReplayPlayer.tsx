@@ -1,6 +1,10 @@
 /**
  * One recorded session played back top-down: the path on the current map, a moving dot with the camera's direction as a
  * cone, and a timeline of inputs, events and confusion signals with a scrubber, play / pause and speed.
+ *
+ * plans/36: a "Player view" (PlayerView: the recorded camera, people, the recorded UI, taps) next to the map, the
+ * default for sessions with extended data; under the timeline the AFK spans, a captions strip (buttons, screens,
+ * prompts) and an FPS strip (tt-ext-1 View records, else the client tech rows).
  */
 import { Pause, Play, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -9,8 +13,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { MapPoint } from "@/lib/maps";
 import type { RecFrame, RecordingReplayResult } from "@/lib/types";
+import { captions as buildCaptions, fpsSeries } from "./ext-replay";
 import { MapView, type ToView } from "./MapView";
 import { cone, fmtClock, frameAround, mapAtTime, mapName, markers as buildMarkers, poseAt, stateAtTime, type Pose } from "./map";
+import { PlayerView } from "./PlayerView";
+
+export type ReplayCamera = "map" | "player";
 
 export const SPEEDS = [0.5, 1, 2, 4, 8] as const;
 const TICK_MS = 100;
@@ -45,7 +53,44 @@ export type RenderMap = (map: string, overlay: (toView: ToView) => ReactNode, fa
 const defaultRenderMap: RenderMap = (map, overlay, fallback) =>
 	fallback ? <MapView frame={fallback} background={[]} overlay={overlay} label={`Replay on ${mapName(map)}`} /> : <p className="text-sm text-muted-foreground">No positions on this map.</p>;
 
-export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 0 }: { replay: RecordingReplayResult; renderMap?: RenderMap; initialT?: number }) {
+/** The FPS strip: fps over the session (a line, 30 and 60 marked), the value now. */
+export function FpsStrip({ series, duration, t }: { series: readonly [number, number][]; duration: number; t: number }) {
+	if (series.length < 2 || duration <= 0) return null;
+	const top = Math.max(60, ...series.map((p) => p[1]));
+	const x = (ms: number) => Math.max(0, Math.min(100, (ms / duration) * 100));
+	const y = (fps: number) => 30 - (Math.min(fps, top) / top) * 28;
+	let now: number | null = null;
+	for (const p of series) if (p[0] <= t) now = p[1];
+	return (
+		<div className="flex items-center gap-2" data-testid="replay-fps">
+			<span className="w-14 shrink-0 text-xs text-muted-foreground tabular-nums">{now === null ? "fps" : `${Math.round(now)} fps`}</span>
+			<svg viewBox="0 0 100 32" preserveAspectRatio="none" className="h-8 w-full rounded bg-muted" role="img" aria-label="Frames per second over the session">
+				<line x1="0" x2="100" y1={y(60)} y2={y(60)} stroke="currentColor" strokeOpacity={0.15} strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
+				<line x1="0" x2="100" y1={y(30)} y2={y(30)} stroke="#ef4444" strokeOpacity={0.35} strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
+				<polyline points={series.map((p) => `${x(p[0])},${y(p[1])}`).join(" ")} fill="none" stroke="#10b981" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+				<line x1={x(t)} x2={x(t)} y1="0" y2="32" stroke="currentColor" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+			</svg>
+		</div>
+	);
+}
+
+export function ReplayPlayer({
+	replay,
+	renderMap = defaultRenderMap,
+	initialT = 0,
+	camera: cameraProp,
+	onCameraChange,
+}: {
+	replay: RecordingReplayResult;
+	renderMap?: RenderMap;
+	initialT?: number;
+	/** Map or Player view (controlled by the page, e.g. from the URL); default: Player view for extended sessions. */
+	camera?: ReplayCamera;
+	onCameraChange?: (camera: ReplayCamera) => void;
+}) {
+	const [cameraState, setCameraState] = useState<ReplayCamera>(replay.extended ? "player" : "map");
+	const camera = cameraProp ?? cameraState;
+	const setCamera = (c: ReplayCamera) => (onCameraChange ? onCameraChange(c) : setCameraState(c));
 	const duration = replay.duration ?? 0;
 	const samples = replay.samples ?? [];
 	const [t, setT] = useState(Math.min(initialT, duration));
@@ -84,6 +129,10 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 	const state = stateAtTime(replay, t);
 	const recent = marks.filter((m) => m.t <= t).slice(-6).reverse();
 	const keys = (replay.inputs ?? []).filter((i) => i.type === "key" && i.t <= t).length;
+	const captionList = useMemo(() => buildCaptions(replay), [replay]);
+	const fps = useMemo(() => fpsSeries(replay), [replay]);
+	const afk = replay.extended?.afk ?? [];
+	const pct = (ms: number) => `${duration ? Math.max(0, Math.min(100, (ms / duration) * 100)) : 0}%`;
 	const overlay = (toView: ToView) => {
 		const passed = onMap.filter((s) => s[0] <= t);
 		const line = (list: typeof onMap) => list.map((s) => toView(s[1] as number, s[3] as number).join(",")).join(" ");
@@ -107,6 +156,18 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 				</Badge>
 				<Badge variant={replay.why === "left" ? "destructive" : "secondary"}>Ended: {whyLabel(replay.why)}</Badge>
 				{replay.gaps ? <Badge variant="outline">{replay.gaps} chunk(s) lost</Badge> : null}
+				{replay.extended ? <Badge variant="secondary">Extended</Badge> : null}
+				{replay.extended?.gaps ? <Badge variant="outline">{replay.extended.gaps} extended chunk(s) lost</Badge> : null}
+				{replay.extended?.failed ? <Badge variant="outline" title={replay.extended.failed}>Extended data partly unreadable</Badge> : null}
+				{replay.extended?.truncated ? <Badge variant="outline">Extended data cut at the size cap</Badge> : null}
+				<div className="flex gap-1" role="group" aria-label="Replay view">
+					<ToggleChip pressed={camera === "map"} onClick={() => setCamera("map")}>
+						Map
+					</ToggleChip>
+					<ToggleChip pressed={camera === "player"} onClick={() => setCamera("player")}>
+						Player view
+					</ToggleChip>
+				</div>
 				<span className="text-muted-foreground">
 					{mapName(map)}
 					{state.zone ? ` · zone ${state.zone}` : ""}
@@ -114,7 +175,7 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 				</span>
 			</div>
 			<div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_16rem]">
-				<div className="min-w-0">{renderMap(map, overlay, fallback, scene)}</div>
+				<div className="min-w-0">{camera === "player" ? <PlayerView replay={replay} t={t} playing={playing} speed={speed} map={map} /> : renderMap(map, overlay, fallback, scene)}</div>
 				<div className="space-y-2 text-sm">
 					<div className="font-medium">Just happened</div>
 					{recent.length ? (
@@ -153,6 +214,15 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 				</div>
 				<input type="range" className="w-full" aria-label="Replay position" min={0} max={duration} step={TICK_MS} value={t} onChange={(e) => setT(Number(e.target.value))} />
 				<div className="relative h-6 rounded bg-muted" data-testid="replay-timeline">
+					{afk.map(([from, to], i) => (
+						<div
+							key={`afk-${i}`}
+							data-testid="replay-afk"
+							title={`AFK ${fmtClock(from)} to ${to === null ? "the end" : fmtClock(to)}`}
+							className="pointer-events-none absolute top-0 h-6 rounded-sm bg-foreground/15"
+							style={{ left: pct(from), width: `calc(${pct(to ?? duration)} - ${pct(from)})`, backgroundImage: "repeating-linear-gradient(45deg, transparent 0 4px, rgba(127,127,127,0.35) 4px 6px)" }}
+						/>
+					))}
 					{marks.map((m, i) => (
 						<button
 							key={`${m.t}-${i}`}
@@ -166,8 +236,25 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 					))}
 					<div className="pointer-events-none absolute top-0 h-6 w-0.5 bg-foreground" style={{ left: `${duration ? (t / duration) * 100 : 0}%` }} />
 				</div>
+				{captionList.length ? (
+					<div className="relative h-5 overflow-hidden rounded bg-muted/60" data-testid="replay-captions" aria-label="Buttons, screens and prompts">
+						{captionList.map((c, i) => (
+							<button
+								key={`${c.t}-${i}`}
+								type="button"
+								onClick={() => setT(c.t)}
+								title={`${fmtClock(c.t)} ${c.label}`}
+								className="absolute top-0 h-5 max-w-24 truncate border-l-2 border-violet-500 px-1 text-left text-[10px] leading-5 hover:bg-background/60"
+								style={{ left: pct(c.t) }}
+							>
+								{c.label}
+							</button>
+						))}
+					</div>
+				) : null}
+				<FpsStrip series={fps} duration={duration} t={t} />
 				<p className="text-xs text-muted-foreground">
-					Marks: grey clicks and taps, purple buttons / screens / prompts, red deaths, orange the game's events, amber confusion signals. Click one to jump there.
+					{afk.length ? "Hatched: AFK (the extended streams paused). " : ""}Marks: grey clicks and taps, purple buttons / screens / prompts, red deaths, orange the game's events, amber confusion signals. Click one to jump there.
 				</p>
 			</div>
 		</div>

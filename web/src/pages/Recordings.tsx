@@ -24,7 +24,7 @@ import type { FirstActionSplit, FirstActionStat, QuitAutopsyRow, RecFrame, RecSa
 import { MapView, type ToView } from "./recordings/MapView";
 import { ACTION_LABELS, NO_MAP, REASON_LABELS, RECORDING_LAYERS, cellBox, layerColor, layerName, mapName } from "./recordings/map";
 import { RealLayersMap, RealReplayMap, REAL_MAP_CELL, useExportFor, useMapView, ViewSwitches } from "./recordings/RealMap";
-import { ReplayPlayer, type ReplayScene } from "./recordings/ReplayPlayer";
+import { ReplayPlayer, type ReplayCamera, type ReplayScene } from "./recordings/ReplayPlayer";
 
 const TABS = ["layers", "replay", "autopsy", "first"] as const;
 type Tab = (typeof TABS)[number];
@@ -313,7 +313,14 @@ export function SessionList({ options, openReplay, compact = false }: { options:
 						<TableBody>
 							{data.sessions.map((s) => (
 								<TableRow key={s.sid}>
-									<TableCell className="font-mono text-xs">{shortId(s.sid)}</TableCell>
+									<TableCell className="font-mono text-xs">
+										{shortId(s.sid)}
+										{s.extended ? (
+											<Badge variant="secondary" className="ml-1 font-sans" title="Extended recording: the player's view, poses, people and models around them, the UI">
+												Extended
+											</Badge>
+										) : null}
+									</TableCell>
 									{compact ? null : <TableCell className="text-xs">{fmtTime(s.start)}</TableCell>}
 									<TableCell className="text-right tabular-nums">{fmtNum(s.seconds, 0)} s</TableCell>
 									{compact ? null : <TableCell>{s.dev}</TableCell>}
@@ -405,15 +412,17 @@ function ReplayView({ sid, back }: { sid: string; back: () => void }) {
 	const q = useAnalytics("recording-replay", { sid });
 	const map = q.data?.map;
 	const exp = useExportFor(map);
+	const [params, set] = usePageParams();
+	// cam=map|player in the URL; absent: the Player view for extended sessions, else the map
+	const camParam = params.get("cam");
+	const camera: ReplayCamera = camParam === "map" || camParam === "player" ? camParam : q.data?.extended ? "player" : "map";
 	return (
 		<div className="space-y-3">
 			<div className="flex flex-wrap items-center gap-2">
 				<Button type="button" size="sm" variant="ghost" onClick={back}>
 					<ArrowLeft /> All sessions
 				</Button>
-				<div className="ml-auto">
-					<ViewSwitches real={exp.info !== null} draw={false} />
-				</div>
+				<div className="ml-auto">{camera === "map" ? <ViewSwitches real={exp.info !== null} draw={false} /> : null}</div>
 			</div>
 			<QueryState query={q} isEmpty={(d) => !d.found} empty="This session has no recording in the selected range (widen the date range).">
 				{(data) =>
@@ -421,7 +430,7 @@ function ReplayView({ sid, back }: { sid: string; back: () => void }) {
 						<p className="text-sm text-muted-foreground">The recording did not decode: {data.failed}</p>
 					) : (
 						<Section title={`Session ${shortId(data.sid)}`} description={`Player ${data.pid ?? "?"}, ${fmtTime(data.start ?? 0)}, ${fmtNum((data.duration ?? 0) / 1000, 1)} s recorded.`}>
-							<ReplayPlayer key={data.sid} replay={data} renderMap={(map, overlay, fallback, scene) => <ReplayMap map={map} overlay={overlay} fallback={fallback} scene={scene} />} />
+							<ReplayPlayer key={data.sid} replay={data} camera={camera} onCameraChange={(c) => set({ cam: c })} renderMap={(map, overlay, fallback, scene) => <ReplayMap map={map} overlay={overlay} fallback={fallback} scene={scene} />} />
 						</Section>
 					)
 				}
