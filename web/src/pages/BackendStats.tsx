@@ -18,9 +18,27 @@ import { api } from "@/lib/api";
 import { groupMarks } from "@/lib/deploys";
 import { fmtAgo, fmtBytes, fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
 import type { DeployMark } from "@/lib/perf";
-import type { BackendStats, RouteGroup, RouteStats, StatsBucket, StatsWindow } from "@/lib/types";
+import type { BackendStats, QueueStats, RouteGroup, RouteStats, StatsBucket, StatsWindow } from "@/lib/types";
 
 export const BACKEND_STATS_KEY = ["backend-stats"] as const;
+
+/**
+ * Plans/35 C: the queue bucket, on a main server only (TYPETORCH_ROLE=main). Ingest nodes upload closed files there; this
+ * server loads them each tick with its own rows. A single server (the default) has no queue and shows nothing.
+ */
+function QueueSection({ queue, now }: { queue: QueueStats; now: number }) {
+	const down = queue.bucket === "down";
+	return (
+		<Section title="Ingest nodes' queue" description="Files the ingest nodes uploaded to the queue bucket, loaded here each loader tick with this server's own rows, then deleted from the bucket.">
+			<div className="grid grid-cols-2 gap-3 md:grid-cols-4" data-testid="queue-tiles">
+				<Metric label="Bucket" value={down ? "Down" : queue.bucket === "ok" ? "OK" : "Not asked yet"} tone={down ? "muted" : undefined} sub={down ? "this server goes on with its own ingest" : `role ${queue.role}`} />
+				<Metric label="Waiting in the bucket" value={`${fmtInt(queue.pendingFiles)}${queue.truncated ? "+" : ""} files`} sub={fmtBytes(queue.pendingBytes)} hint="Counted by the busy 503 too" />
+				<Metric label="Loaded from the bucket" value={fmtInt(queue.files)} sub={queue.lastLoadAt ? `last ${fmtAgo(queue.lastLoadAt, now)}` : "none yet"} hint={queue.identities !== undefined ? `${fmtInt(queue.identities)} identity rows` : undefined} />
+				<Metric label="Queue errors" value={fmtInt(queue.errors)} sub={queue.lastErrorAt ? `last ${fmtAgo(queue.lastErrorAt, now)}` : "none since start"} hint={queue.lastError ? <span className="break-words">{queue.lastError}</span> : undefined} />
+			</div>
+		</Section>
+	);
+}
 const POLL_MS = 2000;
 
 const WINDOWS: { id: StatsWindow; label: string }[] = [
@@ -305,6 +323,8 @@ export default function BackendStatsPage() {
 							<EmptyState>No requests in this window yet.</EmptyState>
 						)}
 					</Section>
+
+					{data.queue ? <QueueSection queue={data.queue} now={data.now} /> : null}
 
 					<Section title="Since start" description={`Counting from ${fmtTime(data.totals.since)} UTC.`}>
 						<div className="grid grid-cols-2 gap-x-6 gap-y-2 md:grid-cols-4">

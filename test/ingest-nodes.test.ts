@@ -363,16 +363,16 @@ describe("erased pids are filtered at both ends", () => {
 	});
 
 	test("a wrong admin token or another origin's redirect never yields a list", async () => {
-		let sawToken: string | null = null;
-		const fake: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-			sawToken = new Headers(init?.headers).get("authorization");
+		const seen: { token: string | null } = { token: null };
+		const fake: typeof fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			seen.token = new Headers(init?.headers).get("authorization");
 			expect(init?.redirect).toBe("manual");
 			return new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } });
 		}) as typeof fetch;
 		const n = await startNode(s3, "https://main.example.com", {}, { fetch: fake });
 		try {
 			expect(await n.node.pullErased()).toBe(false);
-			expect(sawToken).toBe(`Bearer ${ADMIN}`);
+			expect(seen.token).toBe(`Bearer ${ADMIN}`);
 			expect(n.node.stats().erased.lastError).toContain("302");
 		} finally {
 			await n.node.stop();

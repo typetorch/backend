@@ -2627,6 +2627,29 @@ export interface BackendStats {
 	routes: RouteStats[];
 	/** Ingest backpressure (missing on servers before it): 503 busy refusals since start, requests in flight now. */
 	ingest?: IngestPressure;
+	/** Plans/35 C: the queue bucket the ingest nodes write to. Only on a main server (TYPETORCH_ROLE=main); a single server has none. */
+	queue?: QueueStats;
+}
+
+/** The main server's view of the queue bucket (GET /v1/admin/stats `queue`). */
+export interface QueueStats {
+	role: "main" | "ingest";
+	/** Files waiting in the bucket as last listed, and their bytes. */
+	pendingFiles: number;
+	pendingBytes: number;
+	/** Unix ms of the last load that took bucket files, or null. */
+	lastLoadAt?: number | null;
+	lastUploadAt?: number | null;
+	/** Files loaded from the bucket since start. */
+	files: number;
+	errors: number;
+	lastError: string | null;
+	lastErrorAt: number | null;
+	bucket: "ok" | "down" | "unknown";
+	/** The last listing had more than one page of keys (the backlog is at least this). */
+	truncated?: boolean;
+	/** Identity rows taken from the bucket since start. */
+	identities?: number;
 }
 
 export interface IngestPressure {
