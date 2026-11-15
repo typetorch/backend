@@ -277,6 +277,31 @@ describe("animation clips", () => {
 		expect(maps).toContain("buffer.writeu16(buf, 4, 2)");
 	});
 
+	test("every string.pack in the export scripts gets as many values as its format names (a live run caught one short)", () => {
+		const packs = (script: string) => {
+			const out: { format: string; args: number }[] = [];
+			for (let at = script.indexOf("string.pack("); at >= 0; at = script.indexOf("string.pack(", at + 1)) {
+				let i = at + "string.pack(".length;
+				let depth = 1;
+				let commas = 0;
+				const start = i;
+				for (; i < script.length && depth > 0; i++) {
+					const c = script[i];
+					if (c === "(" || c === "{") depth++;
+					else if (c === ")" || c === "}") depth--;
+					else if (c === "," && depth === 1) commas++;
+				}
+				const format = /^"([^"]*)"/.exec(script.slice(start))?.[1] ?? "";
+				out.push({ format, args: commas });
+			}
+			return out;
+		};
+		const values = (format: string) => format.replace(/^[<>=!]/, "").replace(/[0-9]+/g, "").length;
+		const all = [...packs(animScript(["1"])), ...packs(exportScript({ names: ["Mall"] }))];
+		expect(all.length).toBeGreaterThan(8);
+		for (const p of all) expect({ format: p.format, values: p.args }).toEqual({ format: p.format, values: values(p.format) });
+	});
+
 	test("the store: notes are idempotent, the defaults always wait, a stored clip is never asked again", () => {
 		const dir = tmp();
 		const store = new AnimStore({ dataDir: dir, clock: () => T0 });

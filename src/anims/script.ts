@@ -92,7 +92,7 @@ local function pack(id, seq)
 				if at ~= nil then
 					local cf = pose.CFrame
 					local qx, qy, qz, qw = quat(cf)
-					table.insert(poses, string.pack("<I2ffffffffBBf", at, qx, qy, qz, qw, cf.X, cf.Y, cf.Z, enumValue(pose.EasingStyle), enumValue(pose.EasingDirection), pose.Weight))
+					table.insert(poses, string.pack("<I2fffffffBBf", at, qx, qy, qz, qw, cf.X, cf.Y, cf.Z, enumValue(pose.EasingStyle), enumValue(pose.EasingDirection), pose.Weight))
 				end
 			end
 			for _, sub in pose:GetSubPoses() do walk(sub) end
