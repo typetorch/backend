@@ -120,7 +120,7 @@ export interface FleetHttpOptions {
 	pingSeconds?: number;
 	/**
 	 * Extra fields for a heartbeat's 202 reply: plans/25 `rd: 1` while the explorer watches that JobId; plans/34 `xq: 1`
-	 * (send the declarations) and `lm: 1` (the live map is watched). `body` is the heartbeat as sent (its `xh` / `x`).
+	 * (send the declarations) and `lm: 1` (the live map is watched). `body` is the heartbeat as sent (its `xh` / `xd`).
 	 */
 	heartbeatReply?(job: string, body: unknown): Record<string, unknown> | undefined;
 	/** A debug bundle's `playerLogs` go to owners (the admin role) only; the read-only web role gets the body without them. Default: nobody. */

@@ -60,7 +60,7 @@ export function wakeMessage(job: string): string {
 	return JSON.stringify({ k: "rd", j: job });
 }
 
-/** Plans/34: the live map wake, `{"k":"lm"}`: every server that hears it posts its positions (kernels before 0.6.0 ignore it). */
+/** Plans/34: the live map wake, `{"k":"lm"}`: every server that hears it posts its positions (kernels before 0.5.7 ignore it). */
 export function liveMapWakeMessage(): string {
 	return JSON.stringify({ k: "lm" });
 }

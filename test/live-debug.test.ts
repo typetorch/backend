@@ -29,7 +29,7 @@ const DECL = {
 };
 
 function hbOf(h: Harness, j: string, over: Record<string, unknown> = {}) {
-	return { j, t: "public", b: "prod", c: "prod", a: "art-1", n: 2, m: 20, s: Math.floor((h.now() - 3_600_000) / 1000), u: Math.floor(h.now() / 1000), p: 1001, v: "0.6.0", q: 7, g: 2, h: "ok", sv: 2, ...over };
+	return { j, t: "public", b: "prod", c: "prod", a: "art-1", n: 2, m: 20, s: Math.floor((h.now() - 3_600_000) / 1000), u: Math.floor(h.now() / 1000), p: 1001, v: "0.5.7", q: 7, g: 2, h: "ok", sv: 2, ...over };
 }
 
 function filesUnder(dir: string): string[] {
@@ -83,7 +83,7 @@ describe("parsing", () => {
 	test("the hub: xq for an unknown hash, kept declarations, nothing declared drops them", () => {
 		const hub = new LiveDebugHub({ clock: () => T0 });
 		expect(hub.heartbeat("j", { xh: "h1" })).toEqual({ xq: 1 });
-		expect(hub.heartbeat("j", { xh: "h1", x: DECL })).toEqual({});
+		expect(hub.heartbeat("j", { xh: "h1", xd: DECL })).toEqual({});
 		expect(hub.heartbeat("j", { xh: "h1" })).toEqual({});
 		expect(hub.hasCommand("j", "round_state")).toBe(true);
 		expect(hub.heartbeat("j", { xh: "h2" })).toEqual({ xq: 1 });
@@ -129,17 +129,18 @@ describe("over HTTP", () => {
 		await h.close();
 	});
 
-	test("the heartbeat: declarations, xq, cv on the server row, the A/B flag kept when x holds declarations", async () => {
+	test("the heartbeat: declarations, xq, cv on the server row, the A/B flag x and the declarations xd side by side", async () => {
 		expect(await read(await heartbeat("cv-1", { x: 1 }))).toEqual({ ok: true });
 		expect((await asJson(await admin("/v1/fleet/servers/cv-1"))).server.experiment).toBe(true);
 		// A hash the backend holds nothing for: asked for the declarations.
 		expect(await read(await heartbeat("cv-1", { x: 1, xh: "abc", cv: { current_map: "HedgeMaze", in_round: true, round_no: 4 } }))).toEqual({ ok: true, xq: 1 });
 		const after = await asJson(await admin("/v1/fleet/servers/cv-1"));
 		expect(after.server.cv).toEqual({ current_map: "HedgeMaze", in_round: true, round_no: 4 });
-		// The declarations under `x` (an object): not the A/B flag; the stored flag stays.
-		expect(await read(await heartbeat("cv-1", { xh: "abc", x: DECL, cv: { current_map: "Lobby" } }))).toEqual({ ok: true });
+		// The declarations ride as `xd`, next to the A/B flag `x = 1`: both read.
+		expect(await read(await heartbeat("cv-1", { x: 1, xh: "abc", xd: DECL, cv: { current_map: "Lobby" } }))).toEqual({ ok: true });
 		const detail = await asJson(await admin("/v1/fleet/servers/cv-1"));
 		expect(detail.server.experiment).toBe(true);
+		expect((await asJson(await admin(`/v1/fleet/servers/cv-1/streams?since=0`))).declared.commands.map((c: { n: string }) => c.n)).toContain(DECL.cmd[0].n);
 		expect(detail.server.cv).toEqual({ current_map: "Lobby" });
 		expect(await read(await heartbeat("cv-1", { xh: "abc", cv: { current_map: "Lobby" } }))).toEqual({ ok: true });
 		// The live list carries cv too; the columns route lists the union (any signed-in role).
@@ -151,7 +152,7 @@ describe("over HTTP", () => {
 	});
 
 	test("game.* commands: only when the server declared them, audited without arg values", async () => {
-		await heartbeat("cmd-1", { xh: "h", x: DECL });
+		await heartbeat("cmd-1", { xh: "h", xd: DECL });
 		expect((await admin("/v1/fleet/servers/cmd-1/watch", { method: "POST" })).status).toBe(200);
 		const refused = await admin("/v1/fleet/servers/cmd-1/commands", { method: "POST", body: JSON.stringify({ op: "game.nope" }) });
 		expect(refused.status).toBe(400);
@@ -173,7 +174,7 @@ describe("over HTTP", () => {
 	});
 
 	test("streams: kept only while watched, the ring, since, limits, undeclared and too big values dropped", async () => {
-		await heartbeat("st-1", { xh: "h", x: DECL });
+		await heartbeat("st-1", { xh: "h", xd: DECL });
 		// Not watched, no live map: nothing kept, told to stop.
 		expect(await read(await streams("st-1", [{ t: h.now(), s: { positions: positions() } }]))).toEqual({ ok: true, watch: false, lm: false });
 		expect((await asJson(await admin("/v1/fleet/servers/st-1/streams"))).frames).toEqual([]);
@@ -222,7 +223,7 @@ describe("over HTTP", () => {
 	});
 
 	test("a closed server's frames and declarations go at once; its column values stay on the row", async () => {
-		await heartbeat("close-1", { xh: "h", x: DECL, cv: { current_map: "HedgeMaze", in_round: null } });
+		await heartbeat("close-1", { xh: "h", xd: DECL, cv: { current_map: "HedgeMaze", in_round: null } });
 		await admin("/v1/fleet/servers/close-1/watch", { method: "POST" });
 		await streams("close-1", [{ t: h.now(), s: { positions: positions() } }]);
 		expect((await asJson(await admin("/v1/fleet/servers/close-1/streams"))).frames.length).toBe(1);
@@ -232,7 +233,7 @@ describe("over HTTP", () => {
 		const after = await asJson(await admin("/v1/fleet/servers/close-1/streams"));
 		expect(after).toEqual({ declared: { streams: [], commands: [] }, frames: [] });
 		// A lost one too (the sweep marks it after 90 s without a heartbeat).
-		await heartbeat("lost-1", { xh: "h", x: DECL });
+		await heartbeat("lost-1", { xh: "h", xd: DECL });
 		await admin("/v1/fleet/servers/lost-1/watch", { method: "POST" });
 		await streams("lost-1", [{ t: h.now(), s: { positions: positions() } }]);
 		h.setNow(T0 + 100_000);

@@ -18,7 +18,7 @@ import type { GameCommand, GameStream, LivePlayer, StreamPoint } from "@/lib/typ
 import { RemoteBar, useDebug } from "./shared";
 
 export const GAME_DEFINED_TEXT = "Game-defined: the game promises these are read-only; the kernel can't check it.";
-export const NO_DECLARATIONS_TEXT = "This server's game declares no commands or streams (framework 0.8.0+ with kernel 0.6.0: fleet.command / fleet.stream).";
+export const NO_DECLARATIONS_TEXT = "This server's game declares no commands or streams (framework 0.7.1+ with kernel 0.5.7: remoteDebug.command / remoteDebug.stream).";
 
 const cellText = (v: unknown) => (v === null || v === undefined ? "–" : typeof v === "object" ? JSON.stringify(v) : String(v));
 
@@ -201,7 +201,7 @@ export function GameTab({ streams }: { streams: StreamsState }) {
 							<code className="text-xs text-muted-foreground">positions</code>
 							<span className="text-xs text-muted-foreground">2 Hz, built in{positions ? ` · ${fmtTime(positions.t).slice(11)} UTC` : ""}</span>
 						</div>
-						{positions ? <PositionsPanel players={players} /> : <p className="text-sm text-muted-foreground">No sample yet (kernel 0.6.0+ sends them while this page is open).</p>}
+						{positions ? <PositionsPanel players={players} /> : <p className="text-sm text-muted-foreground">No sample yet (kernel 0.5.7+ sends them while this page is open).</p>}
 					</div>
 					{(declared?.streams ?? []).map((s) => {
 						const latest = latestValue(streams.frames, `game.${s.n}`);

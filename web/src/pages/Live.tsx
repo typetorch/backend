@@ -1,7 +1,7 @@
 /**
  * /live (plans/34): every live server's players at once on the exported map, coloured per server, with a list per
  * server. The page holds the fleet-wide live map watch (POST /v1/fleet/live-map/watch every 20 s; it lapses a minute
- * after the page goes): while it holds, kernels 0.6.0+ post their positions every 3 s, and the page reads the latest of
+ * after the page goes): while it holds, kernels 0.5.7+ post their positions every 3 s, and the page reads the latest of
  * each server every 3 s, moving each dot between its last two frames.
  *
  * Positions and names stay in this page's memory (never the query cache, localStorage or the URL). Owners only: the
@@ -57,7 +57,7 @@ export default function LivePage() {
 				description={
 					readOnly
 						? LIVE_READ_ONLY_TEXT
-						: `Every live server's players on the exported map, coloured per server (a frame every 3 s per server, kernel 0.6.0+). ${live.servers.length} server${live.servers.length === 1 ? "" : "s"}, ${players} player${players === 1 ? "" : "s"}.`
+						: `Every live server's players on the exported map, coloured per server (a frame every 3 s per server, kernel 0.5.7+). ${live.servers.length} server${live.servers.length === 1 ? "" : "s"}, ${players} player${players === 1 ? "" : "s"}.`
 				}
 			/>
 			{readOnly ? (
@@ -73,7 +73,7 @@ export default function LivePage() {
 						</p>
 					) : null}
 					{live.loaded && !live.servers.length ? (
-						<p className="text-sm text-muted-foreground">No positions yet: servers start posting within seconds of this page opening (kernels before 0.6.0 never do).</p>
+						<p className="text-sm text-muted-foreground">No positions yet: servers start posting within seconds of this page opening (kernels before 0.5.7 never do).</p>
 					) : null}
 					<LiveMap dots={dots} groups={groups} label="Live map of every server" empty={live.loaded ? "No players with a character right now." : "Waiting for the servers..."} />
 				</>

@@ -288,12 +288,7 @@ export interface ParsedHeartbeat {
 	 * Game state the game chose to show (never player names or ids: the framework docs say so).
 	 */
 	columns?: string | null;
-	/**
-	 * Plans/34: this heartbeat's `x` held the declarations (an object), not the A/B pin flag older kernels send there:
-	 * the stored flag is kept instead of read from it.
-	 */
-	keepExperiment?: boolean;
-	/** The closing request's heartbeat (kernel 0.6.0 sends no xh / x / cv on it): the stored column values stay. */
+	/** The closing request's heartbeat (kernel 0.5.7 sends no xh / xd / cv on it): the stored column values stay. */
 	keepColumns?: boolean;
 	/**
 	 * The public address the heartbeat came from, normalized (fleet/geo.ts normalizeIp). Never from the body: the HTTP
@@ -366,8 +361,8 @@ export type FleetMessage = HeartbeatMessage | DeployMessage;
  * The kernel's fleet status plus j = JobId (kernel src/server/Fleet.luau): { t = server type, b, c?, a?, n, m, s = start
  * (unix s), u = now (unix s), p, x = 1?, v, q, g, h, e?, sv = 2 }, plus bu? (0.4.0, the budget summary) and pf? (0.4.2,
  * TPS: parseMetrics). `k` (an access code) is ignored. The JobId may also come in the X-TT-Job header. Throws
- * FleetInputError. Plans/34 (kernel 0.6.0): `cv` (column values, stored), and `xh` / `x` (declarations, an object under
- * `x`: live-debug.ts keeps them in memory; here an object `x` only means "not the A/B pin flag").
+ * FleetInputError. Plans/34 (kernel 0.5.7): `cv` (column values, stored), and `xh` / `xd` (declarations: live-debug.ts keeps
+ * them in memory).
  */
 export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedHeartbeat {
 	const b = asBody(raw);
@@ -397,8 +392,6 @@ export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedH
 		budget: parseBudget(b.bu),
 		...parseMetrics(b.pf, b.bu),
 		columns: parseColumnValues(b.cv),
-		// Plans/34 sends the declarations under `x` (an object); older kernels' `x = 1` is the A/B pin.
-		...(typeof b.x === "object" && b.x !== null && !Array.isArray(b.x) ? { keepExperiment: true } : {}),
 	};
 }
 
@@ -1226,8 +1219,7 @@ export class FleetService {
 		const ip = p.ip ?? null;
 		const job = p.job;
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
-		// A heartbeat whose `x` carried the declarations (plans/34) says nothing about the A/B pin: the stored flag stays.
-		const experiment = p.keepExperiment ? (before?.experiment ?? 0) : p.experiment;
+		const experiment = p.experiment;
 		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, p.keepColumns ? (before?.cv ?? null) : (p.columns ?? null), ip, ip, now, now];
 		// One commit: the row, the history point (kernel 0.4.2: one per heartbeat) and the per-server cap on points.
 		// The address: an unknown one (null) keeps the stored one; first_ip is set once; ip_changed_at when it moves.

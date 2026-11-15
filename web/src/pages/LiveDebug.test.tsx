@@ -107,7 +107,7 @@ describe("the Fleet page's game columns", () => {
 		{ n: "in_round", l: "In round", t: "bool" },
 		{ n: "round_no", l: "Round", t: "number" },
 	];
-	const row = (job: string, cv: FleetServer["cv"]): FleetServer => ({ job, serverType: "public", branch: "prod", artifact: "a1", players: 3, maxPlayers: 20, startedAt: null, appliedSeq: 1, generation: 1, health: "ok", lastError: null, kernel: "0.6.0", experiment: false, cv });
+	const row = (job: string, cv: FleetServer["cv"]): FleetServer => ({ job, serverType: "public", branch: "prod", artifact: "a1", players: 3, maxPlayers: 20, startedAt: null, appliedSeq: 1, generation: 1, health: "ok", lastError: null, kernel: "0.5.7", experiment: false, cv });
 	const rows = [row("job-a", { current_map: "HedgeMaze", in_round: true, round_no: 12 }), row("job-b", { current_map: "Lobby", in_round: false, round_no: 3 }), row("job-c", null)];
 	beforeEach(() => localStorage.clear());
 
@@ -168,7 +168,7 @@ describe("the server page's Game and Live map tabs", () => {
 		generation: 2,
 		health: "ok",
 		lastError: null,
-		kernel: "0.6.0",
+		kernel: "0.5.7",
 		experiment: false,
 		closedAt: null,
 		lostAt: null,

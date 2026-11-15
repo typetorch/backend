@@ -35,7 +35,7 @@ export function LiveMapTab({ active, streams }: { active: boolean; streams: Stre
 					{streams.error}
 				</p>
 			) : null}
-			{!streams.frames.length ? <p className="text-sm text-muted-foreground">No positions yet: kernel 0.6.0+ posts them a second or two after this page connects.</p> : null}
+			{!streams.frames.length ? <p className="text-sm text-muted-foreground">No positions yet: kernel 0.5.7+ posts them a second or two after this page connects.</p> : null}
 			<LiveMap dots={dots} markers={markers} label="Live map of this server" />
 		</div>
 	);

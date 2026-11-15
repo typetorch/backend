@@ -1702,7 +1702,7 @@ section it still writes for kernels before 0.4), so it works even when a game's 
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)). Kernel 0.6.0 adds `xh` / `x` (the game's declarations) and `cv` (column values; the reply may carry `xq: 1` and `lm: 1`): see [game-defined debug](#game-defined-debug-streams-and-the-live-map) |
+| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)). Kernel 0.5.7 adds `xh` / `xd` (the game's declarations) and `cv` (column values; the reply may carry `xq: 1` and `lm: 1`): see [game-defined debug](#game-defined-debug-streams-and-the-live-map) |
 | `POST /v1/fleet/report` | game | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
 | `POST /v1/fleet/alert` | game | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k, d? }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`). `d` (kernel 0.5.2) is kept as the alert's `details` when it is a flat object (at most 16 keys; values strings of at most 1,000 bytes, numbers or booleans; at most 4 KB of JSON), else `details` is `null` (never a 400). `deploy_failed` carries `{ stage, error, attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }`; from 0.5.3 `d.bundle` names the [debug bundle](#debug-bundles-and-offline-history) that follows |
 | `POST /v1/fleet/bundle` | game | a kernel 0.5.3 [debug bundle](#debug-bundles-and-offline-history) (at most 512 KB, plain or `Content-Encoding: gzip`) -> `202 { ok: true, id }` |
@@ -1880,16 +1880,15 @@ Unknown argument keys are refused; args are at most 16 KB.
 
 ### Game-defined debug, streams and the live map
 
-Plans/34, kernel 0.6.0 and framework 0.8.0. The game declares what it wants to show; the backend keeps the declarations
+Plans/34, kernel 0.5.7 and framework 0.7.1. The game declares what it wants to show; the backend keeps the declarations
 **in memory** per JobId (`src/fleet/live-debug.ts`). Names (commands, streams, columns) match `^[a-z][a-z0-9_]{0,31}$`.
 
 **Declarations ride the heartbeat**, only when the game declared anything: `xh` (a short hash) on every heartbeat, and
-`x = { c: [{ n, l?, t? }], cmd: [{ n, l?, d? }], st: [{ n, hz, k?, l? }] }` on the first one, on a change and when the
+`xd = { c: [{ n, l?, t? }], cmd: [{ n, l?, d? }], st: [{ n, hz, k?, l? }] }` on the first one, on a change and when the
 reply asked (`xq: 1`: the backend holds no declarations for that hash, e.g. after a restart). Up to 16 columns (`t`:
 `string` / `number` / `bool`, a display hint), 32 commands (label <= 40, description <= 200 characters) and 8 streams
 (0.2-4 Hz, `k`: `points` or `json`). Bad entries are left out, never a reason to refuse the heartbeat. A heartbeat
-without `xh` or `x` declared nothing, and what was held goes. Older kernels send `x = 1` (an A/B pin) under the same
-key: an object `x` is the declarations, and the server row keeps its stored A/B flag for that heartbeat.
+without `xh` or `xd` declared nothing, and what was held goes. (`xd`, not `x`: `x = 1` is the A/B pin flag.)
 
 **Custom fleet columns**: `cv = { <name>: string (<= 64) | number | bool | null }` on the heartbeat, stored with the
 server row (fleet SQLite: game state, never player names or ids) and returned as `cv` on every `FleetServer`.

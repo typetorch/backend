@@ -1,8 +1,8 @@
 /**
  * Plans/34: game-defined remote debug, streams, the live map and custom fleet columns. All of it IN MEMORY (this process):
  *
- *   game      POST /v1/fleet/heartbeat { ..., xh?, x?, cv? } -> { ok, rd?, xq?, lm? }
- *               `xh` the declarations' hash (every heartbeat while the game declared anything), `x` the declarations
+ *   game      POST /v1/fleet/heartbeat { ..., xh?, xd?, cv? } -> { ok, rd?, xq?, lm? }
+ *               `xh` the declarations' hash (every heartbeat while the game declared anything), `xd` the declarations
  *               (first heartbeat, on a change, when asked: `xq: 1`), `cv` the column values (stored with the server row
  *               by the fleet service; parseColumnValues here).
  *   game      POST /v1/fleet/streams { j, frames: [{ t, s: { <stream>: value } }] } -> { ok, watch, lm }
@@ -15,9 +15,7 @@
  * or a log line, dropped when the job is lost or closed. Declarations are game metadata (names, labels), also in memory
  * only: a restarted backend asks for them again (`xq: 1`).
  *
- * The heartbeat's `x` key: older kernels send `x = 1` there (an A/B experiment pin). Plans/34 puts the declarations
- * object under the same key, so they are told apart by type: an object is the declarations, a number / boolean / string
- * the experiment flag (parseHeartbeat keeps the stored flag for a heartbeat that carried declarations instead).
+ * The declarations ride the heartbeat as `xd` (not `x`: that is the A/B experiment flag, `x = 1`).
  */
 
 /** Command, stream and column names. */
@@ -114,9 +112,9 @@ function entries<T>(raw: unknown, max: number, one: (r: Record<string, unknown>,
 }
 
 /**
- * The heartbeat's `x` (plans/34) cleaned: bad entries (a name that doesn't match DECL_NAME, a repeat, a stream without
+ * The heartbeat's `xd` (plans/34) cleaned: bad entries (a name that doesn't match DECL_NAME, a repeat, a stream without
  * a rate) are left out, labels cut to their limits, rates clamped to 0.2-4 Hz, past the limits the rest dropped. Null
- * when `x` isn't an object (an older kernel's experiment flag). Never a reason to refuse the heartbeat.
+ * when `xd` isn't an object. Never a reason to refuse the heartbeat.
  */
 export function parseDeclarations(raw: unknown): Declarations | null {
 	if (!isRecord(raw)) return null;
@@ -301,15 +299,15 @@ export class LiveDebugHub {
 	// Declarations (the heartbeat) ------------------------------------------------------------------------------------------
 
 	/**
-	 * A heartbeat's plans/34 fields: keeps `x` when it came, and says what the reply carries: `xq: 1` when the heartbeat
+	 * A heartbeat's plans/34 fields: keeps `xd` when it came, and says what the reply carries: `xq: 1` when the heartbeat
 	 * names a hash (`xh`) this process holds no declarations for, `lm: 1` while the live map is watched. A heartbeat
-	 * without `xh` or `x` declared nothing: what was held for the job goes.
+	 * without `xh` or `xd` declared nothing: what was held for the job goes.
 	 */
 	heartbeat(job: string, body: unknown): { xq?: 1; lm?: 1 } {
 		const now = this.clock();
 		const b = isRecord(body) ? body : {};
 		const hash = typeof b.xh === "string" && b.xh.length > 0 && b.xh.length <= HASH_MAX ? b.xh : null;
-		const decl = parseDeclarations(b.x);
+		const decl = parseDeclarations(b.xd);
 		let ask = false;
 		if (decl) {
 			this.declared.delete(job);
