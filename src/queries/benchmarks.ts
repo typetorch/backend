@@ -306,7 +306,11 @@ export interface RealtimeWindow {
 	playtimeMinutes: number;
 	/** playtimeMinutes / players, or null without players. */
 	playtimePerPlayer: number | null;
-	/** Average length of the sessions that started in the window and are over, minutes. */
+	/**
+	 * Average length of the sessions that ended in the window, minutes: first to last event, the start may be before the
+	 * window. Over = a session/leave row, or no event for ENDED_AFTER_MS. Counted when they end, as Creator Hub's Session
+	 * time chart does (a session that started in the window and still runs isn't in it yet).
+	 */
 	avgSessionMinutes: number | null;
 	/** tech/error rows sent by clients (each counts its `n`). */
 	clientErrors: number;
@@ -373,9 +377,15 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 			sessions:
 				`WITH ev AS (${playerEvents(ctx, f, from - SESSION_SLACK_MS, now, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp")}), ${SESSIONS_CTE} ` +
 				`SELECT CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END AS cur, COUNT(*) AS sessions, ` +
-				`SUM(CASE WHEN t1 < ${ended} THEN t1 - t0 ELSE 0 END) AS ended_ms, SUM(CASE WHEN t1 < ${ended} THEN 1 ELSE 0 END) AS ended_n, ` +
 				`SUM(t1 - t0) AS play_ms, SUM(CASE WHEN t1 >= ${ended} THEN 1 ELSE 0 END) AS running, COUNT(DISTINCT pid) AS players, ` +
 				`COUNT(DISTINCT CASE WHEN isnew = 1 THEN pid END) AS new_players FROM s WHERE t0 >= ${int(from)} GROUP BY CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END ORDER BY cur ${lim(10)}`,
+			// Session time: the sessions that ended in each window, full length (the start may be before it), counted in the
+			// window holding their last event, as Creator Hub's Session time chart counts a session in the minute it ends.
+			endedSessions:
+				`WITH ev AS (${playerEvents(ctx, f, from - SESSION_SLACK_MS, now, "e.sid AS sid, e.t AS t, e.kind AS kind, e.name AS name")}) ` +
+				`SELECT CASE WHEN t1 >= ${int(mid)} THEN 1 ELSE 0 END AS cur, COUNT(*) AS n, SUM(t1 - t0) AS ms FROM (SELECT sid, MIN(t) AS t0, MAX(t) AS t1, ` +
+				`MAX(CASE WHEN kind = 'session' AND name = 'leave' THEN 1 ELSE 0 END) AS lft FROM ev GROUP BY sid) x ` +
+				`WHERE t1 >= ${int(from)} AND (lft = 1 OR t1 < ${ended}) GROUP BY CASE WHEN t1 >= ${int(mid)} THEN 1 ELSE 0 END ORDER BY cur ${lim(10)}`,
 			tech:
 				`SELECT cur, AVG(CASE WHEN name = 'client' THEN fps END) AS fps, AVG(CASE WHEN name = 'server' THEN mem END) AS mem, ` +
 				`SUM(CASE WHEN name = 'error' AND src = 'client' THEN COALESCE(n, 1) ELSE 0 END) AS errors ` +
@@ -402,6 +412,7 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 		const window = (cur: 0 | 1): RealtimeWindow => {
 			const s = rows.sessions.find((x) => num(x.cur) === cur) ?? {};
 			const t = rows.tech.find((x) => num(x.cur) === cur) ?? {};
+			const e = rows.endedSessions.find((x) => num(x.cur) === cur) ?? {};
 			const sessions = num(s.sessions);
 			const errors = num(t.errors);
 			const fps = numOrNull(t.fps);
@@ -415,7 +426,7 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 				running: num(s.running),
 				playtimeMinutes: playtime,
 				playtimePerPlayer: players ? round(playtime / players, 2) : null,
-				avgSessionMinutes: num(s.ended_n) ? round(num(s.ended_ms) / num(s.ended_n) / 60_000, 2) : null,
+				avgSessionMinutes: num(e.n) ? round(num(e.ms) / num(e.n) / 60_000, 2) : null,
 				clientErrors: errors,
 				errorsPerSession: sessions ? round(errors / sessions, 3) : null,
 				clientFps: fps === null ? null : round(fps, 1),
