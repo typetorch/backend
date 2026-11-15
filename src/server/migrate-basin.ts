@@ -1060,6 +1060,11 @@ export function checkStreamUrl(raw: unknown, what: string): string {
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error(`${what} must be https (the send token would cross the network in clear)`);
 	if (url.username || url.password) throw new Error(`${what} must not hold credentials: the token goes in to.token`);
 	if (url.search || url.hash) throw new Error(`${what} must not have a query or fragment`);
+	// Every row of this server goes there: only Cloudflare's stream hosts (loopback for tests), never an arbitrary server,
+	// even for an owner's browser session (the export API itself takes the env admin token only).
+	if (!loopback && !/^[a-z0-9-]+\.ingest\.cloudflare\.com$/i.test(url.hostname)) {
+		throw new Error(`${what} must be a Basin stream on <stream id>.ingest.cloudflare.com`);
+	}
 	return url.href;
 }
 

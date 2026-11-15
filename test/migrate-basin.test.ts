@@ -454,3 +454,14 @@ describe("this server -> Basin, cut off mid-send", () => {
 		}
 	}, 120_000);
 });
+
+describe("Basin stream URLs", () => {
+	test("only <stream id>.ingest.cloudflare.com (or loopback): every row would go there", async () => {
+		const { checkStreamUrl } = await import("../src/server/migrate-basin.ts");
+		expect(checkStreamUrl("https://abc123.ingest.cloudflare.com", "to.events")).toBe("https://abc123.ingest.cloudflare.com/");
+		expect(checkStreamUrl("http://127.0.0.1:9999/stream", "to.events")).toBe("http://127.0.0.1:9999/stream");
+		for (const bad of ["https://evil.example.com", "https://ingest.cloudflare.com.evil.com", "https://a.b.ingest.cloudflare.com", "http://abc.ingest.cloudflare.com"]) {
+			expect(() => checkStreamUrl(bad, "to.events")).toThrow();
+		}
+	});
+});
