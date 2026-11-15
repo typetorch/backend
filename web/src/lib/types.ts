@@ -657,6 +657,8 @@ export interface PlayerSessionRow {
 	art: string;
 	/** The game server's JobId (newer backends). */
 	job?: string | null;
+	/** It has a first-session recording (newer backends; absent reads as no). */
+	recorded?: boolean;
 }
 
 export interface PlayerPurchase {

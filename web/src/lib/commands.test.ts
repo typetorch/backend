@@ -10,6 +10,7 @@ import {
 	rankCommands,
 	readRecent,
 	RECENT_MAX,
+	replayHref,
 	scoreCommand,
 	withFilters,
 	type Command,
@@ -166,5 +167,18 @@ describe("commands", () => {
 		const ctx = context({ search: "?range=1d&pid=old" });
 		cmd.run(ctx);
 		expect(ctx.navigate).toHaveBeenCalledWith("/players?range=1d&find=123456");
+	});
+});
+
+describe("replayHref", () => {
+	it("sets the range to the session's UTC days (a preset would move on), keeps the other filters, drops page keys", () => {
+		const href = new URL(replayHref("?range=7d&dev=phone&pid=abc&view=sessions", { sid: "s-1", start: "2026-11-12T23:58:50.000Z", end: "2026-11-13T00:03:00.000Z" }), "http://x");
+		expect(href.pathname).toBe("/recordings");
+		expect(Object.fromEntries(href.searchParams)).toEqual({ range: "custom", from: "2026-11-12", to: "2026-11-13", dev: "phone", tab: "replay", sid: "s-1" });
+	});
+
+	it("one day without an end; a custom range is replaced too", () => {
+		const href = new URL(replayHref("?range=custom&from=2026-01-01&to=2026-01-02", { sid: "s-2", start: "2026-11-12T10:00:00.000Z" }), "http://x");
+		expect(Object.fromEntries(href.searchParams)).toEqual({ range: "custom", from: "2026-11-12", to: "2026-11-12", tab: "replay", sid: "s-2" });
 	});
 });

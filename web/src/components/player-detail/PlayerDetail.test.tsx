@@ -66,7 +66,7 @@ function statsFor(pid: string, empty = false): PlayerStatsResult {
 			? []
 			: [
 					{ sid: "sid-two", start: "2026-10-08T10:15:00.000Z", end: "2026-10-08T10:20:00.000Z", minutes: 5, events: 4, firstSession: false, dev: "phone", art: "a1b2c3d-000002" },
-					{ sid: "sid-one", start: "2026-10-03T10:00:00.000Z", end: "2026-10-03T10:10:00.000Z", minutes: 10, events: 8, firstSession: true, dev: "phone", art: "a1b2c3d-000001" },
+					{ sid: "sid-one", start: "2026-10-03T10:00:00.000Z", end: "2026-10-03T10:10:00.000Z", minutes: 10, events: 8, firstSession: true, dev: "phone", art: "a1b2c3d-000001", recorded: true },
 				],
 		sessionsTruncated: false,
 		purchases: empty ? [] : [{ time: "2026-10-08T10:16:00.000Z", t: Date.parse("2026-10-08T10:16:00.000Z"), kind: "product", product: "1234", robux: 99, where: "shop", sid: "sid-two" }],
@@ -256,6 +256,20 @@ describe("Players page: the player detail container", () => {
 		fireEvent.click(within(sessions).getByText("2026-10-03 10:00:00").closest("tr") as HTMLElement);
 		await waitFor(() => expect(location).toContain("view=timeline"));
 		expect(location).toContain("sid=sid-one");
+	});
+
+	it("a recorded session gets a Replay link to the Recordings page over its own days (other filters kept); the rest none", async () => {
+		mount(`?pid=${ALPHA}&view=sessions&range=7d&branch=dev`);
+		const region = await detail();
+		const sessions = await within(region).findByRole("table", { name: "Sessions" });
+		const links = within(sessions).getAllByRole("link", { name: /^Replay session/ });
+		expect(links).toHaveLength(1);
+		const href = new URL(links[0].getAttribute("href") ?? "", "http://x");
+		expect(href.pathname).toBe("/recordings");
+		expect(Object.fromEntries(href.searchParams)).toEqual({ branch: "dev", range: "custom", from: "2026-10-03", to: "2026-10-03", tab: "replay", sid: "sid-one" });
+		// The link, not the row: the Timeline doesn't open.
+		fireEvent.click(links[0]);
+		expect(location).not.toContain("view=timeline");
 	});
 
 	it("Table shows the same numbers in the shared table, per day; Chart goes back", async () => {

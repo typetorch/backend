@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { fmtInt, fmtMinutes, fmtTime, plural, shortId } from "@/lib/format";
-import { withFilters } from "@/lib/commands";
+import { replayHref } from "@/lib/commands";
 import { useAnalytics, useParam } from "@/lib/hooks";
 import type { TimelineEvent, TimelineResult } from "@/lib/types";
 
@@ -35,7 +35,7 @@ function Sessions({ data, onGraph }: { data: TimelineResult; onGraph(sid: string
 								Session {fmtTime(s.start)}
 								{s.firstSession ? <Badge>first session</Badge> : null}
 								{s.firstSession ? (
-									<Link to={withFilters("/recordings", search, { tab: "replay", sid: s.sid })} className="text-xs font-normal underline">
+									<Link to={replayHref(search, s)} className="text-xs font-normal underline">
 										Replay (if recorded)
 									</Link>
 								) : null}

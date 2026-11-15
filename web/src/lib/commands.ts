@@ -125,6 +125,21 @@ export function withFilters(path: string, search: string, extra: Record<string, 
 	return text ? `${path}?${text}` : path;
 }
 
+/**
+ * The Recordings page's replay of one session, with the shared filters but the range set to the UTC days the session
+ * spans: the replay reads only the filter bar's range, and a preset ("Last 7 days") moves on from an old session.
+ */
+export function replayHref(search: string, session: { sid: string; start: string; end?: string }): string {
+	const params = keptFilters(search);
+	const day = (iso: string) => iso.slice(0, 10);
+	params.set("range", "custom");
+	params.set("from", day(session.start));
+	params.set("to", day(session.end && session.end > session.start ? session.end : session.start));
+	params.set("tab", "replay");
+	params.set("sid", session.sid);
+	return `/recordings?${params.toString()}`;
+}
+
 // ---------------------------------------------------------------- find player
 
 const UID = /^\d{1,16}$/;
