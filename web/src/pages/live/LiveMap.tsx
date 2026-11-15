@@ -5,7 +5,7 @@
  *
  * The map comes from the positions: a player is on the exported map whose bounds plus 8 studs contain them, else the
  * lobby's export (lib/live-map.ts mapForPosition). It shows the map most players are on, with a switcher; following a
- * player (a click on their dot in 2D, or Follow in the list) shows their map and, like a replay's "Follow player", cuts
+ * player (a click on their dot, in 2D or 3D, or Follow in the list) shows their map and, like a replay's "Follow player", cuts
  * away everything well above them.
  */
 import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
@@ -123,7 +123,7 @@ export function LiveMap({
 								</div>
 							) : null}
 						</div>
-						<p className="text-xs text-muted-foreground">Hover a dot for the name; click one (2D) or use Follow to follow that player. Positions are live and stay in this page only.</p>
+						<p className="text-xs text-muted-foreground">Hover a dot for the name; click one or use Follow to follow that player. Positions are live and stay in this page only.</p>
 					</>
 				) : (
 					<EmptyState>No exported maps yet: export them on the Maps page to see players on them. The list shows who is where.</EmptyState>

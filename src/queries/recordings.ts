@@ -494,8 +494,10 @@ export interface Prepared {
 	names: string[];
 	frames: Map<string, Frame>;
 	cores: Map<string, Bounds>;
-	/** Samples and sessions per map. */
-	stats: Map<string, { samples: number; sessions: Set<string>; events: number }>;
+	/** Samples and sessions per map; `confirmed` = samples whose analytics zone named the map. */
+	stats: Map<string, { samples: number; confirmed: number; sessions: Set<string>; events: number }>;
+	/** Samples with any analytics zone (0 = the game names no zones: map assignment by map events alone). */
+	zoned: number;
 	positioned: PositionedCell[];
 	sources: MapSources;
 }
@@ -507,8 +509,10 @@ const MIN_CONFIRMED_POINTS = 50;
 /** Map assignment for the sessions (and positioned cells), each map's frame, strays moved to NO_MAP. */
 export function prepareMaps(loaded: readonly LoadedSession[], sources: MapSources, positionedRows: Row[], grid: number): Prepared {
 	const names = new MapNames();
+	let zoned = 0;
 	const sessions = loaded.map((s) => {
-		const { maps, confirmed } = assignSamples(s.track, s.events, sources, names.of);
+		const { maps, confirmed, zoned: z } = assignSamples(s.track, s.events, sources, names.of);
+		zoned += z;
 		return { ...s, maps, confirmed };
 	});
 	const positioned: PositionedCell[] = positionedRows.map((r) => ({
@@ -563,11 +567,11 @@ export function prepareMaps(loaded: readonly LoadedSession[], sources: MapSource
 		frames.set(name, frameFor(b.frame, grid, BASE_CELL));
 		coreMap.set(name, b.core);
 	});
-	const stats = new Map<string, { samples: number; sessions: Set<string>; events: number }>();
+	const stats = new Map<string, { samples: number; confirmed: number; sessions: Set<string>; events: number }>();
 	const stat = (name: string) => {
 		let s = stats.get(name);
 		if (!s) {
-			s = { samples: 0, sessions: new Set(), events: 0 };
+			s = { samples: 0, confirmed: 0, sessions: new Set(), events: 0 };
 			stats.set(name, s);
 		}
 		return s;
@@ -577,11 +581,12 @@ export function prepareMaps(loaded: readonly LoadedSession[], sources: MapSource
 			if (Number.isNaN(s.track.x[i])) continue;
 			const st = stat(names.names[s.maps[i]]);
 			st.samples++;
+			if (s.confirmed[i]) st.confirmed++;
 			st.sessions.add(s.sid);
 		}
 	}
 	for (const c of positioned) stat(c.map).events += c.n;
-	return { sessions, names: names.names, frames, cores: coreMap, stats, positioned, sources };
+	return { sessions, names: names.names, frames, cores: coreMap, stats, zoned, positioned, sources };
 }
 
 function sourcesFrom(rows: Rows): MapSources {
@@ -696,7 +701,11 @@ export interface MapLayer {
 
 export interface LayersResult {
 	mapKey: string;
-	maps: { map: string; samples: number; sessions: number; events: number }[];
+	/** `confirmed`: samples whose analytics zone named the map (the rest were placed by the server's map event alone). */
+	maps: { map: string; samples: number; confirmed: number; sessions: number; events: number }[];
+	/** Samples with any analytics zone: above 0, the game names its places by zone, and a map with no confirmed sample has no
+	 * recorded evidence of where it is (e.g. every sample was a player in a tutorial area while the server ran that map). */
+	zoned: number;
 	map: string | null;
 	frame: Frame | null;
 	/** Every recorded sample on the map (unfiltered): the walkable area's silhouette (empty with `background: false`). */
@@ -776,6 +785,7 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 		return keep({
 			mapKey: o.mapKey,
 			maps: [],
+			zoned: 0,
 			map: null,
 			frame: null,
 			background: [],
@@ -793,12 +803,12 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 		if (sampling.capped) notes.push("The session list hit its row cap: narrow the range for every session.");
 		if ((rows.cells ?? []).length >= Math.min(20_000, ctx.dialect.maxRows)) notes.push("Positioned events hit the row cap: the rarest cells are left out.");
 		const maps = [...prepared.stats]
-			.map(([map, s]) => ({ map, samples: s.samples, sessions: s.sessions.size, events: s.events }))
+			.map(([map, s]) => ({ map, samples: s.samples, confirmed: s.confirmed, sessions: s.sessions.size, events: s.events }))
 			.filter((m) => m.samples > 0 || m.events > 0)
 			.sort((a, b) => b.samples + b.events - (a.samples + a.events) || a.map.localeCompare(b.map));
 		const map = o.map !== undefined ? o.map : defaultMap(prepared);
 		const auto = map !== null ? prepared.frames.get(map) : undefined;
-		if (map === null || !auto) return { ...result, maps, map, sampling, notes };
+		if (map === null || !auto) return { ...result, maps, zoned: prepared.zoned, map, sampling, notes };
 		const frame = o.cell !== undefined ? refineFrame(auto, o.cell) : auto;
 		// Positioned events come binned at BASE_CELL: finer frames keep them at that size (same origin).
 		const eventFrame = frame.cell % BASE_CELL === 0 ? frame : refineFrame(frame, BASE_CELL);
@@ -852,7 +862,7 @@ export const recordingLayers = defineQuery<LayersOptions, LayersResult>({
 				});
 			}
 		}
-		return { ...result, maps, map, frame, background: background.cells(o.maxCells * 2), layers, sampling, notes };
+		return { ...result, maps, zoned: prepared.zoned, map, frame, background: background.cells(o.maxCells * 2), layers, sampling, notes };
 	},
 });
 

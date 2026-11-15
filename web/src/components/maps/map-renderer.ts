@@ -165,6 +165,10 @@ export class MapRenderer {
 	private geometry: MapGeometry | null = null;
 	private bounds: Bounds | null = null;
 	private layers: MapLayer[] = [];
+	/** What a 3D click / hover can land on (built with the marks): the layers' dots and the heat cells' meshes. */
+	private pickPoints: THREE.Vector3[] = [];
+	private pickCells: THREE.InstancedMesh[] = [];
+	private readonly raycaster = new THREE.Raycaster();
 	private options: SceneOptions = { mode: "3d", offset: [0, 0, 0], band: null, decorative: false, markers: false };
 	private readonly keys = new Set<string>();
 	private flying = 0;
@@ -342,6 +346,8 @@ export class MapRenderer {
 			o.geometry?.dispose();
 			(o.material as THREE.Material)?.dispose();
 		}
+		this.pickPoints = [];
+		this.pickCells = [];
 		const flat = this.options.mode === "2d";
 		const floorY = this.options.band ? this.options.band[0] : this.bounds ? this.bounds.min[1] + this.options.offset[1] : 0;
 		// 3D: before the see-through parts (a wall tints what's behind it, and hides nothing). 2D: after them, on top.
@@ -365,7 +371,10 @@ export class MapRenderer {
 					mesh.setColorAt(k, heat.setRGB(r, g, b));
 				});
 				mesh.renderOrder = order++;
+				mesh.instanceMatrix.needsUpdate = true;
+				mesh.computeBoundingSphere();
 				this.marks.add(mesh);
+				this.pickCells.push(mesh);
 			}
 			for (const polygon of layer.polygons ?? []) {
 				if (polygon.length < 3 || !polygon.every((p) => this.inBand(p.y))) continue;
@@ -384,6 +393,7 @@ export class MapRenderer {
 				const dots = new THREE.Points(g, new THREE.PointsMaterial({ color, size: layer.pointSize ?? 7, sizeAttenuation: false, depthTest: !flat, transparent: flat }));
 				dots.renderOrder = order++;
 				this.marks.add(dots);
+				for (const p of points) this.pickPoints.push(new THREE.Vector3(p.x, p.y, p.z));
 			}
 			for (const path of layer.paths ?? []) {
 				const kept = path.filter((p) => this.inBand(p.y));
@@ -473,6 +483,38 @@ export class MapRenderer {
 			this.frame = 0;
 			if (!this.disposed) this.renderer.render(this.scene, this.camera);
 		});
+	}
+
+	/**
+	 * What a click or hover at a point of the canvas lands on, as world x / z. 2D: the point itself (worldAt). 3D (the map's floor
+	 * is not a plane to unproject onto): the layers' dot nearest on screen within `radius` px, else the heat cell under the pointer
+	 * (a ray), else null.
+	 */
+	pickAt(clientX: number, clientY: number, radius = 14): { x: number; z: number } | null {
+		if (this.options.mode === "2d") return this.worldAt(clientX, clientY);
+		const rect = this.renderer.domElement.getBoundingClientRect();
+		if (!rect.width || !rect.height) return null;
+		const px = clientX - rect.left;
+		const py = clientY - rect.top;
+		let best: THREE.Vector3 | null = null;
+		let bestD = radius * radius;
+		const v = new THREE.Vector3();
+		for (const p of this.pickPoints) {
+			v.copy(p).project(this.perspective);
+			if (v.z < -1 || v.z > 1) continue; // behind the camera or past its far plane
+			const dx = ((v.x + 1) / 2) * rect.width - px;
+			const dy = ((1 - v.y) / 2) * rect.height - py;
+			const d = dx * dx + dy * dy;
+			if (d <= bestD) {
+				bestD = d;
+				best = p;
+			}
+		}
+		if (best) return { x: best.x, z: best.z };
+		if (!this.pickCells.length) return null;
+		this.raycaster.setFromCamera(new THREE.Vector2((px / rect.width) * 2 - 1, -(py / rect.height) * 2 + 1), this.perspective);
+		const hit = this.raycaster.intersectObjects(this.pickCells, false)[0];
+		return hit ? { x: hit.point.x, z: hit.point.z } : null;
 	}
 
 	/** World x / z under a point of the canvas (2D only; null in 3D). */
