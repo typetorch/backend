@@ -1,8 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { cn } from "cn";
-import { EmptyState, KeyValue, Metric, PageHeader, QueryState, Section } from "@/components/common";
+import { EmptyState, KeyValue, LoadingBlock, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,7 @@ import { api } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
 import { fmtAgo, fmtDuration, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
-import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, GoneServer, ServerBudget } from "@/lib/types";
+import type { FleetAlert, FleetReportResult, FleetReports, FleetServer, FleetServers, GameColumn, GoneServer, ServerBudget } from "@/lib/types";
 // Plans/25: every JobId here links to its server page (/servers/<JobId>).
 import { alertBundle } from "./server/history";
 import { JobLink } from "./server/shared";
@@ -331,24 +331,65 @@ function IpText({ server: s }: { server: FleetServer }) {
 	);
 }
 
-/** The live servers' columns for this session: the read-only role gets no addresses, so no IP column. */
-export function serverColumns(readOnly: boolean): DataColumn<FleetServer>[] {
-	return readOnly ? SERVER_COLUMNS.filter((c) => c.id !== "ip") : SERVER_COLUMNS;
+/** Plans/34: a column id for a game-declared column (`cv.<name>`), so it never meets a built-in id. */
+export const gameColumnId = (name: string) => `cv.${name}`;
+
+/**
+ * Plans/34: the game's declared columns (GET /v1/fleet/columns) as table columns, hidden until turned on in the Columns
+ * picker (remembered like the others, by id). Typed display: bool as yes / no, numbers right-aligned.
+ */
+export function gameColumns(columns: readonly GameColumn[]): DataColumn<FleetServer>[] {
+	return columns.map((c): DataColumn<FleetServer> => {
+		const value = (s: FleetServer) => {
+			const v = s.cv?.[c.n];
+			return v === undefined ? null : v;
+		};
+		const header = c.l ?? c.n;
+		const title = `Game-defined column ${c.n} (the game's own value from each heartbeat)`;
+		if (c.t === "bool")
+			return { id: gameColumnId(c.n), header, title, type: "boolean", defaultHidden: true, accessor: (s) => (typeof value(s) === "boolean" ? value(s) : null), format: (v) => (v === true ? "yes" : v === false ? "no" : "–") };
+		if (c.t === "number")
+			return {
+				id: gameColumnId(c.n),
+				header,
+				title,
+				type: "number",
+				align: "right",
+				defaultHidden: true,
+				accessor: (s) => (typeof value(s) === "number" ? value(s) : null),
+				className: "tabular-nums",
+			};
+		return { id: gameColumnId(c.n), header, title, type: "enum", defaultHidden: true, accessor: (s) => (value(s) === null ? null : String(value(s))), className: "text-xs" };
+	});
+}
+
+/** The live servers' columns for this session: the read-only role gets no addresses, so no IP column; the game's own at the end. */
+export function serverColumns(readOnly: boolean, game: readonly GameColumn[] = []): DataColumn<FleetServer>[] {
+	const base = readOnly ? SERVER_COLUMNS.filter((c) => c.id !== "ip") : SERVER_COLUMNS;
+	return game.length ? [...base, ...gameColumns(game)] : base;
 }
 
 function Servers({ data }: { data: FleetServers }) {
 	const readOnly = isReadOnly(useAuth());
+	// Plans/34: the game's columns (backends before it answer 404: none).
+	const declared = useQuery({ queryKey: ["fleet", "columns"], queryFn: ({ signal }) => api.fleetColumns(signal), retry: false, staleTime: 30_000, refetchInterval: 60_000 });
+	const game = declared.data ?? NO_GAME_COLUMNS;
+	const columns = useMemo(() => serverColumns(readOnly, game), [readOnly, game]);
+	// Wait for the list once, so a remembered game column isn't read against a table without it.
+	if (declared.isPending) return <LoadingBlock rows={3} />;
 	return (
 		<DataTable
 			id="fleet-servers"
 			label="Live servers"
-			columns={serverColumns(readOnly)}
+			columns={columns}
 			data={data.servers}
 			rowId={(s) => s.job}
 			empty={<EmptyState>No live servers (a server shows up within 30 s of its first heartbeat, and leaves 90 s after its last).</EmptyState>}
 		/>
 	);
 }
+
+const NO_GAME_COLUMNS: GameColumn[] = [];
 
 const FAILED = new Set(["failed", "rolled_back"]);
 

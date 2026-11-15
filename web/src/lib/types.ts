@@ -1449,6 +1449,76 @@ export interface FleetServer {
 	ipChangedAt?: string | null;
 	/** Where the latest address is (the backend's offline IP database); null or missing while unknown. */
 	location?: ServerLocation | null;
+	/** Plans/34: the game's custom column values from its latest heartbeat (GET /v1/fleet/columns names them); null or missing: none. */
+	cv?: Record<string, GameColumnValue> | null;
+}
+
+// Plans/34: game-defined debug (backend src/fleet/live-debug.ts) ---------------------------------------------------------
+
+export type GameColumnValue = string | number | boolean | null;
+
+/** A column the game declared (GET /v1/fleet/columns): name, label, display type. */
+export interface GameColumn {
+	n: string;
+	l?: string;
+	t?: "string" | "number" | "bool";
+}
+
+/** A read-only command the game declared (op `game.<n>`). */
+export interface GameCommand {
+	n: string;
+	l?: string;
+	d?: string;
+}
+
+/** A stream the game declared (key `game.<n>` in a frame). */
+export interface GameStream {
+	n: string;
+	hz: number;
+	k: "points" | "json";
+	l?: string;
+}
+
+/** The built-in `positions` stream's player. x / y / z absent with st "none" (no character). */
+export interface LivePlayer {
+	u: number;
+	n: string;
+	x?: number;
+	y?: number;
+	z?: number;
+	yaw?: number;
+	hp?: number;
+	st: "alive" | "dead" | "none";
+}
+
+/** A `points` stream's point. */
+export interface StreamPoint {
+	x: number;
+	y: number;
+	z: number;
+	label?: string;
+	color?: string;
+}
+
+/** One sample: the kernel's time (unix ms) and each stream's value (`positions`, `game.<name>`). */
+export interface StreamFrame {
+	t: number;
+	s: { positions?: { players: LivePlayer[] } } & Record<string, unknown>;
+}
+
+/** GET /v1/fleet/servers/<job>/streams. */
+export interface ServerStreams {
+	declared: { streams: GameStream[]; commands: GameCommand[] };
+	frames: StreamFrame[];
+}
+
+/** GET /v1/fleet/live-map: each live server's latest positions. */
+export interface LiveMapServer {
+	job: string;
+	branch: string | null;
+	artifact: string | null;
+	at: number;
+	players: LivePlayer[];
 }
 
 /** A server's location, city level at best. */
@@ -1630,7 +1700,7 @@ export interface DebugAuditEntry {
 }
 
 /** The read-only remote debug ops (v1). */
-export type RemoteOp = "status" | "builds" | "budget" | "logs" | "players" | "player.logs" | "errors" | "modules" | "state" | "assets" | "network" | "dex.children" | "dex.props";
+export type RemoteOp = "status" | "builds" | "budget" | "logs" | "players" | "player.logs" | "errors" | "modules" | "state" | "assets" | "network" | "dex.children" | "dex.props" | `game.${string}`;
 
 /** A queued command and, once answered, its result (kept 3 minutes on the backend, in memory only). */
 export interface RemoteCommand {

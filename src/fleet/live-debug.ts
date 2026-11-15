@@ -319,6 +319,9 @@ export class LiveDebugHub {
 			const held = this.declared.get(job);
 			if (held && held.hash === hash) {
 				held.seen = now;
+				// Re-inserted: the Map's order stays stalest first (trimDeclared drops from the front).
+				this.declared.delete(job);
+				this.declared.set(job, held);
 			} else {
 				ask = true;
 				this.stats.asked++;

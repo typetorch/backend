@@ -1031,8 +1031,13 @@ empty query lists the recent commands first (remembered in the browser). Command
 adds its own with `useRegisterCommands` (the Players page: Copy this player's pid). The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
 with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker. Every JobId
 on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
-runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,
-Network, Audit).
+runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, Game, Live map, State, Dex, Modules, Builds,
+Budget, Errors, Network, Audit). **Game** (plans/34) lists the commands the game declared as game-defined buttons (answers
+as a table, key-value pairs or JSON) and its streams' latest values; **Live map** draws the players on the exported map
+(the map from their positions, a switcher, the Maps page's 2D / 3D and height controls, the name on hover, a 20 s trail,
+the game's `points` streams as markers; click a dot or Follow to follow a player). **`/live`** (Live map, next to Fleet)
+shows every live server's players at once, coloured per server. The Fleet page's Columns picker also offers the game's
+[custom columns](#game-defined-debug-streams-and-the-live-map) (hidden until turned on).
 
 **Audience.** The filter bar's **Audience** button opens country, language, account age, Premium and join source
 filters (the [audience filters](#programmatic-api): player-level, from the players' join rows in the range; in the URL as

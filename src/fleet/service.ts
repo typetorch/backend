@@ -293,6 +293,8 @@ export interface ParsedHeartbeat {
 	 * the stored flag is kept instead of read from it.
 	 */
 	keepExperiment?: boolean;
+	/** The closing request's heartbeat (kernel 0.6.0 sends no xh / x / cv on it): the stored column values stay. */
+	keepColumns?: boolean;
 	/**
 	 * The public address the heartbeat came from, normalized (fleet/geo.ts normalizeIp). Never from the body: the HTTP
 	 * edge sets it from the connection (trusted proxies, Cloudflare). Null or missing: unknown (kept as it was).
@@ -1226,7 +1228,7 @@ export class FleetService {
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		// A heartbeat whose `x` carried the declarations (plans/34) says nothing about the A/B pin: the stored flag stays.
 		const experiment = p.keepExperiment ? (before?.experiment ?? 0) : p.experiment;
-		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, p.columns ?? null, ip, ip, now, now];
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, p.keepColumns ? (before?.cv ?? null) : (p.columns ?? null), ip, ip, now, now];
 		// One commit: the row, the history point (kernel 0.4.2: one per heartbeat) and the per-server cap on points.
 		// The address: an unknown one (null) keeps the stored one; first_ip is set once; ip_changed_at when it moves.
 		await this.db.transaction((tx) => {
@@ -1411,7 +1413,7 @@ export class FleetService {
 
 	/** The server is shutting down (no "server lost" alert for it). */
 	async applyClosing(job: string, heartbeat?: ParsedHeartbeat): Promise<void> {
-		if (heartbeat) await this.applyHeartbeat(heartbeat);
+		if (heartbeat) await this.applyHeartbeat({ ...heartbeat, keepColumns: true });
 		const now = this.clock();
 		await this.db.run("UPDATE servers SET closed_at = ?, last_seen = ? WHERE job = ?", [now, now, job]);
 		this.gone(job);

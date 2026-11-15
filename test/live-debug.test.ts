@@ -221,12 +221,14 @@ describe("over HTTP", () => {
 		expect(last).toBe(429);
 	});
 
-	test("a closed server's frames and declarations go at once", async () => {
-		await heartbeat("close-1", { xh: "h", x: DECL });
+	test("a closed server's frames and declarations go at once; its column values stay on the row", async () => {
+		await heartbeat("close-1", { xh: "h", x: DECL, cv: { current_map: "HedgeMaze", in_round: null } });
 		await admin("/v1/fleet/servers/close-1/watch", { method: "POST" });
 		await streams("close-1", [{ t: h.now(), s: { positions: positions() } }]);
 		expect((await asJson(await admin("/v1/fleet/servers/close-1/streams"))).frames.length).toBe(1);
-		await h.call("/v1/fleet/closing", post(API, { j: "close-1", closing: true }));
+		// The kernel's closing request: the heartbeat body without xh / x / cv.
+		await h.call("/v1/fleet/closing", post(API, { ...hbOf(h, "close-1"), closing: true }));
+		expect((await asJson(await admin("/v1/fleet/servers/close-1"))).server.cv).toEqual({ current_map: "HedgeMaze", in_round: null });
 		const after = await asJson(await admin("/v1/fleet/servers/close-1/streams"));
 		expect(after).toEqual({ declared: { streams: [], commands: [] }, frames: [] });
 		// A lost one too (the sweep marks it after 90 s without a heartbeat).

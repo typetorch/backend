@@ -56,6 +56,9 @@ import type {
 	QueryResults,
 	RemoteCommand,
 	RemoteOp,
+	GameColumn,
+	LiveMapServer,
+	ServerStreams,
 	SettingsView,
 	SqlResult,
 	StatsWindow,
@@ -368,6 +371,14 @@ export function createApi(options: ApiOptions = {}) {
 			post<RemoteCommand>(`/v1/fleet/servers/${encodeURIComponent(job)}/commands`, { op, ...(args ? { args } : {}) }, signal),
 		/** A queued command's state and, once answered, its result (only for whoever queued it; answers are kept 3 minutes). */
 		remoteResult: (job: string, id: string, signal?: AbortSignal) => get<RemoteCommand>(`/v1/fleet/servers/${encodeURIComponent(job)}/commands/${encodeURIComponent(id)}`, signal),
+		/** Plans/34: what the server's game declared (commands, streams) and its stream frames after `since` (admin; memory only). */
+		serverStreams: (job: string, since?: number, signal?: AbortSignal) => get<ServerStreams>(`/v1/fleet/servers/${encodeURIComponent(job)}/streams${qs({ since })}`, signal),
+		/** Plans/34: the /live page is open (every 20 s; lapses after 60 s). */
+		watchLiveMap: (signal?: AbortSignal) => post<{ ok: true; until: number; wake: boolean }>("/v1/fleet/live-map/watch", {}, signal),
+		/** Plans/34: every live server's latest player positions. */
+		liveMap: (signal?: AbortSignal) => get<{ servers: LiveMapServer[]; watchedUntil: number | null }>("/v1/fleet/live-map", signal),
+		/** Plans/34: the game's custom fleet columns (the live servers' declarations); [] on backends before it. */
+		fleetColumns: (signal?: AbortSignal) => get<{ columns: GameColumn[] }>("/v1/fleet/columns", signal).then((r) => r.columns),
 		/** The remote debug audit: the last queued commands, newest first (who, op, job, an args summary; never an answer). */
 		debugAudit: (limit = 100, signal?: AbortSignal) => get<{ entries: DebugAuditEntry[] }>(`/v1/fleet/debug/audit${qs({ limit })}`, signal).then((r) => r.entries),
 		/** The SSE stream's URL (EventSource can't set headers; the proxy adds the token). */

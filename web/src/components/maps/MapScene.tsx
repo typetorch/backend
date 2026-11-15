@@ -25,6 +25,8 @@ export interface MapSceneProps {
 	markers?: boolean;
 	/** A click on the 2D map, in world studs. */
 	onPick?: (point: { x: number; z: number }) => void;
+	/** The pointer over the 2D map (world studs, and px from the scene's top left), or null when it leaves (the live map's names). */
+	onHover?: (point: { x: number; z: number } | null, at: { left: number; top: number }) => void;
 	/** The canvas's accessible name. */
 	label?: string;
 	className?: string;
@@ -35,7 +37,7 @@ const NO_OFFSET: Vec3 = [0, 0, 0];
 /** Pointer travel (px) under which a press is a click, not a pan. */
 const CLICK_PX = 5;
 
-export default function MapScene({ geometry, bounds, mode, layers = [], offset = NO_OFFSET, band = null, decorative = false, markers = false, onPick, label, className }: MapSceneProps) {
+export default function MapScene({ geometry, bounds, mode, layers = [], offset = NO_OFFSET, band = null, decorative = false, markers = false, onPick, onHover, label, className }: MapSceneProps) {
 	const host = useRef<HTMLDivElement>(null);
 	const renderer = useRef<MapRenderer | null>(null);
 	const [failed, setFailed] = useState<string | null>(null);
@@ -79,8 +81,18 @@ export default function MapScene({ geometry, bounds, mode, layers = [], offset =
 					down.current = { x: e.clientX, y: e.clientY };
 				}}
 				onPointerUp={onPointerUp}
-				onPointerMove={(e) => setCursor(renderer.current?.worldAt(e.clientX, e.clientY) ?? null)}
-				onPointerLeave={() => setCursor(null)}
+				onPointerMove={(e) => {
+					const at = renderer.current?.worldAt(e.clientX, e.clientY) ?? null;
+					setCursor(at);
+					if (onHover) {
+						const rect = e.currentTarget.getBoundingClientRect();
+						onHover(at, { left: e.clientX - rect.left, top: e.clientY - rect.top });
+					}
+				}}
+				onPointerLeave={() => {
+					setCursor(null);
+					onHover?.(null, { left: 0, top: 0 });
+				}}
 			/>
 			{failed ? <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-muted-foreground">{failed}</div> : null}
 			<div className="pointer-events-none absolute bottom-2 left-2 rounded bg-background/80 px-2 py-1 text-xs text-muted-foreground tabular-nums">

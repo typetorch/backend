@@ -27,6 +27,7 @@ import {
 	Map as MapIcon,
 	LayoutDashboard,
 	ListFilter,
+	Radar,
 	MessageSquareText,
 	ScrollText,
 	Rocket,
@@ -98,6 +99,8 @@ export const NAV_GROUPS: NavGroup[] = [
 		label: "Observe & troubleshoot",
 		items: [
 			{ label: "Fleet", path: "/fleet", icon: Server, noFilters: true, also: ["/servers"] },
+			// Plans/34: every live server's players on the exported map.
+			{ label: "Live map", path: "/live", icon: Radar, noFilters: true },
 			{ label: "Deploys", path: "/deploys", icon: Rocket, noFilters: true },
 			{ label: "Errors", path: "/errors", icon: Bug, noFilters: true },
 			{ label: "Performance", path: "/performance", icon: Gauge },
