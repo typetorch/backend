@@ -23,7 +23,7 @@ import {
 	type SessionEvent,
 } from "../src/recording-analysis.ts";
 import { decodeSessions, registerDecoder, type DecodedRecording, type RecordingInput } from "../src/recording.ts";
-import { clearRecordingCache, prepareMaps, sampleSessions, trackCache, type LoadedSession } from "../src/queries/recordings.ts";
+import { clearRecordingCache, firstActionExamples, prepareMaps, refineFrame, sampleSessions, trackCache, type LoadedSession } from "../src/queries/recordings.ts";
 import { BasinStore } from "../src/store/basin.ts";
 import { DuckDbStore, readRows } from "../src/store/duckdb.ts";
 import { fixtureDb } from "./fixtures.ts";
@@ -150,6 +150,26 @@ describe("grid aggregation", () => {
 		expect(g.total).toBe(7);
 		expect(g.outside).toBe(2);
 		expect(g.cells(1)).toEqual([[1, 3, 5]]);
+	});
+	test("heights: a cell's points with a y give its average (weighted, to 0.1 stud) as a 4th value", () => {
+		const g = new Grid({ minX: 0, minZ: 0, maxX: 40, maxZ: 40, cell: 10, cols: 4, rows: 4 });
+		g.add(1, 1, 1, 3);
+		g.add(2, 2, 3, 7);
+		g.add(15, 35, 1);
+		g.add(25, 5, 1, Number.NaN);
+		expect(g.cells()).toEqual([
+			[0, 0, 4, 6],
+			[2, 0, 1],
+			[1, 3, 1],
+		]);
+	});
+	test("a finer frame keeps the origin and extent", () => {
+		const f = frameFor({ minX: 636.4, maxX: 1007, minZ: -163.2, maxZ: 163 }, 96, 4);
+		const fine = refineFrame(f, 0.5);
+		expect([fine.minX, fine.minZ, fine.maxX, fine.maxZ]).toEqual([f.minX, f.minZ, f.maxX, f.maxZ]);
+		expect(fine.cell).toBe(0.5);
+		expect(fine.cols).toBe(f.cols * f.cell * 2);
+		expect(refineFrame(f, 4)).toEqual({ ...f, cell: 4, cols: (f.maxX - f.minX) / 4, rows: (f.maxZ - f.minZ) / 4 });
 	});
 });
 
@@ -397,6 +417,32 @@ describe("recording-layers", () => {
 		expect(old.sampling.recorded).toBe(20);
 	});
 
+	test("a finer cell for the real map: same origin, same counts, recorded heights; events stay at the base cell", async () => {
+		const auto = await store.query("recording-layers", {}, { map: "Forest", layers: ["path", "ev:custom:down"] });
+		const fine = await store.query("recording-layers", {}, { map: "Forest", layers: ["path", "ev:custom:down"], cell: 1, background: false });
+		expect(fine.frame?.cell).toBe(1);
+		expect([fine.frame?.minX, fine.frame?.minZ, fine.frame?.maxX, fine.frame?.maxZ]).toEqual([auto.frame?.minX, auto.frame?.minZ, auto.frame?.maxX, auto.frame?.maxZ]);
+		expect(fine.background).toEqual([]);
+		const path = (r: typeof auto) => r.layers.find((l) => l.id === "path");
+		expect(path(fine)?.count).toBe(path(auto)?.count);
+		expect((path(fine)?.cells.length ?? 0) > (path(auto)?.cells.length ?? 0)).toBe(true);
+		expect(path(fine)?.cells.every((c) => typeof c[3] === "number" && Number.isFinite(c[3]))).toBe(true);
+		expect(path(fine)?.cell).toBeUndefined();
+		const down = (r: typeof auto) => r.layers.find((l) => l.id === "ev:custom:down");
+		expect(down(fine)?.cell).toBe(4);
+		expect(down(fine)?.count).toBe(down(auto)?.count);
+		expect(down(auto)?.cell).toBeUndefined();
+		// A half-stud cell's sessions: its box (x0, z0, x1, z1) finds the sessions with a point there.
+		const half = await store.query("recording-layers", {}, { map: "Forest", layers: ["path"], cell: 0.5 });
+		const f = half.frame as NonNullable<typeof half.frame>;
+		const [col, row] = [...(half.layers[0]?.cells ?? [])].sort((a, b) => b[2] - a[2])[0] as [number, number, number];
+		const x0 = f.minX + col * 0.5;
+		const z0 = f.minZ + row * 0.5;
+		const hit = await store.query("recording-sessions", {}, { map: "Forest", box: [x0, z0, x0 + 0.5, z0 + 0.5], layer: "path" });
+		expect(hit.total).toBeGreaterThan(0);
+		expect(() => store.render("recording-layers", {}, { cell: 3 as never })).toThrow("cell must be one of");
+	});
+
 	test("bad options", () => {
 		expect(() => store.render("recording-layers", {}, { layers: ["nope"] })).toThrow("unknown layer");
 		expect(() => store.render("recording-layers", {}, { mapKey: "bad key'" })).toThrow();
@@ -592,5 +638,14 @@ describe("Basin SQL gives the same results (run on DuckDB through shims)", () =>
 		const duck = await store.query(name as never, {}, options as never);
 		const got = await basin().query(name as never, {}, options as never);
 		expect(JSON.parse(JSON.stringify(got))).toEqual(JSON.parse(JSON.stringify(duck)));
+	});
+});
+
+describe("first-action examples", () => {
+	test("the slowest that reached an action, and some that never did; sessions without a spawn don't count", () => {
+		const row = (sid: string, move: number | null, spawn: number | null = 0) => ({ s: { sid }, actions: { spawn, seconds: { move, screen: null, button: null, prompt: null, round: null } } });
+		const per = [row("a", 1), row("b", 9), row("c", 4), row("d", null), row("e", null), row("f", 30, null), row("g", 9)];
+		expect(firstActionExamples(per, "move", 2)).toEqual({ slowest: ["b", "g"], never: ["d", "e"] });
+		expect(firstActionExamples(per, "screen", 2).slowest).toEqual([]);
 	});
 });

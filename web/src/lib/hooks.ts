@@ -53,6 +53,24 @@ export function useParam(key: string, fallback = ""): [string, (value: string) =
 	return [value, set];
 }
 
+/** Several page-level URL parameters at once: `set({ a: "1", b: null })` (null / "" removes a key), the rest kept. */
+export function usePageParams() {
+	const [params, setParams] = useSearchParams();
+	const set = useCallback(
+		(patch: Record<string, string | null | undefined>) =>
+			setParams((current) => {
+				const copy = new URLSearchParams(current);
+				for (const [k, v] of Object.entries(patch)) {
+					if (v) copy.set(k, v);
+					else copy.delete(k);
+				}
+				return copy;
+			}),
+		[setParams],
+	);
+	return [params, set] as const;
+}
+
 export interface AnalyticsOptions {
 	enabled?: boolean;
 	/** Use these filters instead of the filter bar's. */

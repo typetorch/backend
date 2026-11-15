@@ -7,9 +7,10 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ToggleChip } from "@/components/ToggleChip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import type { MapPoint } from "@/lib/maps";
 import type { RecFrame, RecordingReplayResult } from "@/lib/types";
 import { MapView, type ToView } from "./MapView";
-import { cone, fmtClock, frameAround, mapAtTime, mapName, markers as buildMarkers, poseAt, stateAtTime } from "./map";
+import { cone, fmtClock, frameAround, mapAtTime, mapName, markers as buildMarkers, poseAt, stateAtTime, type Pose } from "./map";
 
 export const SPEEDS = [0.5, 1, 2, 4, 8] as const;
 const TICK_MS = 100;
@@ -25,8 +26,21 @@ export function whyLabel(why: string | null | undefined): string {
 	return why ? (WHY[why] ?? why) : "unknown";
 }
 
-/** Draws the map `map` with the overlay; the page swaps in the map layer's frame and silhouette. */
-export type RenderMap = (map: string, overlay: (toView: ToView) => ReactNode, fallback: RecFrame | null) => ReactNode;
+/** The replay at the current moment in world studs (the real map draws these; the SVG map uses the overlay). */
+export interface ReplayScene {
+	/** The whole path on this map, and the part played so far. */
+	path: MapPoint[];
+	passed: MapPoint[];
+	pose: Pose | null;
+	/** The camera's direction: [x, z] corners from the character (null without a yaw). */
+	cone: [number, number][] | null;
+}
+
+/**
+ * Draws the map `map` with the overlay (SVG, cell units) or the scene (world studs); the page swaps in the real map
+ * when it has an export, else the map layer's frame and silhouette.
+ */
+export type RenderMap = (map: string, overlay: (toView: ToView) => ReactNode, fallback: RecFrame | null, scene: ReplayScene) => ReactNode;
 
 const defaultRenderMap: RenderMap = (map, overlay, fallback) =>
 	fallback ? <MapView frame={fallback} background={[]} overlay={overlay} label={`Replay on ${mapName(map)}`} /> : <p className="text-sm text-muted-foreground">No positions on this map.</p>;
@@ -60,6 +74,13 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 	}, [samples, replay.maps, map]);
 	const fallback = useMemo(() => frameAround(onMap.map((s) => [s[1] as number, s[3] as number])), [onMap]);
 	const pose = poseAt(onMap, t);
+	const points = useMemo(() => onMap.map((s) => ({ x: s[1] as number, y: s[2] ?? 0, z: s[3] as number, t: s[0] })), [onMap]);
+	const scene: ReplayScene = {
+		path: points,
+		passed: points.filter((p) => p.t <= t),
+		pose,
+		cone: pose ? cone(pose, 10) : null,
+	};
 	const state = stateAtTime(replay, t);
 	const recent = marks.filter((m) => m.t <= t).slice(-6).reverse();
 	const keys = (replay.inputs ?? []).filter((i) => i.type === "key" && i.t <= t).length;
@@ -93,7 +114,7 @@ export function ReplayPlayer({ replay, renderMap = defaultRenderMap, initialT = 
 				</span>
 			</div>
 			<div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_16rem]">
-				<div className="min-w-0">{renderMap(map, overlay, fallback)}</div>
+				<div className="min-w-0">{renderMap(map, overlay, fallback, scene)}</div>
 				<div className="space-y-2 text-sm">
 					<div className="font-medium">Just happened</div>
 					{recent.length ? (

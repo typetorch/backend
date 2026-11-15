@@ -109,6 +109,8 @@ export function mapAtTime(maps: RecordingReplayResult["maps"], t: number): strin
 export interface Pose {
 	x: number;
 	z: number;
+	/** The root's height, when recorded (the 3D replay). */
+	y?: number | null;
 	/** Camera yaw (radians, 0 = facing -Z, "up" on the map), when known. */
 	yaw: number | null;
 }
@@ -128,14 +130,15 @@ export function poseAt(samples: readonly ReplaySample[], t: number, jump = 30): 
 	const base = before ?? after;
 	if (!base) return null;
 	const yawOf = (s: ReplaySample) => s[4];
-	if (!before || !after || after[0] === before[0]) return { x: base[1] as number, z: base[3] as number, yaw: yawOf(base) };
+	if (!before || !after || after[0] === before[0]) return { x: base[1] as number, y: base[2], z: base[3] as number, yaw: yawOf(base) };
 	const bx = before[1] as number;
 	const bz = before[3] as number;
 	const ax = after[1] as number;
 	const az = after[3] as number;
-	if (Math.hypot(ax - bx, az - bz) > jump) return { x: bx, z: bz, yaw: yawOf(before) };
+	if (Math.hypot(ax - bx, az - bz) > jump) return { x: bx, y: before[2], z: bz, yaw: yawOf(before) };
 	const k = (t - before[0]) / (after[0] - before[0]);
-	return { x: bx + (ax - bx) * k, z: bz + (az - bz) * k, yaw: yawOf(before) };
+	const y = before[2] !== null && after[2] !== null ? before[2] + (after[2] - before[2]) * k : (before[2] ?? after[2]);
+	return { x: bx + (ax - bx) * k, y, z: bz + (az - bz) * k, yaw: yawOf(before) };
 }
 
 /** The camera cone's corners (studs): from the character, `length` long, `spread` radians each side. */

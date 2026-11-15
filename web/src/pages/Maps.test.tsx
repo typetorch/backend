@@ -7,7 +7,7 @@
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "@/lib/api";
 import { AuthProvider } from "@/lib/auth";
@@ -19,7 +19,7 @@ import Maps from "./Maps";
 vi.setConfig({ testTimeout: 20_000 });
 
 vi.mock("@/components/maps/MapScene", () => ({
-	default: (props: { geometry: { count: number } | null; mode: string; layers: { id: string; cellSize?: number; cells?: unknown[]; points?: unknown[] }[]; band: [number, number] | null; offset: number[] }) => (
+	default: (props: { geometry: { count: number } | null; mode: string; layers: { id: string; cellSize?: number; cells?: unknown[]; points?: unknown[] }[]; band: [number, number] | null; offset: number[]; decorative?: boolean; markers?: boolean }) => (
 		<div
 			data-testid="scene"
 			data-parts={props.geometry?.count ?? "none"}
@@ -29,6 +29,8 @@ vi.mock("@/components/maps/MapScene", () => ({
 			data-points={props.layers.map((l) => l.points?.length ?? 0).join(",")}
 			data-band={props.band ? props.band.join(",") : "all"}
 			data-offset={props.offset.join(",")}
+			data-decorative={String(Boolean(props.decorative))}
+			data-markers={String(Boolean(props.markers))}
 		/>
 	),
 }));
@@ -101,6 +103,7 @@ let view: MapsView = VIEW;
 beforeEach(() => {
 	calls = [];
 	view = VIEW;
+	recordings = NO_RECORDINGS;
 	vi.stubGlobal(
 		"fetch",
 		vi.fn(async (input: string, init?: RequestInit) => {
@@ -117,8 +120,12 @@ beforeEach(() => {
 			return new Response("{}", { status: 404 });
 		}),
 	);
-	vi.spyOn(api, "query").mockImplementation(async (_name, _filters, options) => POSITIONS((options as { cell: number }).cell) as never);
+	vi.spyOn(api, "query").mockImplementation(async (name, _filters, options) => (name === "recording-layers" ? (recordings as never) : (POSITIONS((options as { cell: number }).cell) as never)));
 });
+
+/** The recording-layers answer for the alignment from recordings (Mall's samples, inside its 0..100 box). */
+const NO_RECORDINGS = { mapKey: "map", maps: [], map: null, frame: null, background: [], layers: [], catalog: [], sampling: {}, notes: [] };
+let recordings: unknown = NO_RECORDINGS;
 
 afterEach(() => {
 	cleanup();
@@ -126,9 +133,17 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function wrap(auth: AuthInfo) {
+let location = "";
+function Where() {
+	const l = useLocation();
+	location = l.search;
+	return null;
+}
+
+function wrap(auth: AuthInfo, path = "/maps") {
 	return render(
-		<MemoryRouter>
+		<MemoryRouter initialEntries={[path]}>
+			<Where />
 			<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
 				<AuthProvider value={auth}>
 					<Maps />
@@ -214,5 +229,72 @@ describe("the Maps page", () => {
 		expect(scene().dataset.band).toBe("14,46");
 		fireEvent.click(screen.getByRole("button", { name: "All" }));
 		expect(scene().dataset.band).toBe("all");
+	});
+
+	test("by default only the collision geometry: the toggles add decorative meshes and markers, explained in a line", async () => {
+		wrap(OWNER);
+		await waitFor(() => expect(scene().dataset.parts).toBe("2"), { timeout: 8000 });
+		expect(scene().dataset.decorative).toBe("false");
+		expect(scene().dataset.markers).toBe("false");
+		expect(screen.getByTestId("draw-rule").textContent).toMatch(/every part that collides/);
+		fireEvent.click(screen.getByRole("checkbox", { name: /Decorative meshes/ }));
+		expect(scene().dataset.decorative).toBe("true");
+		fireEvent.click(screen.getByRole("checkbox", { name: /Markers and triggers/ }));
+		expect(scene().dataset.markers).toBe("true");
+		expect(location).toContain("decor=1");
+		expect(location).toContain("markers=1");
+	});
+
+	test("the view lives in the URL and survives a map switch; a band range that doesn't fit the new map resets", async () => {
+		wrap(OWNER, "/maps?mode=3d&cell=2&draw=points&decor=1&hide=ev:custom:loot&band=10..20");
+		await waitFor(() => expect(scene().dataset.layers).toBe("ev:custom:down"), { timeout: 8000 });
+		expect(scene().dataset.mode).toBe("3d");
+		expect(scene().dataset.decorative).toBe("true");
+		expect(scene().dataset.band).toBe("10,20");
+		expect(scene().dataset.cells).toBe("0");
+		expect(scene().dataset.points).toBe("2");
+		expect((screen.getByRole("button", { name: "2 studs" }) as HTMLElement).getAttribute("aria-pressed")).toBe("true");
+		// parking_garage's heights are -1..30 too: the range fits and stays.
+		fireEvent.click(screen.getByRole("button", { name: /parking_garage/ }));
+		await waitFor(() => expect(scene().dataset.parts).toBe("3"), { timeout: 8000 });
+		expect(location).toContain("map=parking_garage");
+		expect(scene().dataset.mode).toBe("3d");
+		expect(scene().dataset.decorative).toBe("true");
+		expect(scene().dataset.band).toBe("10,20");
+		expect((screen.getByRole("button", { name: "2 studs" }) as HTMLElement).getAttribute("aria-pressed")).toBe("true");
+		expect(location).toContain("hide=ev%3Acustom%3Aloot");
+		// The lobby (-1..30 too) keeps it; a map whose heights don't hold the range drops it.
+		cleanup();
+		view = { ...VIEW, maps: [...VIEW.maps, map({ name: "Low", hash: "d".repeat(64), bounds: { min: [0, -1, 0], max: [10, 5, 10] } })] };
+		GEOMETRY.Low = ttmp([{ pos: [0, 0, 0], size: [4, 1, 4] }]);
+		wrap(OWNER, "/maps?mode=3d&band=10..20&map=Low");
+		await waitFor(() => expect(scene().dataset.parts).toBe("1"), { timeout: 8000 });
+		await waitFor(() => expect(location).not.toContain("band="), { timeout: 8000 });
+		expect(scene().dataset.band).toBe("all");
+		expect(location).toContain("mode=3d");
+	});
+
+	test("a floor choice carries to the next map's floor of the same number", async () => {
+		wrap(OWNER, "/maps?band=f2");
+		await waitFor(() => expect(scene().dataset.band).toBe("14,46"), { timeout: 8000 });
+		expect((screen.getByRole("button", { name: "Floor 2" }) as HTMLElement).getAttribute("aria-pressed")).toBe("true");
+		// parking_garage has one floor: every height, and the choice stays in the URL for the next map.
+		fireEvent.click(screen.getByRole("button", { name: /parking_garage/ }));
+		await waitFor(() => expect(scene().dataset.parts).toBe("3"), { timeout: 8000 });
+		expect(scene().dataset.band).toBe("all");
+		expect(location).toContain("band=f2");
+	});
+
+	test("no positioned events: the alignment comes from the recordings' positions on that map", async () => {
+		view = { ...VIEW, maps: [map({ name: "HedgeMaze", bounds: { min: [641, -2, -157], max: [998, 58, 157] }, alignment: { state: "unknown", samples: 0, inside: 0 } })], names: [{ name: "hedgemaze", events: 9081 }] };
+		GEOMETRY.HedgeMaze = ttmp([{ pos: [800, -1, 0], size: [396, 2, 396] }]);
+		const background: [number, number, number][] = [];
+		for (let c = 0; c < 93; c += 4) for (let r = 0; r < 82; r += 4) background.push([c, r, 3]);
+		recordings = { mapKey: "map", maps: [{ map: "hedgemaze", samples: 46268, sessions: 159, events: 0 }], map: "hedgemaze", frame: { minX: 636, minZ: -164, maxX: 1008, maxZ: 164, cell: 4, cols: 93, rows: 82 }, background, layers: [], catalog: [], sampling: {}, notes: [] };
+		wrap(OWNER);
+		await waitFor(() => expect(screen.getByText("Aligned with where players are")).toBeTruthy(), { timeout: 8000 });
+		expect(screen.getByTestId("alignment-source").textContent).toMatch(/recorded positions on this map \(recordings/);
+		const asked = (api.query as unknown as { mock: { calls: [string, unknown, { map?: string; layers?: string[] }][] } }).mock.calls.filter((c) => c[0] === "recording-layers");
+		expect(asked[0]?.[2]).toEqual({ map: "hedgemaze", layers: [] });
 	});
 });

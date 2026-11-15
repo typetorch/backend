@@ -477,8 +477,8 @@ export interface RecFrame {
 	rows: number;
 }
 
-/** [column, row, count] */
-export type RecCell = [number, number, number];
+/** [column, row, count, average Y of the samples?] (recording layers carry the height; the 3D map uses it) */
+export type RecCell = [number, number, number, number?];
 
 export interface RecSampling {
 	recorded: number;
@@ -497,6 +497,8 @@ export interface RecMapLayer {
 	sessions: number;
 	values: { value: string; count: number }[];
 	cells: RecCell[];
+	/** Studs per cell when it isn't the frame's (positioned events with a finer `cell` option); same origin. */
+	cell?: number;
 	cellsCut: number;
 	examples: string[];
 }
@@ -595,6 +597,8 @@ export interface FirstActionStat {
 	p25: number | null;
 	p75: number | null;
 	histogram: { label: string; count: number }[];
+	/** Sessions to replay: the slowest to reach it, and some that never did (older backends leave it out). */
+	examples?: { slowest: string[]; never: string[] };
 }
 
 export interface FirstActionSplit {
