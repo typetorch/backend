@@ -509,18 +509,20 @@ export function assignSamples(
 	events: readonly SessionEvent[],
 	sources: MapSources,
 	index: (name: string) => number,
-): { maps: Uint16Array; confirmed: Uint8Array } {
+): { maps: Uint16Array; confirmed: Uint8Array; zoned: number } {
 	const maps = new Uint16Array(track.t.length);
 	const confirmed = new Uint8Array(track.t.length);
+	let zoned = 0;
 	const cursor = new StateCursor(events);
 	for (let i = 0; i < track.t.length; i++) {
 		const t = track.t[i];
 		const zone = statePart(cursor.at(t), "zone");
+		if (zone) zoned++;
 		const map = assignMap(sources, track.job, track.pid, t, zone);
 		maps[i] = index(map);
 		if (zone && map !== NO_MAP && zone.toLowerCase() === map.toLowerCase()) confirmed[i] = 1;
 	}
-	return { maps, confirmed };
+	return { maps, confirmed, zoned };
 }
 
 /** Moves samples that fall outside their map's core bounds to NO_MAP (a stale map while the player is in the lobby). */

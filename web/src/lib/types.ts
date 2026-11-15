@@ -505,7 +505,10 @@ export interface RecMapLayer {
 
 export interface RecordingLayersResult {
 	mapKey: string;
-	maps: { map: string; samples: number; sessions: number; events: number }[];
+	/** `confirmed`: samples whose analytics zone named the map. */
+	maps: { map: string; samples: number; confirmed?: number; sessions: number; events: number }[];
+	/** Samples with any analytics zone (absent from older backends). */
+	zoned?: number;
 	map: string | null;
 	frame: RecFrame | null;
 	background: RecCell[];

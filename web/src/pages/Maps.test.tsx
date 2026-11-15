@@ -297,4 +297,16 @@ describe("the Maps page", () => {
 		const asked = (api.query as unknown as { mock: { calls: [string, unknown, { map?: string; layers?: string[] }][] } }).mock.calls.filter((c) => c[0] === "recording-layers");
 		expect(asked[0]?.[2]).toEqual({ map: "hedgemaze", layers: [] });
 	});
+
+	test("recordings never in the map's zone (a tutorial area while the server ran it): no offset suggested from them", async () => {
+		// 2026-11-15, gnome: every round map's samples were newcomers in the TutorialYard (x -4500), and Use this offset moved the maps there
+		view = { ...VIEW, maps: [map({ name: "HedgeMaze", bounds: { min: [641, -2, -157], max: [998, 58, 157] }, alignment: { state: "unknown", samples: 0, inside: 0 } })], names: [{ name: "hedgemaze", events: 9081 }] };
+		GEOMETRY.HedgeMaze = ttmp([{ pos: [800, -1, 0], size: [396, 2, 396] }]);
+		const background: [number, number, number][] = [];
+		for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) background.push([c, r, 50]);
+		recordings = { mapKey: "map", maps: [{ map: "hedgemaze", samples: 800, confirmed: 0, sessions: 40, events: 0 }], zoned: 5000, map: "hedgemaze", frame: { minX: -4600, minZ: -100, maxX: -4408, maxZ: 92, cell: 48, cols: 4, rows: 4 }, background, layers: [], catalog: [], sampling: {}, notes: [] };
+		wrap(OWNER);
+		await waitFor(() => expect(screen.getByTestId("alignment-unconfirmed")).toBeTruthy(), { timeout: 8000 });
+		expect(screen.queryByRole("button", { name: "Use this offset" })).toBeNull();
+	});
 });
