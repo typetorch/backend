@@ -258,13 +258,30 @@ class Spool {
 		let uploaded = 0;
 		let failed = 0;
 		for (const batch of this.batches()) {
-			try {
-				const out = this.outPath(batch);
-				if (!existsSync(out) && !(await this.write(batch, out))) {
+			const out = this.outPath(batch);
+			if (!existsSync(out)) {
+				let rows: number;
+				try {
+					rows = await this.write(batch, out);
+				} catch (error) {
+					// A batch that can't be written must not hold the ones after it: set aside (kept on disk) and counted.
+					const aside = join(this.spoolDir, "failed");
+					mkdirSync(aside, { recursive: true });
+					renameSync(join(this.spoolDir, batch.name), join(aside, batch.name));
+					rmSync(`${out}.tmp`, { force: true });
+					this.stats.errors++;
+					this.stats.lastError = `${batch.name}: ${describeError(error)}`.slice(0, 300);
+					this.stats.lastErrorAt = this.clock();
+					this.log(`ingest node: ${this.stats.lastError}; set aside in ${aside}`);
+					continue;
+				}
+				if (!rows) {
 					// Nothing left (every row erased): no upload.
 					this.drop(batch);
 					continue;
 				}
+			}
+			try {
 				await this.bucket.put(queueKey(this.prefix, batch.table as QueueTable, this.node, batch.ms, batch.n), out);
 				// Confirmed: only now the local copies go.
 				this.drop(batch);

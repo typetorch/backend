@@ -1090,7 +1090,7 @@ Roblox servers ── events ──► load balancer / DNS ─► ingest node x 
 - **The main server** (`TYPETORCH_ROLE=main`) is a normal server (it takes ingest too, from game servers still pointed at
   it) whose loader also lists the bucket each tick, downloads up to 64 files / 256 MB, loads them **in the same transaction**
   as its own raw files, upserts the identity files into the identity table, then deletes them from the bucket. The keys it
-  committed are remembered (`live.loaded_remote`, a week), so a file still in the bucket after a crash or a failed delete is
+  committed are remembered (`live.loaded_remote`, 2 days), so a file still in the bucket after a crash or a failed delete is
   only deleted, never loaded twice; a row that still arrives twice is an exact duplicate, which the nightly export drops.
   Its busy 503 counts the bucket backlog it has seen. A bucket it can't reach never stops its own ingest: the files wait,
   the Backend stats page says so, and a `queue_bucket_down` backend alert (critical) is raised after a minute. A file it
@@ -2764,6 +2764,22 @@ What it means for a 1 GB VPS: 1,000 players online is about 10 million events a 
 under what one core ingests. Memory stays under ~600 MB including the nightly export, because DuckDB holds to its
 400MB cap and spills; a flow graph over many days is the slowest query. Real props make bigger Parquet files than
 these synthetic ones.
+
+**Ingest nodes** ([Several ingest servers](#several-ingest-servers-optional)): `bun scripts/loadtest.ts analytics --rate
+<n> --ingest-nodes 2` starts a main server, two nodes (rotating every 2 s) and an in-process fake S3 bucket, and sends the
+batches round-robin to the nodes; it waits until nothing is left on a node, in the bucket or in the main server's raw files.
+Measured 2026-11-15 on a 4-core i5-4210U laptop (Linux, Bun 1.4.4), everything (client, servers, fake bucket) on the same 4
+cores, so this checks correctness and overhead, not scale-out (that needs the nodes on their own machines):
+
+| 30 s, batches of 250 | Latency p50 / p95 / p99 / max | Peak RSS (main / node) | Catch-up after | Rows loaded |
+|---|---|---|---|---|
+| 10,000 events/s, one server | 4.5 / 11 / 20 / 37 ms | 278 MB | 2.1 s | 299,750 of 299,750 |
+| 10,000 events/s, main + 2 nodes | 5.2 / 18 / 40 / 94 ms | 221 / 174 MB | 4.2 s | 299,750 of 299,750 |
+| 20,000 events/s, one server | 5.4 / 39 / 139 / 240 ms | 436 MB | 2.1 s (loader lag peak 8 s) | 599,750 of 599,750 |
+| 20,000 events/s, main + 2 nodes | 5.6 / 40 / 129 / 211 ms | 385 / 215 MB | 3.9 s | 599,750 of 599,750 |
+
+No errors; at most 4 files waited in the bucket at once, none were left. Through the nodes a row reaches DuckDB a few
+seconds later (a rotation, an upload, a loader tick), and the main server parses Parquet instead of JSON for those rows.
 
 A sudden surge (shed load from the CLI, resize the VPS, tune DuckDB for a bigger machine): [Emergency backend
 scale-ups](https://www.typetorch.dev/guides/emergency-scale-ups).

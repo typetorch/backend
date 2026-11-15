@@ -530,7 +530,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	 */
 	async function loadTick(w: Warehouse): Promise<{ files: number; rows: number }> {
 		if (!mainQueue) return w.load();
-		const { files: remote, done } = await mainQueue.fetch(await w.remoteCommitted());
+		const { files: remote, done } = await mainQueue.fetch((keys) => w.remoteCommitted(keys));
 		let result: { files: number; rows: number; remoteKeys: string[] };
 		try {
 			result = await w.loadWithRemote(remote);

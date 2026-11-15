@@ -269,19 +269,26 @@ export class Warehouse {
 		return this.jobs.run(() => this.loadNow(maxBytes, remote));
 	}
 
-	/** Keys of queue files committed and not yet let go of by the bucket. */
-	remoteCommitted(): Promise<Set<string>> {
-		if (!this.options.remote) return Promise.resolve(new Set());
-		return this.jobs.run(async () => new Set((await readRows(this.writer, "SELECT key FROM live.loaded_remote")).map((r) => String(r.key))));
+	/** Which of these queue keys were committed already (a crash or a failed delete left them in the bucket). */
+	remoteCommitted(keys: readonly string[]): Promise<Set<string>> {
+		if (!this.options.remote || !keys.length) return Promise.resolve(new Set());
+		return this.jobs.run(async () => {
+			const found = new Set<string>();
+			for (let i = 0; i < keys.length; i += 500) {
+				const rows = await readRows(this.writer, `SELECT key FROM live.loaded_remote WHERE key IN (${keys.slice(i, i + 500).map(lit).join(", ")})`);
+				for (const r of rows) found.add(String(r.key));
+			}
+			return found;
+		});
 	}
 
 	/**
-	 * The bucket let go of these keys. Kept a week anyway (a re-upload of the same key after an ingest node crashed is
-	 * then only deleted), then forgotten.
+	 * Forgets committed keys after 2 days. Until then a key that shows up again (an ingest node that crashed after its
+	 * upload sends the same file again) is only deleted; after that an exact duplicate would still drop at export.
 	 */
 	forgetRemote(): Promise<void> {
 		if (!this.options.remote) return Promise.resolve();
-		return this.jobs.run(async () => void (await this.writer.run(`DELETE FROM live.loaded_remote WHERE loaded_at < ${this.clock() - 7 * DAY_MS}`)));
+		return this.jobs.run(async () => void (await this.writer.run(`DELETE FROM live.loaded_remote WHERE loaded_at < ${this.clock() - 2 * DAY_MS}`)));
 	}
 
 	private async loadNow(maxBytes: number, remote: readonly RemoteFile[]): Promise<{ files: number; rows: number; remoteKeys: string[] }> {

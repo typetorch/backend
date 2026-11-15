@@ -245,10 +245,10 @@ export class MainQueue {
 	}
 
 	/**
-	 * Lists the bucket and downloads what this tick takes. Keys in `committed` (loaded by an earlier tick whose delete
+	 * Lists the bucket and downloads what this tick takes. Keys `committedOf` knows (loaded by an earlier tick whose delete
 	 * didn't happen: a crash, a bucket error) are only deleted. Identity files are upserted here (idempotent).
 	 */
-	async fetch(committed: ReadonlySet<string>): Promise<{ files: RemoteFile[]; done: string[] }> {
+	async fetch(committedOf: (keys: string[]) => Promise<ReadonlySet<string>>): Promise<{ files: RemoteFile[]; done: string[] }> {
 		const now = this.clock();
 		for (const [key, until] of this.quarantine) if (until <= now) this.quarantine.delete(key);
 		const listed: (QueueObject & { table: QueueTable })[] = [];
@@ -270,6 +270,7 @@ export class MainQueue {
 		this.stats.pendingFiles = listed.length;
 		this.stats.pendingBytes = listed.reduce((n, o) => n + o.size, 0);
 		this.stats.truncated = truncated;
+		const committed = await committedOf(listed.map((o) => o.key));
 
 		const done = listed.filter((o) => committed.has(o.key)).map((o) => o.key);
 		const maxFiles = this.o.maxFilesPerTick ?? 64;
