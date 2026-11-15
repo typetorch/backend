@@ -25,6 +25,7 @@
  */
 import { FLEET_HEARTBEAT, PROP_KEYS } from "../schema.ts";
 import { DAY_MS, assertSafeKey } from "../sql/dialect.ts";
+import { mergeSessions, type SessionSpan } from "./session-time.ts";
 import { whereSql, type NormalizedFilters } from "../sql/filters.ts";
 import {
 	ENDED_AFTER_MS,
@@ -292,6 +293,11 @@ export interface RealtimeOptions {
 	hours: number;
 	/** Days of concurrent-user history (default 7). */
 	ccuDays: number;
+	/**
+	 * Session time: a player's sessions are one when the next starts less than this after the previous ended (rejoins,
+	 * teleports), minutes; 0 = off (default: on live data it brought one game closer to Creator Hub and another further away).
+	 */
+	mergeGapMinutes: number;
 }
 
 export interface RealtimeWindow {
@@ -306,7 +312,11 @@ export interface RealtimeWindow {
 	playtimeMinutes: number;
 	/** playtimeMinutes / players, or null without players. */
 	playtimePerPlayer: number | null;
-	/** Average length of the sessions that started in the window and are over, minutes. */
+	/**
+	 * Average length of the sessions that ended in the window, minutes: first to last event, the start may be before the
+	 * window. Over = a session/leave row, or no event for ENDED_AFTER_MS. Counted when they end, as Creator Hub's Session
+	 * time chart does (a session that started in the window and still runs isn't in it yet).
+	 */
 	avgSessionMinutes: number | null;
 	/** tech/error rows sent by clients (each counts its `n`). */
 	clientErrors: number;
@@ -355,6 +365,7 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 	options: (input = {}) => ({
 		hours: intOption(input.hours, "hours", 24, 1, 2160),
 		ccuDays: intOption(input.ccuDays, "ccuDays", 7, 1, 30),
+		mergeGapMinutes: intOption(input.mergeGapMinutes, "mergeGapMinutes", 0, 0, 30),
 	}),
 	statements(ctx, f, o) {
 		const lim = ctx.dialect.limit;
@@ -373,9 +384,15 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 			sessions:
 				`WITH ev AS (${playerEvents(ctx, f, from - SESSION_SLACK_MS, now, "e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp")}), ${SESSIONS_CTE} ` +
 				`SELECT CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END AS cur, COUNT(*) AS sessions, ` +
-				`SUM(CASE WHEN t1 < ${ended} THEN t1 - t0 ELSE 0 END) AS ended_ms, SUM(CASE WHEN t1 < ${ended} THEN 1 ELSE 0 END) AS ended_n, ` +
 				`SUM(t1 - t0) AS play_ms, SUM(CASE WHEN t1 >= ${ended} THEN 1 ELSE 0 END) AS running, COUNT(DISTINCT pid) AS players, ` +
 				`COUNT(DISTINCT CASE WHEN isnew = 1 THEN pid END) AS new_players FROM s WHERE t0 >= ${int(from)} GROUP BY CASE WHEN t0 >= ${int(mid)} THEN 1 ELSE 0 END ORDER BY cur ${lim(10)}`,
+			// Session time: the sessions that ended in each window, full length (the start may be before it), counted in the
+			// window holding their last event, as Creator Hub's Session time chart counts a session in the minute it ends.
+			// Per session, merged in shape() (a player's rejoins within mergeGapMinutes are one session).
+			endedSessions:
+				`WITH ev AS (${playerEvents(ctx, f, from - SESSION_SLACK_MS, now, "e.pid AS pid, e.sid AS sid, e.t AS t, e.kind AS kind, e.name AS name")}) ` +
+				`SELECT sid, MIN(pid) AS pid, MIN(t) AS t0, MAX(t) AS t1, MAX(CASE WHEN kind = 'session' AND name = 'leave' THEN 1 ELSE 0 END) AS lft ` +
+				`FROM ev GROUP BY sid HAVING MAX(t) >= ${int(from - o.mergeGapMinutes * 60_000)} ${lim(500_000)}`,
 			tech:
 				`SELECT cur, AVG(CASE WHEN name = 'client' THEN fps END) AS fps, AVG(CASE WHEN name = 'server' THEN mem END) AS mem, ` +
 				`SUM(CASE WHEN name = 'error' AND src = 'client' THEN COALESCE(n, 1) ELSE 0 END) AS errors ` +
@@ -399,9 +416,25 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 		};
 	},
 	shape(rows, ctx, _f, o) {
+		const endedBefore = ctx.now - ENDED_AFTER_MS;
+		const mid = ctx.now - o.hours * HOUR_MS;
+		const spans: SessionSpan[] = rows.endedSessions
+			.map((r) => {
+				const t1 = num(r.t1);
+				return { pid: str(r.pid), t0: num(r.t0), t1, dev: "unknown", over: num(r.lft) === 1 || t1 < endedBefore };
+			})
+			.sort((a, b) => (a.pid < b.pid ? -1 : a.pid > b.pid ? 1 : a.t0 - b.t0));
+		const merged = mergeSessions(spans, o.mergeGapMinutes * 60_000);
+		const endedBy = [0, 1].map((cur) => {
+			const lo = cur ? mid : ctx.now - 2 * o.hours * HOUR_MS;
+			const hi = cur ? Infinity : mid;
+			const done = merged.filter((s) => s.over && s.t1 >= lo && s.t1 < hi);
+			return { n: done.length, ms: done.reduce((a, s) => a + s.t1 - s.t0, 0) };
+		});
 		const window = (cur: 0 | 1): RealtimeWindow => {
 			const s = rows.sessions.find((x) => num(x.cur) === cur) ?? {};
 			const t = rows.tech.find((x) => num(x.cur) === cur) ?? {};
+			const e = endedBy[cur];
 			const sessions = num(s.sessions);
 			const errors = num(t.errors);
 			const fps = numOrNull(t.fps);
@@ -415,7 +448,7 @@ export const realtime = defineQuery<RealtimeOptions, RealtimeResult>({
 				running: num(s.running),
 				playtimeMinutes: playtime,
 				playtimePerPlayer: players ? round(playtime / players, 2) : null,
-				avgSessionMinutes: num(s.ended_n) ? round(num(s.ended_ms) / num(s.ended_n) / 60_000, 2) : null,
+				avgSessionMinutes: e.n ? round(e.ms / e.n / 60_000, 2) : null,
 				clientErrors: errors,
 				errorsPerSession: sessions ? round(errors / sessions, 3) : null,
 				clientFps: fps === null ? null : round(fps, 1),

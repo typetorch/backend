@@ -25,6 +25,7 @@ import { overview, retention, roblox, topEvents } from "./overview.ts";
 import { playerStats } from "./player.ts";
 import { firstAction, quitAutopsy, recordingLayers, recordingReplay, recordingSessions } from "./recordings.ts";
 import { playerEvents, playerSummary } from "./player-support.ts";
+import { sessionTime } from "./session-time.ts";
 import { perfClient, perfCompare, perfServer } from "./perf.ts";
 
 export const QUERIES = {
@@ -62,6 +63,7 @@ export const QUERIES = {
 	benchmarks,
 	realtime,
 	trends,
+	"session-time": sessionTime,
 	"perf-client": perfClient,
 	"perf-server": perfServer,
 	"perf-compare": perfCompare,

@@ -187,6 +187,16 @@ export function groupLabel(by: PerfGroupBy, key: string, seq?: number | null): s
 	return KEY_LABELS[by]?.[key] ?? key;
 }
 
+/** Each device class keeps its color on every chart (Roblox page, Session time). */
+export const DEVICE_COLORS: Record<string, string> = {
+	desktop: "var(--chart-1)",
+	phone: "var(--chart-2)",
+	tablet: "var(--chart-3)",
+	console: "var(--chart-4)",
+	vr: "var(--chart-5)",
+	unknown: "var(--chart-7)",
+};
+
 /** A color per series slot (chart-1..8), in order. */
 export const SERIES_COLORS = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)", "var(--chart-6)", "var(--chart-7)", "var(--chart-8)"];
 

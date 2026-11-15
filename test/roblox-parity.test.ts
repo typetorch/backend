@@ -210,6 +210,49 @@ describe("realtime", () => {
 	});
 });
 
+describe("realtime: session time counts sessions when they end", () => {
+	let inst: DuckDBInstance;
+	let conn: DuckDBConnection;
+	let rt: DuckDbStore;
+	const timeEvents: EventRow[] = [
+		// Started before the last hour, left inside it: counts in the current window, full 60 minutes.
+		...session("A", "a1", NOW - 90 * MIN, 60),
+		// Started inside the last hour and still running (a row a minute ago, no leave): not over, not counted.
+		row("B", "b1", NOW - 40 * MIN, { kind: "session", name: "join" }),
+		row("B", "b1", NOW - MIN),
+		// Left 5 minutes ago (inside the 10-minute quiet rule): the leave row ends it, 3 minutes.
+		...session("C", "c1", NOW - 8 * MIN, 3),
+		// Quiet since 70 minutes ago, no leave: ended in the hour before, 30 minutes.
+		row("D", "d1", NOW - 100 * MIN, { kind: "session", name: "join" }),
+		row("D", "d1", NOW - 70 * MIN),
+		// A Studio play test that ended in the window doesn't count.
+		...session("S", "s1", NOW - 50 * MIN, 20, { srv: "studio" }),
+	];
+	beforeAll(async () => {
+		({ instance: inst, connection: conn } = await fixtureDb({ events: timeEvents, recordings: [] }));
+		rt = new DuckDbStore(conn, (name) => name, () => NOW);
+	});
+	afterAll(() => {
+		conn.closeSync();
+		inst.closeSync();
+	});
+
+	test("ended in the window, full length, wherever it started; a leave row ends a session at once", async () => {
+		const r = await rt.query("realtime", {}, { hours: 1, ccuDays: 1 });
+		expect(r.current.avgSessionMinutes).toBe(31.5); // A (60) and C (3); not B (running)
+		expect(r.previous.avgSessionMinutes).toBe(30); // D
+		// Sessions, players and running still go by start.
+		expect(r.current.sessions).toBe(2); // B, C
+		expect(r.current.running).toBe(2);
+	});
+
+	test("mergeGapMinutes: off by default, validated", async () => {
+		const off = await rt.query("realtime", {}, { hours: 1, ccuDays: 1, mergeGapMinutes: 0 });
+		expect(off.current.avgSessionMinutes).toBe(31.5);
+		expect(() => rt.render("realtime", {}, { mergeGapMinutes: 31 })).toThrow("mergeGapMinutes");
+	});
+});
+
 describe("realtime: concurrent players by device", () => {
 	let inst: DuckDBInstance;
 	let conn: DuckDBConnection;
