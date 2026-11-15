@@ -24,7 +24,7 @@ describe("asset images", () => {
 		expect(assetIdOf("")).toBeNull();
 	});
 	it("200: ready (an object URL), fetched once", async () => {
-		const fetch = vi.fn(async () => png());
+		const fetch = vi.fn(async (_url: RequestInfo | URL) => png());
 		const a = await loadAssetImage("1", { fetch });
 		expect(a.state).toBe("ready");
 		expect(await loadAssetImage("1", { fetch })).toBe(a);
@@ -56,7 +56,7 @@ describe("animation clips", () => {
 		expect(parseClip(null, "9")).toBeNull();
 	});
 	it("200: the clip; 404: null, asked again only after a minute", async () => {
-		const ok = vi.fn(async () => new Response(JSON.stringify({ id: "1", length: 1, looped: false, keyframes: [{ t: 0, poses: { Neck: [0, 0, 0, 1] } }] }), { status: 200 }));
+		const ok = vi.fn(async (_url: RequestInfo | URL) => new Response(JSON.stringify({ id: "1", length: 1, looped: false, keyframes: [{ t: 0, poses: { Neck: [0, 0, 0, 1] } }] }), { status: 200 }));
 		expect((await loadClip("1", { fetch: ok }))?.keyframes).toHaveLength(1);
 		expect(ok.mock.calls[0]?.[0]).toBe("/api/v1/anims/1");
 		let now = 0;
