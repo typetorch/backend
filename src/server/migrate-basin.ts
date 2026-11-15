@@ -56,9 +56,9 @@ export interface BasinReadSettings {
 export interface BasinKnobs {
 	/** The SQL API's base URL (tests: a local fake). */
 	endpoint?: string;
-	/** Rows a SQL page asks for (1-10,000; default 10,000). */
+	/** Rows a SQL page of events asks for (1-10,000; default 10,000); recordings (64 KB chunks) take at most 250. */
 	pageRows?: number;
-	/** A day over this many rows is sliced into time windows of about this many (default 50,000). */
+	/** A day over this many rows is sliced into time windows of about this many (default: 5 pages of the table). */
 	windowRows?: number;
 	/** From Basin: how long after the start the job waits for Basin's roll delay before its last count (default 10 min). */
 	settleMs?: number;
@@ -87,7 +87,7 @@ export interface FlowHost {
 	/** The job's folder (<data dir>/migrate). */
 	readonly dir: string;
 	readonly fetch: typeof fetch;
-	readonly knobs: Required<Omit<BasinKnobs, "endpoint">> & { endpoint: string };
+	readonly knobs: Required<Omit<BasinKnobs, "endpoint" | "windowRows">> & { endpoint: string; windowRows?: number };
 	readonly mergeRows: number;
 	readonly quietMs: number;
 	readonly pollMs: number;
@@ -136,6 +136,10 @@ export class BasinMoveError extends Error {
 }
 
 const HOUR_MS = 3_600_000;
+/** Recording chunks are up to 64 KB: a page of them stays near 16 MB. */
+const RECORDING_PAGE_ROWS = 250;
+/** The largest Basin SQL answer read (a page of events with 4 KB props is about 45 MB). */
+const ANSWER_BYTES_MAX = 96 * 1024 * 1024;
 const MINUTE_MS = 60_000;
 const HEX32 = /^[0-9a-f]{32}$/;
 const STRING_MAX = 1024 * 1024;
@@ -145,6 +149,30 @@ const NOT_SENT = new Set(["ConnectionRefused", "ECONNREFUSED", "ENOTFOUND", "EAI
 /** One line, no control characters, at most 300 characters. */
 function oneLine(text: string): string {
 	return text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
+}
+
+/** A response body as text, or undefined past `max` bytes (the rest is not read). */
+async function readCapped(res: Response, max: number): Promise<string | undefined> {
+	const declared = Number(res.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > max) {
+		await res.body?.cancel().catch(() => {});
+		return undefined;
+	}
+	if (!res.body) return "";
+	const chunks: Uint8Array[] = [];
+	let bytes = 0;
+	const reader = res.body.getReader();
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		bytes += value.byteLength;
+		if (bytes > max) {
+			await reader.cancel().catch(() => {});
+			return undefined;
+		}
+		chunks.push(value);
+	}
+	return Buffer.concat(chunks).toString("utf8");
 }
 
 function retryAfter(res: Response, fallback: number): number {
@@ -208,7 +236,8 @@ export class BasinSql {
 				delay = Math.min(delay * 2, 30_000);
 				continue;
 			}
-			const text = await res.text().catch(() => "");
+			const text = await readCapped(res, ANSWER_BYTES_MAX);
+			if (text === undefined) throw new BasinMoveError(`a Basin SQL answer is over ${ANSWER_BYTES_MAX / 1024 / 1024} MB: use smaller pages`);
 			let body: unknown;
 			try {
 				body = text ? JSON.parse(text) : undefined;
@@ -411,11 +440,20 @@ export class FromBasinFlow {
 		}
 	}
 
+	private pageRows(table: ExportTable): number {
+		return table === "recordings" ? Math.min(this.h.knobs.pageRows, RECORDING_PAGE_ROWS) : this.h.knobs.pageRows;
+	}
+
+	/** About five pages a window: a page query scans its window from the cursor on, so each row is read a few times at most. */
+	private windowRows(table: ExportTable): number {
+		return this.h.knobs.windowRows ?? 5 * this.pageRows(table);
+	}
+
 	/** Time windows of a day: the whole day, or slices of about windowRows rows (hour buckets, minute buckets for a big hour). */
 	private async windows(table: ExportTable, day: DayRow): Promise<[number, number][]> {
 		const from = dayNumber(day.day) * DAY_MS;
 		const to = from + DAY_MS;
-		const max = this.h.knobs.windowRows;
+		const max = this.windowRows(table);
 		if (day.rows_source <= max) return [[from, to]];
 		const buckets: { start: number; n: number }[] = [];
 		for (const hour of await this.sql.histogram(table, from, to, HOUR_MS)) {
@@ -429,7 +467,7 @@ export class FromBasinFlow {
 	private async importDay(day: DayRow): Promise<void> {
 		const table = day.tbl;
 		const c = parseJson<PullCursor>(day.cursor, freshPull);
-		const size = this.h.knobs.pageRows;
+		const size = this.pageRows(table);
 		if (!c.windows.length) c.windows = await this.windows(table, day);
 		await this.h.setDay(day, { state: "importing", page_size: size, cursor: JSON.stringify(c) });
 		const fields = fieldsOf(table);
@@ -897,7 +935,7 @@ export class ToBasinFlow {
 				}
 				throw this.decision(page, `no answer from Basin's stream (${oneLine((error as Error).message ?? String(error))}): it may or may not have taken the page`);
 			}
-			const text = await res.text().catch(() => "");
+			const text = (await readCapped(res, 64 * 1024).catch(() => "")) ?? "";
 			if (res.ok) return;
 			if ((res.status === 429 || res.status >= 500) && attempt < tries) {
 				await this.h.sleep(retryAfter(res, delay));

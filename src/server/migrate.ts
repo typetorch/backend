@@ -1221,7 +1221,7 @@ export class Migration {
 			knobs: {
 				endpoint: k.endpoint ?? BASIN_SQL_API,
 				pageRows: Math.max(1, Math.min(10_000, k.pageRows ?? 10_000)),
-				windowRows: Math.max(1, k.windowRows ?? 50_000),
+				...(k.windowRows ? { windowRows: Math.max(1, k.windowRows) } : {}),
 				settleMs: k.settleMs ?? 10 * 60_000,
 				sendBytes: Math.max(1024, Math.min(4.5 * 1024 * 1024, k.sendBytes ?? 4 * 1024 * 1024)),
 				sendRows: Math.max(1, k.sendRows ?? 10_000),
