@@ -10,10 +10,27 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
+import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { contentSecurityPolicy, SAFE_HEADERS } from "./demo/deploy/headers.ts";
 
 const at = (path: string) => fileURLToPath(new URL(path, import.meta.url));
+
+/**
+ * Vite's root is web/demo, so Tailwind would scan only web/demo for class names and drop every class the explorer
+ * (web/src) uses. This adds `@source "."` to the explorer's own stylesheet (web/src/index.css) as it is read, so its one
+ * copy of the CSS covers web/src. A second stylesheet would load later and undo responsive classes (`hidden md:block`
+ * on the sidebar).
+ */
+const explorerCss = at("./src/index.css");
+const explorerSources: Plugin = {
+	name: "demo-explorer-sources",
+	enforce: "pre",
+	transform(code, id) {
+		if (id.split("?")[0] !== explorerCss) return;
+		return { code: `${code}\n@source ".";\n`, map: null };
+	},
+};
 
 export default defineConfig(({ mode }) => {
 	// The browser build imports a few backend modules (src/queries, src/server/sql.ts...) whose Node imports are never
@@ -29,7 +46,7 @@ export default defineConfig(({ mode }) => {
 	return {
 		root: at("./demo"),
 		publicDir: at("./demo/public"),
-		plugins: [react(), tailwindcss()],
+		plugins: [explorerSources, react(), tailwindcss()],
 		resolve: { alias: [{ find: /^@\//, replacement: `${at("./src")}/` }, ...shims] },
 		server: { host: "localhost", port: 5174, strictPort: false, fs: { allow: [at("./"), at("../src")] }, headers },
 		preview: { host: "localhost", port: 4174, headers },

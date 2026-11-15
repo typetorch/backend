@@ -5,7 +5,7 @@
 import { installDemo } from "./mock/install";
 import { mountBanner } from "./banner";
 // The explorer's styles up front, so the banner is styled before the app loads.
-import "./styles.css";
+import "@/index.css";
 
 installDemo();
 mountBanner(document.getElementById("demo-banner") as HTMLElement);
