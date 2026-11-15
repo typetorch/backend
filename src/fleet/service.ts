@@ -1139,6 +1139,8 @@ export class FleetService {
 	private readonly db: FleetDb;
 	private readonly clock: () => number;
 	private readonly listeners = new Set<(event: FleetEvent) => void>();
+	/** Plans/34: told when a server is lost or closes (not an event listener: it never counts as a stream). */
+	private readonly goneListeners = new Set<(job: string) => void>();
 	private lastRetention = 0;
 	/** The metrics rollup's progress: buckets before this (unix ms) are rolled up (read from the table on the first sweep). */
 	private rolledUntil: number | undefined;
@@ -1173,6 +1175,20 @@ export class FleetService {
 	subscribe(listener: (event: FleetEvent) => void): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
+	}
+
+	/** Calls `fn` with each JobId that is lost or closes (live-debug.ts drops what it holds for it). */
+	onGone(fn: (job: string) => void): () => void {
+		this.goneListeners.add(fn);
+		return () => this.goneListeners.delete(fn);
+	}
+
+	private gone(job: string): void {
+		for (const fn of this.goneListeners) {
+			try {
+				fn(job);
+			} catch {}
+		}
 	}
 
 	get subscribers(): number {
@@ -1398,6 +1414,7 @@ export class FleetService {
 		if (heartbeat) await this.applyHeartbeat(heartbeat);
 		const now = this.clock();
 		await this.db.run("UPDATE servers SET closed_at = ?, last_seen = ? WHERE job = ?", [now, now, job]);
+		this.gone(job);
 		const row = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		if (row) this.emit({ type: "server", change: "closed", server: serverInfo(row, now) });
 	}
@@ -1816,6 +1833,7 @@ export class FleetService {
 			// Only if still unmarked: during a deploy's handover two servers sweep the same file, and one alert is enough.
 			const marked = await this.db.run("UPDATE servers SET lost_at = ? WHERE job = ? AND lost_at IS NULL AND closed_at IS NULL", [now, r.job]);
 			if (!marked.changes) continue;
+			this.gone(r.job);
 			this.emit({ type: "server", change: "lost", server: serverInfo({ ...r, lost_at: now }, now) });
 			const key = `${r.branch ?? ""}\u0000${r.artifact ?? ""}`;
 			groups.set(key, [...(groups.get(key) ?? []), r]);

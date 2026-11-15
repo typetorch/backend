@@ -229,6 +229,14 @@ describe("over HTTP", () => {
 		await h.call("/v1/fleet/closing", post(API, { j: "close-1", closing: true }));
 		const after = await asJson(await admin("/v1/fleet/servers/close-1/streams"));
 		expect(after).toEqual({ declared: { streams: [], commands: [] }, frames: [] });
+		// A lost one too (the sweep marks it after 90 s without a heartbeat).
+		await heartbeat("lost-1", { xh: "h", x: DECL });
+		await admin("/v1/fleet/servers/lost-1/watch", { method: "POST" });
+		await streams("lost-1", [{ t: h.now(), s: { positions: positions() } }]);
+		h.setNow(T0 + 100_000);
+		await h.app.fleet?.sweep();
+		h.setNow(T0);
+		expect(await asJson(await admin("/v1/fleet/servers/lost-1/streams"))).toEqual({ declared: { streams: [], commands: [] }, frames: [] });
 	});
 
 	test("the live map: watch, lm in replies, one wake per 30 s, the read, the lapse", async () => {

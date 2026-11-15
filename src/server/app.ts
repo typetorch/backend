@@ -502,9 +502,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// A lost or closed server's declarations and frames go at once (player names and positions are not kept past it).
 	if (fleet && liveDebug) {
 		const hub = liveDebug;
-		fleet.subscribe((event) => {
-			if (event.type === "server" && (event.change === "lost" || event.change === "closed")) hub.forget(event.server.job);
-		});
+		fleet.onGone((job) => hub.forget(job));
 	}
 
 	// Subscribers ------------------------------------------------------------------------------------------------------
