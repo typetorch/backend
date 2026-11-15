@@ -1504,8 +1504,8 @@ Kinds: `session` `tech` `zone` `funnel` `purchase` `currency` `state` `experimen
 `client` (older framework engines let clients send them), and revenue queries count server-sent `purchase` rows only
 (rows without `src` count too).
 
-**Recordings** (first sessions, packed): `v`, `t`, `pid`, `sid`, `job`, `art`, `chunk`, `codec` (`tt-rec-1`),
-`data` (base64), `n`.
+**Recordings** (first sessions, packed): `v`, `t`, `pid`, `sid`, `job`, `art`, `chunk`, `codec` (`tt-rec-1`; plans/36's
+extended streams as `tt-ext-1` rows of the same session, their own `chunk` counter), `data` (base64), `n`.
 
 Props the queries read (SCHEMA.md "Event catalog"; each can be overridden by a query option):
 
@@ -1599,7 +1599,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 | `confusion` | first-session signals per zone and button: early leaves, screen open/close loops, back-and-forth, and from the tt-rec-1 recordings idle spots (10 s+ without input or movement), camera spins (360 degrees in 6 s without moving), repeated clicks (3 presses of one button within 2 s) | 14 days |
 | `recording-layers` | [first-session recordings on a map](#recordings-maps-replays-quit-autopsy): `maps` (samples, sessions, positioned events per map), the chosen `map` (default the busiest), its top-down `frame` (x right, z down; cells a multiple of 4 studs, at most `grid` (96) along the longer side), `background` (every recorded sample on it: the walkable area's silhouette), and `layers` as `[col, row, count]` cells (at most `maxCells`, 4,000): `path`, `idle` (10 s+), `death`, `spawn`, `screen_open` / `screen_close` (by screen), `button` (by path), `prompt` (used, by path), `quit` (the last position of recordings that ended with `left`), and positioned events `ev:<kind>:<name>` (optionally `split` by a props key); `values` per layer filter (`values: {layer: [...]}`), `zone` / `screen` filters; `catalog` of positioned events; `sampling` | 7 days |
 | `recording-sessions` | recorded first sessions, latest first (`limit` 50, at most 500): device, build, why it ended, length, maps, confusion signal counts. Filters: `map` (+ `box` `[x0, z0, x1, z1]` and the `layer` whose point must be in it, default `path`), `why`, `signal` (`idle`, `camera_spin`, `repeated_clicks`, optionally in a `zone` or on a `target` button), `search` (a sid or pid prefix) | 7 days |
-| `recording-replay` | one recorded session (`sid`) for the replay: `samples` `[t, x, y, z, yaw, lookY]` (ms after `start`), `inputs`, `events` (all but tech), confusion `signals`, the map over time (`maps`), the map it spent most time on (`map`) and its own `frame` | 30 days |
+| `recording-replay` | one recorded session (`sid`) for the replay: `samples` `[t, x, y, z, yaw, lookY, characterYaw, camX, camY, camZ]` (ms after `start`), `fps` `[t, fps]` (the client's tech rows), `extended` ([extended replays](#extended-replays-plans36): the session's tt-ext-1 streams decoded, or null), `inputs`, `events` (all but tech), confusion `signals`, the map over time (`maps`), the map it spent most time on (`map`) and its own `frame` | 30 days |
 | `quit-autopsy` | the recordings that ended with the player leaving (`why = left`): their last `windowSeconds` (10) classified (`screen` open, `died` / downed within `diedSeconds` (20), `idle`, `dead_clicks`, `stuck`, `tutorial` step, `place` = a map cell, `none`), each reason with its count and share among quitters, the same among the other recordings' last seconds, `lift` (the ratio: over 1 = over-represented among quitters) and example sids | 7 days |
 | `first-action` | per recorded first session, seconds from spawn to the first move (3 studs, `moveStuds`), screen the player opened, button press, prompt used, and round start (`roundEvents`, default `round_start` / `phase`, from the events): median, p25, p75, reached share and a histogram, in total, `byDevice` and `byBuild` | 7 days |
 | `top-events` | the most logged names per kind | 7 days |
@@ -1836,6 +1836,40 @@ new / returning, variant).
 - **Time to first action.** Spawn = the first `spawn` record or character sample. A screen counts when it opens within
   `screenAfterInputMs` (1.5 s) of a player input (HUDs the game opens itself don't). Move, screen, button and prompt
   are only seen inside the recording (60 s after the first input); round start comes from the events.
+
+### Extended replays (plans/36)
+
+A game with extended recording on (the signed settings' `analytics.extended`, through the `tt_extended_recording`
+experiment) sends, for some new players' recorded sessions, `tt-ext-1` rows next to the session's tt-rec-1 ones: the
+viewport, FOV and fps, AFK spans, the character's joints, other players and tracked models (spawn, look, moves, the
+animations their Animators play) and the on-screen UI tree. Today's queries keep reading tt-rec-1 only (`whereSql`'s
+`codecs` option); only the replay reads the new rows.
+
+- **Decoding** (`src/recording-ext.ts`, the wire contract in plans/36 "Wire contract: tt-ext-1"). Little-endian records
+  `u8 tag, u16 dt, u16 length`; unknown tags and longer payloads are skipped by length. Segments start at a Keyframe
+  (string table and UI tree reset); a lost or malformed chunk ends what was alive at the last decoded moment, and
+  decoding resumes at the next chunk flagged as starting with a Keyframe. Entities, UI nodes and animations re-sent
+  right after an in-stream Keyframe continue as the same ones (so the replay doesn't blink every 60 s). Capped per
+  session (poses 150 k, moves 200 k, UI nodes 20 k, UI changes 150 k, entities 4 k, animations 20 k, 2,000 rows):
+  `truncated` says so. Tests round-trip every record type through a reference encoder (`test/fixtures/ext-encoder.ts`).
+- **`extended`** in `recording-replay` (times in ms after `start`): `view` `[t, w, h, inset, fov, fps]`, `afk`
+  `[from, to | null]`, `rigs` `{ t, e, rig: R6 | R15 | other | none, joints }`, `poses` `[t, e, joint, qx, qy, qz, qw]`
+  (Motor6D.Transform), `entities` `{ e, kind, humanoid, player, size, from, to, look?, moves: [t, x, y, z, yaw] }` (e 0 =
+  the recorded player), `anims` `{ e, track, id, from, to, looped, time, adjust: [t, speed, weight] }`, `ui` (one entry
+  per node: `{ i, cls, from, to, parent, f, ch?: [t, fields] }`, fields: `rect`, `rotation`, `order`, `background`,
+  `text`, `textStyle`, `image`, `imageStyle`, `imageRect`, `stroke`, `corner`, `clip`, `gradient`, `parent`), plus
+  `chunks`, `gaps`, `skipped`, `failed?`, `truncated?`. The animation ids it saw go to the clip store
+  (`noteAnimationIds`, `src/anims/store.ts`). `recording-sessions` marks sessions with tt-ext-1 rows `extended: true`.
+- **The page.** A **Player view** (any session; the default for extended ones; `cam=map|player` in the URL): the map
+  from the recorded camera at the recorded viewport's aspect, FOV from View (else 70), with the recorded player and the
+  people and tracked models around them drawn as procedural R6 / R15 avatars (`web/src/components/maps/avatar.ts`,
+  Roblox's C0 / C1, body colours, Shirt / Pants on the classic template layout, the T-shirt and face as decals; no
+  downloaded models) or boxes of their size in their kind's colour; poses from the playing clips
+  (`GET /api/v1/anims/<id>`, by joint or KeyframeSequence part name) blended with the recorded joints (slerped), else the
+  recorded joints, else the rest pose with the animation's id listed. Over it: the recorded UI as HTML (picking a node
+  shows its path and fields), click / tap rings, the latest button / screen / prompt, and "AFK". Images (clothing, UI)
+  come from `GET /api/v1/images/<id>` (200 the PNG, 202 retried, 404 a placeholder). Under the timeline: AFK spans, the
+  captions strip and an FPS strip (View records, else the client tech rows). "Free camera" orbits the same scene.
 
 ## Cloudflare Basin setup
 

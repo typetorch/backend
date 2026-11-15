@@ -25,6 +25,9 @@
  *     tiled every StudsPerTile studs (their own instanced meshes per shape and variant); solid parts with a light
  *     procedural pattern per built-in Material (MATERIAL_LOOK_GLSL). Images load from /api/v1/images/<id> (ImageLoader:
  *     a pending one is asked again later); until one arrives its parts keep their plain colour.
+ *   - Actors (plans/36 Player view): caller-owned objects (avatars, entity boxes) in their own group; `setView` renders
+ *     from a fixed camera (the recorded one: position, look, vertical FOV) instead of the orbit / map controls, and
+ *     `pickActor` finds the actor under the pointer (its `userData.actor`).
  * Shapes follow Roblox's: a cylinder's axis is the part's X; a wedge's slope faces -Z (its tall face is +Z); the corner
  * wedge's peak is over its (+X, -Z) corner (not checked against Studio).
  */
@@ -35,6 +38,13 @@ import { FLAGS, heatColor, isDrawn, partKind, type Bounds, type MapGeometry, typ
 import { groupSurfaces, ImageLoader, MATERIAL_LOOK_GLSL, partVariant, type SurfaceGroup } from "@/lib/map-textures";
 
 export type MapMode = "2d" | "3d";
+
+/** A fixed camera (the replay's Player view): position, unit look direction, vertical FOV in degrees (Roblox's FieldOfView). */
+export interface ViewCamera {
+	position: Vec3;
+	look: Vec3;
+	fov: number;
+}
 
 export interface SceneOptions {
 	mode: MapMode;
@@ -229,6 +239,10 @@ export class MapRenderer {
 	private variantMaterials = new Map<number, { material: THREE.MeshLambertMaterial; image: string }>();
 	/** Geometries the current parts own (per-bucket copies carrying instance attributes). */
 	private ownedGeometries: THREE.BufferGeometry[] = [];
+	/** Caller-owned objects (avatars, entity boxes): added and removed by the caller, never disposed here. */
+	readonly actors = new THREE.Group();
+	private readonly viewCamera = new THREE.PerspectiveCamera(70, 1, 0.1, 20_000);
+	private view: ViewCamera | null = null;
 	private readonly perspective = new THREE.PerspectiveCamera(50, 1, 0.5, 20_000);
 	private readonly ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 50_000);
 	private controls: OrbitControls | MapControls;
@@ -266,7 +280,7 @@ export class MapRenderer {
 		sun.position.set(0.4, 1, 0.25);
 		this.scene.add(sun);
 		this.world.add(this.parts, this.surfaces);
-		this.scene.add(this.world, this.marks);
+		this.scene.add(this.world, this.marks, this.actors);
 		this.ortho.up.set(0, 0, -1);
 		this.controls = this.makeControls("3d");
 		this.resize = new ResizeObserver(() => this.fitSize());
@@ -299,7 +313,38 @@ export class MapRenderer {
 	}
 
 	private get camera(): THREE.Camera {
+		if (this.view) return this.viewCamera;
 		return this.options.mode === "2d" ? this.ortho : this.perspective;
+	}
+
+	/** Renders from a fixed camera (null: back to the orbit / map controls). */
+	setView(view: ViewCamera | null): void {
+		this.view = view;
+		this.controls.enabled = view === null;
+		if (view) {
+			const [x, y, z] = view.position;
+			this.viewCamera.position.set(x, y, z);
+			this.viewCamera.lookAt(x + view.look[0], y + view.look[1], z + view.look[2]);
+			if (this.viewCamera.fov !== view.fov) {
+				this.viewCamera.fov = Math.max(1, Math.min(120, view.fov));
+				this.viewCamera.updateProjectionMatrix();
+			}
+		}
+		this.render();
+	}
+
+	/** The actor under a point of the canvas (the object in `actors` whose subtree was hit), or null. */
+	pickActor(clientX: number, clientY: number): THREE.Object3D | null {
+		const rect = this.renderer.domElement.getBoundingClientRect();
+		if (!rect.width || !rect.height || !this.actors.children.length) return null;
+		const camera = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+		this.raycaster.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), camera);
+		for (const hit of this.raycaster.intersectObjects(this.actors.children, true)) {
+			let o: THREE.Object3D | null = hit.object;
+			while (o && o.parent !== this.actors) o = o.parent;
+			if (o?.visible) return o;
+		}
+		return null;
 	}
 
 	/** The map's parts (null: none), its bounds (the camera fits them), the layers and the view options. */
@@ -324,6 +369,7 @@ export class MapRenderer {
 		if (modeChanged) {
 			this.controls.dispose();
 			this.controls = this.makeControls(options.mode);
+			this.controls.enabled = this.view === null;
 		}
 		if (geometryChanged || modeChanged || offsetChanged) this.fit();
 		this.buildGrid();
@@ -645,6 +691,8 @@ export class MapRenderer {
 		this.renderer.domElement.style.height = "100%";
 		this.perspective.aspect = width / height;
 		this.perspective.updateProjectionMatrix();
+		this.viewCamera.aspect = width / height;
+		this.viewCamera.updateProjectionMatrix();
 		const halfH = (this.ortho.top - this.ortho.bottom) / 2;
 		this.ortho.left = -halfH * (width / height);
 		this.ortho.right = halfH * (width / height);
@@ -703,7 +751,7 @@ export class MapRenderer {
 	private readonly onKey = (event: KeyboardEvent): void => {
 		const key = event.key.toLowerCase();
 		if (!"wasdqe".includes(key) && key !== "shift") return;
-		if (this.options.mode !== "3d") return;
+		if (this.options.mode !== "3d" || this.view) return;
 		if (event.type === "keydown") this.keys.add(key);
 		else this.keys.delete(key);
 		event.preventDefault();
@@ -745,6 +793,7 @@ export class MapRenderer {
 		this.geometry = null;
 		this.layers = [];
 		this.loader.dispose();
+		this.actors.clear();
 		this.buildParts();
 		this.buildSurfaces();
 		this.buildMarks();
