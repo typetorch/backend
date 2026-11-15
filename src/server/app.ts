@@ -181,7 +181,7 @@ import { randomBytes } from "node:crypto";
 export interface AppOptions {
 	clock?: () => number;
 	log?: (line: string) => void;
-	/** Don't start the loader / nightly / sweep timers (tests drive them). */
+	/** Don't start the loader / nightly / sweep timers, nor the image resolver's (tests drive them). */
 	manualJobs?: boolean;
 	/** The fetch for outgoing calls: Open Cloud, the alert webhook, Roblox sign-in, Roblox profiles. */
 	fetch?: typeof fetch;
@@ -196,8 +196,6 @@ export interface AppOptions {
 	diskUsage?: (path: string) => DiskUsage | null;
 	/** The map export's waits (tests pass fast ones; maps/store.ts); the animation pass uses the same. */
 	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
-	/** The image resolver's timer (images/store.ts); false: tests drive it with `images.tick()`. Default true. */
-	imageLoop?: boolean;
 	/** The migration job's knobs (tests: small pages, no waits; server/migrate.ts). */
 	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries" | "basin">>;
 	/** Plans/35 C (TYPETORCH_ROLE=main): the queue bucket (default: Bun's S3Client on TYPETORCH_QUEUE_*), and how long it must fail before the alert. */
@@ -746,7 +744,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// Plans/36: images from Roblox's public thumbnails API (data/images) and animation clips (data/anims, the animation
 	// pass after each map export). The modules' noteImageIds / noteAnimationIds reach these stores.
-	const images = new ImageStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.imageLoop === false ? { auto: false } : {}) });
+	const images = new ImageStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.manualJobs ? { auto: false } : {}) });
 	const anims = new AnimStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...options.mapExport });
 	installImageStore(images);
 	installAnimStore(anims);

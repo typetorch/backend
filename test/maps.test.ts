@@ -5,7 +5,8 @@
  * output is built by the writer below the way the Luau script lays it out. Every key and id is made up.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { EXPORT_MAGIC, FLAGS, FORMAT_VERSION, halfExtents, MapFormatError, mapBlob, mapRecords, parseExport, readPart, RECORD_BYTES, SHAPES, summarize, type ExportEntry, type Shape } from "../src/maps/format.ts";
+import { EXPORT_MAGIC, FLAGS, FORMAT_VERSION, FORMAT_VERSION_TEXTURES, halfExtents, MapFormatError, mapBlob, mapBlobV1, mapRecords, parseExport, parseTextures, readPart, RECORD_BYTES, SHAPES, summarize, type ExportEntry, type Shape } from "../src/maps/format.ts";
+import { writeAnimExport, writeTextures } from "./asset-writers.ts";
 import { ALIGNED_SHARE, alignment, pickMaps } from "../src/maps/match.ts";
 import { exportScript, luauString, mapKey } from "../src/maps/script.ts";
 import { LOBBY, MapStore } from "../src/maps/store.ts";
@@ -31,9 +32,12 @@ interface TestEntry {
 	want: string;
 	path: string;
 	parts: TestPart[];
+	/** A texture section (version 2). */
+	tex?: Uint8Array;
 }
 
-function writeExport(entries: TestEntry[]): Uint8Array {
+/** Version 1 unless an entry has textures (or `version` says 2: every entry gets its section, empty or not). */
+function writeExport(entries: TestEntry[], version = entries.some((e) => e.tex) ? FORMAT_VERSION_TEXTURES : FORMAT_VERSION): Uint8Array {
 	const enc = new TextEncoder();
 	const chunks: number[] = [];
 	const u8 = (v: number) => chunks.push(v & 0xff);
@@ -50,7 +54,7 @@ function writeExport(entries: TestEntry[]): Uint8Array {
 		for (const x of b) u8(x);
 	};
 	for (const c of enc.encode(EXPORT_MAGIC)) u8(c);
-	u16(FORMAT_VERSION);
+	u16(version);
 	u16(entries.length);
 	for (const e of entries) {
 		u8(e.kind);
@@ -75,6 +79,10 @@ function writeExport(entries: TestEntry[]): Uint8Array {
 			u8(SHAPES.indexOf(p.shape ?? "block"));
 			u8(p.flags ?? FLAGS.collide);
 		}
+		if (version === FORMAT_VERSION_TEXTURES) {
+			u32(e.tex?.byteLength ?? 0);
+			for (const b of e.tex ?? []) u8(b);
+		}
 	}
 	return new Uint8Array(chunks);
 }
@@ -85,7 +93,23 @@ const box = (x: number, y: number, z: number, extra: Partial<TestPart> = {}): Te
 /** A garage far from the origin (like gnome's maps), a smaller same-named copy, the mall, and the lobby. */
 function gnomeLike(): TestEntry[] {
 	return [
-		{ kind: 0, via: 0, name: "ParkingGarage", want: "parking_garage", path: "ReplicatedStorage.assets.maps.ParkingGarage", parts: [box(1000, 0, 1000, { size: [40, 1, 40] }), box(1010, 10, 1010, { q: Y90, size: [20, 2, 4], flags: FLAGS.mesh }), box(990, 5, 990, { transparency: 1, flags: FLAGS.invisible | FLAGS.collide })] },
+		{
+			kind: 0,
+			via: 0,
+			name: "ParkingGarage",
+			want: "parking_garage",
+			path: "ReplicatedStorage.assets.maps.ParkingGarage",
+			parts: [box(1000, 0, 1000, { size: [40, 1, 40] }), box(1010, 10, 1010, { q: Y90, size: [20, 2, 4], flags: FLAGS.mesh }), box(990, 5, 990, { transparency: 1, flags: FLAGS.invisible | FLAGS.collide })],
+			// A sign (Decal), a tiled floor (Texture) and an asphalt MaterialVariant on the floor.
+			tex: writeTextures({
+				surfaces: [
+					{ part: 0, kind: "texture", face: 1, image: "rbxassetid://9000000001", tile: [4, 4, 0, 0], color: [200, 200, 200] },
+					{ part: 1, kind: "decal", face: 5, image: "http://www.roblox.com/asset/?id=9000000002", transparency: 0.25, zIndex: 2 },
+				],
+				variants: [{ name: "Asphalt", colorMap: "rbxassetid://9000000003", baseMaterial: 816, studsPerTile: 8 }],
+				variantParts: [[0, 0]],
+			}),
+		},
 		{ kind: 0, via: 0, name: "parkinggarage", want: "parking_garage", path: "Workspace.Old.parkinggarage", parts: [box(0, 0, 0)] },
 		{ kind: 0, via: 0, name: "Mall", want: "Mall", path: "ReplicatedStorage.assets.maps.Mall", parts: [box(-500, 0, -500, { shape: "wedge", size: [8, 4, 8] }), box(-480, 0, -500, { shape: "cylinder", flags: FLAGS.union })] },
 		{ kind: 1, via: 2, name: "Workspace", want: "", path: "Workspace", parts: [box(0, 50, 0, { color: [255, 0, 0] })] },
@@ -120,6 +144,33 @@ describe("binary format", () => {
 		expect(readPart(mall.records, 1).shape).toBe("cylinder");
 	});
 
+	test("version 2: the texture section after each entry's records; stored as TTMP 2, served as 1 to old explorers", () => {
+		const entries = parseExport(writeExport(gnomeLike()));
+		const garage = entries[0] as ExportEntry;
+		expect(garage.textures.byteLength).toBeGreaterThan(0);
+		expect((entries[2] as ExportEntry).textures.byteLength).toBe(0);
+		const blob = mapBlob(garage.records, garage.textures);
+		const stored = mapRecords(blob);
+		expect(stored).toMatchObject({ parts: 3, version: 2 });
+		const t = parseTextures(stored.textures, stored.parts);
+		expect(t.surfaces[0]).toMatchObject({ part: 0, kind: "texture", face: 1, image: "rbxassetid://9000000001", studsPerTile: [4, 4], color: [200, 200, 200] });
+		expect(t.surfaces[1]).toMatchObject({ part: 1, kind: "decal", face: 5, zIndex: 2 });
+		expect(t.surfaces[1]?.transparency).toBeCloseTo(0.25, 2);
+		expect(t.variantParts.get(0)).toBe(0);
+		// The version 1 view: the same records, nothing after them, the header an old explorer accepts.
+		const v1 = mapBlobV1(blob);
+		expect(v1.byteLength).toBe(16 + 3 * RECORD_BYTES);
+		expect(new DataView(v1.buffer).getUint16(4, true)).toBe(1);
+		expect(new DataView(v1.buffer).getUint32(12, true)).toBe(0);
+		expect(mapRecords(v1).records).toEqual(stored.records);
+		// A map without textures stays version 1, byte for byte as before textures.
+		expect(mapBlob(garage.records)).toEqual(v1);
+		expect(mapBlobV1(v1)).toBe(v1);
+		// A version 1 export (an older script) still reads, with empty sections.
+		const old = parseExport(writeExport(gnomeLike().map(({ tex: _tex, ...e }) => e)));
+		expect(old.every((e) => e.textures.byteLength === 0)).toBe(true);
+	});
+
 	test("summary: counts by flag and rotated bounds", () => {
 		const garage = parseExport(writeExport(gnomeLike()))[0] as ExportEntry;
 		const s = summarize(garage.records);
@@ -138,9 +189,12 @@ describe("binary format", () => {
 		const bad = good.slice();
 		bad[0] = 0x58;
 		expect(() => parseExport(bad)).toThrow("magic");
-		const v2 = good.slice();
-		v2[4] = 2;
-		expect(() => parseExport(v2)).toThrow("version 2");
+		const v3 = good.slice();
+		v3[4] = 3;
+		expect(() => parseExport(v3)).toThrow("version 3");
+		// A texture section pointing past the parts is refused.
+		const outOfRange = writeExport([{ kind: 1, via: 2, name: "Workspace", want: "", path: "Workspace", parts: [box(0, 0, 0)], tex: writeTextures({ surfaces: [{ part: 1, image: "rbxassetid://1" }] }) }]);
+		expect(() => parseExport(outOfRange)).toThrow("surface on part 1 of 1");
 		expect(() => mapRecords(new Uint8Array(10))).toThrow(MapFormatError);
 		const blob = mapBlob(new Uint8Array(RECORD_BYTES));
 		expect(() => mapRecords(blob.subarray(0, blob.byteLength - 1))).toThrow("length");
@@ -222,9 +276,13 @@ const UNIVERSE = 4_242_001;
 const PLACE = 4_242_002;
 const OPEN_CLOUD = "fake-open-cloud-key-for-tests-0123456789abcdef";
 const TASK = `universes/${UNIVERSE}/places/${PLACE}/versions/37/luau-execution-sessions/s-1/tasks/t-1`;
+const ANIM_TASK = `universes/${UNIVERSE}/places/${PLACE}/versions/37/luau-execution-sessions/s-2/tasks/t-2`;
 const XT = { "x-typetorch": "1" };
 
 interface FakeState {
+	/** Animation passes (their own task; not counted in `creates`). */
+	animScripts: string[];
+	thumbnailCalls: string[];
 	creates: number;
 	polls: number;
 	rateLimited: number;
@@ -242,7 +300,12 @@ function fakeRoblox(state: FakeState): typeof fetch {
 		const url = String(input instanceof Request ? input.url : input);
 		const headers = new Headers(init?.headers);
 		if (url.startsWith("https://games.roblox.com/v1/games?universeIds=")) return Response.json({ data: [{ id: UNIVERSE, rootPlaceId: PLACE, name: "Map Game", playing: 1 }] });
+		if (url.startsWith("https://thumbnails.roblox.com/v1/assets?")) {
+			state.thumbnailCalls.push(url);
+			return Response.json({ data: [] });
+		}
 		if (url.startsWith("https://thumbnails.roblox.com/")) return Response.json({ data: [] });
+		if (url.startsWith("https://storage.test/anim")) return new Response(writeAnimExport([{ id: "180426354", loop: true, keyframes: [{ t: 0, poses: [{ name: "Torso" }, { name: "Left Leg", q: [0.5, 0, 0, Math.sqrt(0.75)] }] }] }]) as Uint8Array<ArrayBuffer>);
 		if (url.startsWith("https://storage.test/")) {
 			state.storageKeys.push(headers.get("x-api-key"));
 			await state.gate;
@@ -250,6 +313,11 @@ function fakeRoblox(state: FakeState): typeof fetch {
 		}
 		if (url.startsWith("https://apis.roblox.com/")) {
 			expect(headers.get("x-api-key")).toBe(OPEN_CLOUD);
+			if (url.endsWith(`/places/${PLACE}/luau-execution-session-tasks`) && init?.method === "POST" && String(JSON.parse(String(init.body)).script).includes("TypeTorch animation export")) {
+				state.animScripts.push(JSON.parse(String(init.body)).script);
+				return Response.json({ path: ANIM_TASK, state: "QUEUED" });
+			}
+			if (url === `https://apis.roblox.com/cloud/v2/${ANIM_TASK}`) return Response.json({ path: ANIM_TASK, state: "COMPLETE", output: { results: [JSON.stringify({ placeVersion: 37 })] }, binaryOutputUri: "https://storage.test/anim?sig=secret" });
 			if (url.endsWith(`/places/${PLACE}/luau-execution-session-tasks`) && init?.method === "POST") {
 				state.creates++;
 				if (state.rateLimited > 0) {
@@ -280,7 +348,7 @@ describe("the maps routes", () => {
 	let off: Harness;
 	const VIEWER = 77_001;
 	let web: Record<string, string>;
-	const state: FakeState = { creates: 0, polls: 0, rateLimited: 1, fail: false, latestVersion: 37, scripts: [], storageKeys: [], output: writeExport(gnomeLike()) };
+	const state: FakeState = { animScripts: [], thumbnailCalls: [], creates: 0, polls: 0, rateLimited: 1, fail: false, latestVersion: 37, scripts: [], storageKeys: [], output: writeExport(gnomeLike()) };
 	const t = T0 - 3_600_000;
 
 	beforeAll(async () => {
@@ -357,8 +425,13 @@ describe("the maps routes", () => {
 		expect((await h.call("/v1/maps/export", post(ADMIN, {}))).status).toBe(409);
 		open();
 		await h.app.maps.idle();
+		await h.app.anims.idle();
 		expect(state.creates).toBe(2);
 		expect(state.storageKeys).toEqual([null]);
+		// The animation pass ran right after (plans/36): the default R6 ids, one clip came back.
+		expect(state.animScripts.length).toBe(1);
+		expect(state.animScripts[0]).toContain('"180426354"');
+		expect(h.app.anims.summary()).toMatchObject({ exported: 1, last: { loaded: 1, failed: 0 } });
 		expect(state.scripts[0]).toContain('["hedgemaze"] = "HedgeMaze"');
 
 		const list = await asJson(await h.call("/v1/maps", { headers: bearer(ADMIN) }));
@@ -391,6 +464,25 @@ describe("the maps routes", () => {
 		const actions = audit.entries.map((e: { action: string; outcome: string }) => `${e.action} ${e.outcome}`);
 		expect(actions).toContain("maps.export ok");
 		expect(actions).toContain("maps.export.done ok");
+		const animAudit = await asJson(await h.call("/v1/admin/audit?action=anims.*", { headers: bearer(ADMIN) }));
+		expect(animAudit.entries.map((e: { action: string; outcome: string }) => `${e.action} ${e.outcome}`)).toContain("anims.export.done ok");
+
+		// Textures (plans/36 phase 5): counted per map, served only to an explorer that asks for version 2; the image ids
+		// went to the image store.
+		expect(byName.parking_garage.textures).toEqual({ decals: 1, textures: 1, variantParts: 1, images: 3 });
+		expect(byName.Mall.textures).toBeUndefined();
+		expect(mapRecords(blob).version).toBe(1);
+		const g2 = await h.call("/v1/maps/parking_garage/geometry?v=2", { headers: bearer(ADMIN) });
+		expect(g2.headers.get("etag")).toBe(`"${byName.parking_garage.hash}.2"`);
+		const full = mapRecords(new Uint8Array(await g2.arrayBuffer()));
+		expect(full.version).toBe(2);
+		const tex = parseTextures(full.textures, full.parts);
+		expect(tex.surfaces.map((x) => [x.kind, x.part, x.face])).toEqual([
+			["texture", 0, 1],
+			["decal", 1, 5],
+		]);
+		expect(tex.variants[0]).toMatchObject({ name: "Asphalt", colorMap: "rbxassetid://9000000003", studsPerTile: 8 });
+		expect(h.app.images.status().queued).toBe(3);
 	});
 
 	test("too soon after an export: 429; a newer place version shows out of date", async () => {
