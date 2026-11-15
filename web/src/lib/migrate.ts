@@ -11,7 +11,7 @@ export const MIGRATE_KEY = ["admin-migrate"] as const;
 const ACTIVE: ReadonlySet<MigrateState> = new Set(["running", "paused", "waiting"]);
 
 /** Day states that are finished (checked against the source, whatever the outcome). */
-const DAY_DONE: ReadonlySet<MigrateDay["state"]> = new Set(["match", "missing", "differs", "duplicates"]);
+const DAY_DONE: ReadonlySet<MigrateDay["state"]> = new Set(["match", "missing", "differs", "duplicates", "sent"]);
 
 export function dayDone(day: Pick<MigrateDay, "state">): boolean {
 	return DAY_DONE.has(day.state);
@@ -43,9 +43,11 @@ export function migrateActions(state: MigrateState): MigrateAction[] {
 	}
 }
 
-/** The source's host for a sentence ("old.example.com"), or "the old server" when the URL doesn't parse. */
+/** The source's host for a sentence ("old.example.com", "Basin"), or "the old server" when the URL doesn't parse. */
 export function sourceHost(status: Pick<MigrateStatus, "source">): string {
-	const url = status.source?.url;
+	const source = status.source;
+	if (source?.kind === "basin") return "Basin";
+	const url = source?.kind === "backend" ? source.url : undefined;
 	if (!url) return "the old server";
 	try {
 		return new URL(url).host || "the old server";
@@ -59,7 +61,8 @@ export function sourceHost(status: Pick<MigrateStatus, "source">): string {
  * oldest events day already done), else "History is still importing from <host>". Null when nothing is importing.
  */
 export function historyBannerText(status: MigrateStatus | null | undefined): string | null {
-	if (!status || !ACTIVE.has(status.state)) return null;
+	// A move to Basin empties nothing here: this server's charts stay whole.
+	if (!status || !ACTIVE.has(status.state) || status.direction === "to-basin") return null;
 	const events = (status.days ?? []).filter((d) => d.table === "events");
 	if (!events.some((d) => !dayDone(d))) return null;
 	const done = events

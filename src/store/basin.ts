@@ -47,6 +47,16 @@ export class BasinSqlError extends Error {
 }
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** A Cloudflare account id and an R2 bucket name, as the SQL API path takes them. */
+export const ACCOUNT_ID = /^[a-f0-9]{32}$/i;
+export const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,62}$/;
+/** A Basin namespace or table name. */
+export const BASIN_IDENT = IDENT;
+
+/** The SQL API's query URL for an account and bucket. */
+export function basinQueryUrl(accountId: string, bucket: string, endpoint = BASIN_SQL_API): string {
+	return `${endpoint}/api/v1/accounts/${accountId}/basin-sql/query/${bucket}`;
+}
 
 function ident(value: string, what: string): string {
 	if (!IDENT.test(value)) throw new Error(`${what} must be a plain identifier (letters, digits, _)`);
@@ -73,7 +83,8 @@ export function parseBasinRows(body: unknown): Row[] {
 	});
 }
 
-function errorMessage(body: unknown, text: string): { message: string; codes: number[] } {
+/** The error message and codes of a failed Basin SQL API answer. */
+export function basinErrorOf(body: unknown, text: string): { message: string; codes: number[] } {
 	const errors = isRecord(body) && Array.isArray(body.errors) ? body.errors : [];
 	const parts = errors.map((e) => (isRecord(e) ? `${e.code ?? ""} ${e.message ?? ""}`.trim() : String(e))).filter(Boolean);
 	const codes = errors.map((e) => (isRecord(e) ? Number(e.code) : Number.NaN)).filter(Number.isFinite);
@@ -88,15 +99,15 @@ export class BasinStore extends SqlStore {
 
 	constructor(private readonly config: BasinStoreConfig) {
 		super(config.clock);
-		if (!/^[a-f0-9]{32}$/i.test(config.accountId)) throw new Error("accountId must be a Cloudflare account id (32 hex characters)");
-		if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(config.bucket)) throw new Error("bucket must be an R2 bucket name");
+		if (!ACCOUNT_ID.test(config.accountId)) throw new Error("accountId must be a Cloudflare account id (32 hex characters)");
+		if (!BUCKET_NAME.test(config.bucket)) throw new Error("bucket must be an R2 bucket name");
 		if (!config.token) throw new Error("a Basin SQL API token is required");
 		const ns = ident(config.namespace ?? BASIN_DEFAULTS.namespace, "namespace");
 		this.tables = {
 			events: `${ns}.${ident(config.eventsTable ?? BASIN_DEFAULTS.eventsTable, "eventsTable")}`,
 			recordings: `${ns}.${ident(config.recordingsTable ?? BASIN_DEFAULTS.recordingsTable, "recordingsTable")}`,
 		};
-		this.url = `${config.endpoint ?? BASIN_SQL_API}/api/v1/accounts/${config.accountId}/basin-sql/query/${config.bucket}`;
+		this.url = basinQueryUrl(config.accountId, config.bucket, config.endpoint);
 		this.concurrency = config.concurrency ?? 4;
 	}
 
@@ -129,7 +140,7 @@ export class BasinStore extends SqlStore {
 			}
 			const failed = !response.ok || (isRecord(body) && body.success === false);
 			if (!failed) return parseBasinRows(body);
-			const { message, codes } = errorMessage(body, text);
+			const { message, codes } = basinErrorOf(body, text);
 			// 80001: edge connection failure (retry); 502/503/429 likewise.
 			if ((codes.includes(80001) || [429, 502, 503, 504].includes(response.status)) && attempt < 3) {
 				lastError = new BasinSqlError(message, response.status, codes);

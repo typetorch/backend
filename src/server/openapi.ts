@@ -632,9 +632,10 @@ const ROUTES: Route[] = [
 		path: "/v1/admin/migrate",
 		tag: "admin",
 		roles: ["admin"],
-		summary: "Start, pause, resume or cancel the migration from another server",
-		description: '`{ action: "start", from: { kind: "backend", url, token }, rowsPerSecond? }` (the old server\'s admin token: sealed with instance.key, never echoed, logged or audited), `{ action: "pause" | "resume" | "cancel" }`. Basin directions answer 501 for now. Answers the status.',
-		body: obj({ action: { type: "string", enum: ["start", "pause", "resume", "cancel", "resolve", "status"] }, from: obj(), to: obj(), rowsPerSecond: int() }, ["action"]),
+		summary: "Start, pause, resume, cancel or resolve a move of analytics history (another server or Basin to here, here to Basin)",
+		description:
+			'`{ action: "start", from: { kind: "backend", url, token }, rowsPerSecond? }` (an old server and its admin token), `{ action: "start", from: { kind: "basin", accountId, bucket, token, namespace? } }` (Basin\'s tables through the Basin SQL API, the SQL token), `{ action: "start", to: { kind: "basin", events, recordings, token } }` (this server\'s history into Basin\'s streams, the send token). Tokens are sealed with instance.key, never echoed, logged or audited. `{ action: "pause" | "resume" | "cancel" }`; `{ action: "resolve", page, choice: "resend" | "skip" }` answers a page cut off mid-send to Basin (`needs_decision`; 409 otherwise). Answers the status.',
+		body: obj({ action: { type: "string", enum: ["start", "pause", "resume", "cancel", "resolve", "status"] }, from: obj(), to: obj(), rowsPerSecond: int(), page: str("resolve: the page id the status names"), choice: { type: "string", enum: ["resend", "skip"] } }, ["action"]),
 	},
 	{ method: "get", path: "/v1/access", tag: "admin", roles: ["admin"], summary: "The owner list" },
 	{ method: "put", path: "/v1/access", tag: "admin", roles: ["adminToken"], summary: "Replace the owner list", body: obj({ seq: int(), owners: arr(int(), "UserIds") }, ["seq", "owners"]) },

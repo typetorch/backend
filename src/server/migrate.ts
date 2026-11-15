@@ -37,13 +37,16 @@ import { dayStat, EXPORT_TABLES, FLEET_EXPORT_TABLES, missingRows, type DayStat,
 import type { InstanceKey } from "./instance-key.ts";
 import type { RuntimeSettings } from "./runtime-settings.ts";
 import type { Warehouse } from "./warehouse.ts";
+import { BASIN_SQL_API, checkStreamUrl, FromBasinFlow, NeedsDecision, PAGES_SCHEMA, ToBasinFlow, type BasinKnobs, type BasinReadSettings, type Decision, type FlowHost } from "./migrate-basin.ts";
+import { ACCOUNT_ID, BASIN_IDENT, BUCKET_NAME } from "../store/basin.ts";
 
 export const MIGRATE_STATES = ["idle", "running", "paused", "waiting", "done", "failed", "cancelled", "needs_decision"] as const;
 export type MigrateState = (typeof MIGRATE_STATES)[number];
 export const STEP_NAMES = ["erased", "identities", "fleet", "events", "recordings", "live", "rollups", "verify"] as const;
 export type StepName = (typeof STEP_NAMES)[number];
 export type StepState = "pending" | "running" | "done" | "failed";
-export type DayState = "pending" | "importing" | "match" | "missing" | "differs" | "duplicates";
+/** `sent`: a day moved to Basin without read settings here to count it there (to-basin). */
+export type DayState = "pending" | "importing" | "match" | "missing" | "differs" | "duplicates" | "sent";
 export type Direction = "from-backend" | "from-basin" | "to-basin";
 
 export interface StepView {
@@ -63,10 +66,16 @@ export interface DayView {
 	note: string;
 }
 
+/** Where the rows come from: an old server, Basin (its bucket and namespace), or this server (to Basin). */
+export type SourceRef = { kind: "backend"; url: string } | { kind: "basin"; accountId: string; bucket: string; namespace: string } | { kind: "local" };
+export type SourceView = { kind: "backend"; url: string } | { kind: "basin"; bucket: string; namespace: string } | { kind: "local" };
+
 export interface MigrateStatus {
 	state: MigrateState;
 	direction: Direction | null;
-	source: { kind: "backend"; url: string } | null;
+	source: SourceView | null;
+	/** To Basin: the streams the rows go to. */
+	target?: { kind: "basin"; events: string; recordings: string };
 	startedAt: number | null;
 	finishedAt: number | null;
 	rowsPerSecond: number;
@@ -75,7 +84,8 @@ export interface MigrateStatus {
 	steps: StepView[];
 	days: DayView[];
 	waitingFor: string | null;
-	decision: null;
+	/** To Basin: a page cut off mid-send waits for `resolve` (resend or skip). */
+	decision: Decision | null;
 	error: string | null;
 }
 
@@ -109,11 +119,11 @@ export interface MigrationTarget {
 	pageFile(table: ExportTable, day: string, page: number): string;
 	/** A scratch file for a verify page. */
 	scratchFile(): string;
-	/** Applies the staged pages of a day (here: one late-row merge into the day file), then forgets them. */
-	flushDay(table: ExportTable, day: string): Promise<void>;
+	/** Applies the staged pages of a day (here: one late-row merge into the day file), then forgets them; with `check`, the rows of them not in the day afterwards. */
+	flushDay(table: ExportTable, day: string, check?: boolean): Promise<number>;
 	dayHash(table: ExportTable, day: string): Promise<{ rows: number; hash: string }>;
-	/** Rows of a page file that the target's copy of the day lacks. */
-	missing(table: ExportTable, day: string, file: string): Promise<number>;
+	/** Rows of page files that the target's copy of the day lacks. */
+	missing(table: ExportTable, day: string, file: string | string[]): Promise<number>;
 	rollups(days: string[]): Promise<void>;
 	erasedPids(): string[];
 	/** Drops every staged page (cancel). */
@@ -299,21 +309,26 @@ export class LocalTarget implements MigrationTarget {
 		return join(dir, `page-${Date.now()}-${++this.seq}.ndjson`);
 	}
 
-	async flushDay(table: ExportTable, day: string): Promise<void> {
+	async flushDay(table: ExportTable, day: string, check = false): Promise<number> {
 		const dir = this.dayDir(table, day);
-		if (!existsSync(dir)) return;
+		if (!existsSync(dir)) return 0;
 		const files = readdirSync(dir)
 			.filter((n) => /^page-\d+\.ndjson$/.test(n))
 			.map((n) => join(dir, n));
-		if (files.length) await this.open().mergeDay(table, dayNumber(day), files);
+		let missing = 0;
+		if (files.length) {
+			await this.open().mergeDay(table, dayNumber(day), files);
+			if (check) missing = await this.missing(table, day, files);
+		}
 		rmSync(dir, { recursive: true, force: true });
+		return missing;
 	}
 
 	dayHash(table: ExportTable, day: string): Promise<{ rows: number; hash: string }> {
 		return dayStat(this.open(), table, dayNumber(day));
 	}
 
-	missing(table: ExportTable, day: string, file: string): Promise<number> {
+	missing(table: ExportTable, day: string, file: string | string[]): Promise<number> {
 		const contract = fieldsOf(table)
 			.map((f) => `"${f.name}"`)
 			.join(", ");
@@ -343,8 +358,9 @@ CREATE TABLE IF NOT EXISTS migrate_days (
 	tbl TEXT NOT NULL, day TEXT NOT NULL, state TEXT NOT NULL, rows_source INTEGER NOT NULL, hash_source TEXT NOT NULL,
 	rows_target INTEGER NOT NULL DEFAULT 0, next_page INTEGER NOT NULL DEFAULT 0, page_size INTEGER NOT NULL DEFAULT 0,
 	staged_rows INTEGER NOT NULL DEFAULT 0, pass_rows INTEGER NOT NULL DEFAULT 0, imported INTEGER NOT NULL DEFAULT 0,
-	tries INTEGER NOT NULL DEFAULT 0, verified INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', PRIMARY KEY (tbl, day));
+	tries INTEGER NOT NULL DEFAULT 0, verified INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', cursor TEXT NOT NULL DEFAULT '', PRIMARY KEY (tbl, day));
 CREATE TABLE IF NOT EXISTS migrate_cursors (tbl TEXT PRIMARY KEY, after INTEGER NOT NULL, done INTEGER NOT NULL, rows INTEGER NOT NULL);
+${PAGES_SCHEMA};
 `;
 
 const PID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -359,10 +375,13 @@ const RESUMABLE = new Set<FleetExportTable>(["deploys", "marks", "reports", "ale
 /** The integer key of a table (its rowid): the cursor after the last page. */
 const KEY_OF: Partial<Record<FleetExportTable, string>> = { deploys: "seq", marks: "id", reports: "id", alerts: "id", server_metrics: "id", saved_queries: "id", audit_log: "id" };
 
-interface JobData {
+export interface JobData {
 	state: MigrateState;
 	direction: Direction;
-	source: { kind: "backend"; url: string };
+	source: SourceRef;
+	/** To Basin: the stream URLs. */
+	target?: { kind: "basin"; events: string; recordings: string };
+	decision?: Decision | null;
 	startedAt: number;
 	finishedAt: number | null;
 	rowsPerSecond: number;
@@ -375,7 +394,7 @@ interface JobData {
 	cutoverDay: number;
 }
 
-interface DayRow {
+export interface DayRow {
 	tbl: ExportTable;
 	day: string;
 	state: DayState;
@@ -390,6 +409,8 @@ interface DayRow {
 	tries: number;
 	verified: number;
 	note: string;
+	/** The Basin directions' cursor (JSON): from Basin the time windows and the keyset, to Basin the parts of the day. */
+	cursor: string;
 }
 
 export class MigrateError extends Error {
@@ -442,6 +463,10 @@ export interface MigrationOptions {
 	onPage?: (table: ExportTable, day: string, page: number) => void | Promise<void>;
 	/** Tries per request to the old server (default 6). */
 	tries?: number;
+	/** Plans/35 B: the Basin directions' knobs (tests: a fake SQL API, small pages, short waits). */
+	basin?: BasinKnobs;
+	/** Basin SQL read settings from this server's env (a move to Basin compares counts there). */
+	basinRead?: BasinReadSettings;
 }
 
 export interface StartBody {
@@ -449,6 +474,15 @@ export interface StartBody {
 	from?: unknown;
 	to?: unknown;
 	rowsPerSecond?: unknown;
+	/** resolve: the page id and resend | skip. */
+	page?: unknown;
+	choice?: unknown;
+}
+
+/** A token as sent in `start`: printable, no spaces, 20-4096 characters (Cloudflare tokens are 40). */
+function checkToken(raw: unknown, what: string, min: number): string {
+	if (typeof raw !== "string" || raw.length < min || raw.length > 4096 || !/^[\x21-\x7e]+$/.test(raw)) throw new MigrateError(`${what} (${min}+ printable characters, no spaces)`, 400);
+	return raw;
 }
 
 function emptySteps(): StepView[] {
@@ -479,6 +513,9 @@ export class Migration {
 	private controller = new AbortController();
 	private halt: "pause" | "cancel" | "stop" | undefined;
 	private loop: Promise<void> | undefined;
+	/** Aborted on cancel and stop only: a POST to Basin in flight finishes on a pause. */
+	private hardController = new AbortController();
+	private flow: FromBasinFlow | ToBasinFlow | undefined;
 	private runId = 0;
 	private manifestCache: SourceManifest | undefined;
 	private readonly clock: () => number;
@@ -496,6 +533,9 @@ export class Migration {
 	/** Opens the state; a job that was running when the server stopped goes on (in the background). */
 	static async open(o: MigrationOptions): Promise<Migration> {
 		await o.db.exec(SCHEMA);
+		// A state file from before the Basin directions: the day cursor column.
+		const cols = await o.db.all<{ name: string }>("PRAGMA table_info(migrate_days)");
+		if (!cols.some((c) => c.name === "cursor")) await o.db.exec("ALTER TABLE migrate_days ADD COLUMN cursor TEXT NOT NULL DEFAULT ''");
 		const m = new Migration(o);
 		const row = await o.db.first<{ data: string; token: string | null }>("SELECT data, token FROM migrate_job WHERE id = 1");
 		if (row) {
@@ -509,12 +549,12 @@ export class Migration {
 					m.token = o.instanceKey().open(TOKEN_PURPOSE, row.token);
 				} catch {
 					m.data.state = "failed";
-					m.data.error = "the old server's token can't be read with this server's instance.key: start the migration again";
+					m.data.error = "the migration's token can't be read with this server's instance.key: start the migration again";
 					await m.save();
 				}
 			}
 			if (m.data && (m.data.state === "running" || m.data.state === "waiting") && m.token) {
-				m.log(`migrate: resuming the move from ${m.data.source.url}`);
+				m.log(`migrate: resuming the move (${m.data.direction})`);
 				m.launch();
 			}
 		}
@@ -537,10 +577,12 @@ export class Migration {
 		}
 		const days = await this.o.db.all<DayRow>("SELECT * FROM migrate_days ORDER BY CASE tbl WHEN 'events' THEN 0 ELSE 1 END, day DESC");
 		const rowsDone = d.fleetDone + days.reduce((sum, r) => sum + Math.min(r.imported, r.rows_source), 0);
+		const src = d.source;
 		return {
 			state: d.state,
 			direction: d.direction,
-			source: { kind: "backend", url: d.source.url },
+			source: src.kind === "basin" ? { kind: "basin", bucket: src.bucket, namespace: src.namespace } : src.kind === "local" ? { kind: "local" } : { kind: "backend", url: src.url },
+			...(d.target ? { target: { ...d.target } } : {}),
 			startedAt: d.startedAt,
 			finishedAt: d.finishedAt,
 			rowsPerSecond: d.rowsPerSecond,
@@ -550,50 +592,68 @@ export class Migration {
 			steps: d.steps.map((s) => ({ ...s })),
 			days: days.map((r) => ({ table: r.tbl, day: r.day, state: r.state, rowsSource: r.rows_source, rowsTarget: r.rows_target, note: r.note })),
 			waitingFor: d.waitingFor,
-			decision: null,
+			decision: d.decision ?? null,
 			error: d.error,
 		};
 	}
 
-	/** POST /v1/admin/migrate: start, pause, resume, cancel (resolve has nothing to resolve here). */
+	/** POST /v1/admin/migrate: start, pause, resume, cancel, resolve (a page cut off mid-send to Basin). */
 	async act(body: StartBody): Promise<MigrateStatus> {
 		const action = body.action;
 		if (action === "start") await this.start(body);
 		else if (action === "pause") await this.pause();
 		else if (action === "resume") await this.resume();
 		else if (action === "cancel") await this.cancel();
-		else if (action === "resolve") throw new MigrateError("no page waits for a decision (resolve is for a move to Basin)", 409);
+		else if (action === "resolve") await this.resolve(body);
 		else if (action === "status") return this.status();
-		else throw new MigrateError("action is start, pause, resume, cancel or status", 400);
+		else throw new MigrateError("action is start, pause, resume, cancel, resolve or status", 400);
 		return this.status();
 	}
 
+	/** resolve { page, choice: resend | skip }: the page the job waits on goes again, or is left out. */
+	private async resolve(body: StartBody): Promise<void> {
+		const d = this.data;
+		if (!d || d.state !== "needs_decision" || !d.decision) throw new MigrateError("no page waits for a decision (resolve is for a page cut off mid-send to Basin)", 409);
+		if (typeof body.page !== "string" || body.page !== d.decision.page) throw new MigrateError(`page is the id the status names (${d.decision.page})`, 400);
+		if (body.choice !== "resend" && body.choice !== "skip") throw new MigrateError("choice is resend or skip", 400);
+		if (!this.token) throw new MigrateError("the send token is gone: start the move again (the days already sent stay sent)", 409);
+		await this.loop;
+		const changed = await this.o.db.run("UPDATE migrate_pages SET state = ?, at = ? WHERE id = ? AND state = 'sending'", [body.choice === "resend" ? "resend" : "skipped", this.clock(), body.page]);
+		if (!changed.changes) throw new MigrateError("that page is no longer waiting", 409);
+		d.state = "running";
+		d.decision = null;
+		d.error = null;
+		await this.save();
+		this.log(`migrate: page ${body.page} ${body.choice === "resend" ? "will be sent again" : "skipped"} by the owner`);
+		this.launch();
+	}
+
 	private async start(body: StartBody): Promise<void> {
-		if (body.to !== undefined) throw new MigrateError("not built yet", 501);
-		const from = body.from as { kind?: unknown; url?: unknown; token?: unknown } | undefined;
-		if (!from || typeof from !== "object") throw new MigrateError('from is { kind: "backend", url, token }', 400);
-		if (from.kind === "basin") throw new MigrateError("not built yet", 501);
-		if (from.kind !== "backend") throw new MigrateError('from.kind is "backend"', 400);
-		const url = checkSourceUrl(from.url);
-		if (typeof from.token !== "string" || from.token.length < 32 || from.token.length > 4096 || /\s/.test(from.token)) throw new MigrateError("from.token is the old server's admin token (32+ characters)", 400);
+		const plan = this.parseStart(body);
 		let rate = this.o.defaultRowsPerSecond;
 		if (body.rowsPerSecond !== undefined) {
 			if (typeof body.rowsPerSecond !== "number" || !Number.isSafeInteger(body.rowsPerSecond) || body.rowsPerSecond < 1 || body.rowsPerSecond > 10_000_000) throw new MigrateError("rowsPerSecond is 1 to 10,000,000", 400);
 			rate = body.rowsPerSecond;
 		}
 		if (this.data && ["running", "waiting", "paused", "needs_decision"].includes(this.data.state)) throw new MigrateError(`a migration is ${this.data.state}: cancel it first (or resume it)`, 409);
+		if (plan.direction !== "from-backend" && !this.o.analytics) throw new MigrateError("the analytics part is off on this server: a Basin move needs it", 409);
 		await this.loop;
-		const sealed = this.o.instanceKey().seal(TOKEN_PURPOSE, from.token);
+		const sealed = this.o.instanceKey().seal(TOKEN_PURPOSE, plan.token);
 		// The cutover: the first day this server holds rows of its own (kept from an earlier run of the job: by then
 		// imported days would look like its own).
-		const cutoverDay = this.data?.cutoverDay ?? (await this.ownFirstDay());
+		const prev = this.data;
+		const cutoverDay = prev?.cutoverDay !== undefined && prev.direction !== "to-basin" ? prev.cutoverDay : await this.ownFirstDay();
 		// The same old server again (after done, a cancel or a failure): the SQLite tables go on from their cursors (the
 		// rows since come over, nothing twice); the tables merged by adding counts are not taken again.
-		const sameSource = this.data?.source.url === url;
+		const sameSource = plan.direction === "from-backend" && prev?.direction === "from-backend" && prev.source.kind === "backend" && plan.source.kind === "backend" && prev.source.url === plan.source.url;
+		// To the same Basin streams again: the days sent stay sent (Basin can't dedupe), unfinished ones go on at their page.
+		const sameStreams = plan.direction === "to-basin" && prev?.direction === "to-basin" && prev.target?.events === plan.target?.events && prev.target?.recordings === plan.target?.recordings;
 		this.data = {
 			state: "running",
-			direction: "from-backend",
-			source: { kind: "backend", url },
+			direction: plan.direction,
+			source: plan.source,
+			...(plan.target ? { target: plan.target } : {}),
+			decision: null,
 			startedAt: this.clock(),
 			finishedAt: null,
 			rowsPerSecond: rate,
@@ -604,16 +664,52 @@ export class Migration {
 			error: null,
 			cutoverDay,
 		};
-		this.token = from.token;
-		this.target.clear();
+		this.token = plan.token;
+		if (!sameStreams) this.target.clear();
 		await this.o.db.transaction((tx) => {
-			tx.run("DELETE FROM migrate_days");
+			if (!sameStreams) {
+				tx.run("DELETE FROM migrate_days");
+				tx.run("DELETE FROM migrate_pages");
+			} else tx.run("UPDATE migrate_days SET verified = 0");
 			if (sameSource) tx.run(`UPDATE migrate_cursors SET done = 0 WHERE tbl IN (${[...RESUMABLE].map((t) => `'${t}'`).join(", ")})`);
-			else tx.run("DELETE FROM migrate_cursors");
+			else if (plan.direction === "from-backend") tx.run("DELETE FROM migrate_cursors");
 			tx.run("INSERT INTO migrate_job (id, data, token) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET data = excluded.data, token = excluded.token", [JSON.stringify(this.data), sealed]);
 		});
-		this.log(`migrate: started from ${url} at ${rate} rows/s`);
+		this.log(`migrate: started (${plan.direction}${plan.source.kind === "backend" ? ` from ${plan.source.url}` : plan.source.kind === "basin" ? ` from Basin bucket ${plan.source.bucket}` : " to Basin"}) at ${rate} rows/s`);
 		this.launch();
+	}
+
+	/** The direction of a `start` body, after its checks (the token is never part of an error). */
+	private parseStart(body: StartBody): { direction: Direction; source: SourceRef; target?: { kind: "basin"; events: string; recordings: string }; token: string } {
+		if (body.to !== undefined) {
+			if (body.from !== undefined) throw new MigrateError("send from or to, not both", 400);
+			const to = body.to as { kind?: unknown; events?: unknown; recordings?: unknown; token?: unknown } | null;
+			if (!to || typeof to !== "object" || to.kind !== "basin") throw new MigrateError('to is { kind: "basin", events, recordings, token }', 400);
+			let events: string;
+			let recordings: string;
+			try {
+				events = checkStreamUrl(to.events, "to.events");
+				recordings = checkStreamUrl(to.recordings, "to.recordings");
+			} catch (error) {
+				throw new MigrateError((error as Error).message, 400);
+			}
+			const token = checkToken(to.token, "to.token is the Basin send token", 20);
+			return { direction: "to-basin", source: { kind: "local" }, target: { kind: "basin", events, recordings }, token };
+		}
+		const from = body.from as { kind?: unknown; url?: unknown; token?: unknown; accountId?: unknown; bucket?: unknown; namespace?: unknown } | undefined;
+		if (!from || typeof from !== "object") throw new MigrateError('from is { kind: "backend", url, token } or { kind: "basin", accountId, bucket, token, namespace }', 400);
+		if (from.kind === "basin") {
+			if (typeof from.accountId !== "string" || !ACCOUNT_ID.test(from.accountId)) throw new MigrateError("from.accountId is a Cloudflare account id (32 hex characters)", 400);
+			if (typeof from.bucket !== "string" || !BUCKET_NAME.test(from.bucket)) throw new MigrateError("from.bucket is the R2 bucket of the Basin catalog", 400);
+			const namespace = from.namespace === undefined ? "typetorch" : from.namespace;
+			if (typeof namespace !== "string" || !BASIN_IDENT.test(namespace)) throw new MigrateError("from.namespace is a Basin namespace (letters, digits, _)", 400);
+			const token = checkToken(from.token, "from.token is the Basin SQL token", 20);
+			return { direction: "from-basin", source: { kind: "basin", accountId: from.accountId.toLowerCase(), bucket: from.bucket, namespace }, token };
+		}
+		if (from.kind !== "backend") throw new MigrateError('from.kind is "backend" or "basin"', 400);
+		const url = checkSourceUrl(from.url);
+		if (typeof from.token !== "string" || from.token.length < 32 || from.token.length > 4096 || /\s/.test(from.token)) throw new MigrateError("from.token is the old server's admin token (32+ characters)", 400);
+		return { direction: "from-backend", source: { kind: "backend", url }, token: from.token };
 	}
 
 	/** The first day with rows this server took in itself (live rows, raw files, day files); today when there are none. */
@@ -647,8 +743,9 @@ export class Migration {
 	}
 
 	private async resume(): Promise<void> {
+		if (this.data?.state === "needs_decision") throw new MigrateError("a page waits for a decision: resolve it (resend or skip)", 409);
 		if (!this.data || !(this.data.state === "paused" || this.data.state === "failed")) throw new MigrateError(`nothing to resume (the migration is ${this.data?.state ?? "idle"})`, 409);
-		if (!this.token) throw new MigrateError("the old server's token is gone: start the migration again", 409);
+		if (!this.token) throw new MigrateError("the migration's token is gone: start the migration again", 409);
 		await this.loop;
 		this.data.state = "running";
 		this.data.error = null;
@@ -664,6 +761,7 @@ export class Migration {
 		this.data.state = "cancelled";
 		this.data.finishedAt = this.clock();
 		this.data.waitingFor = null;
+		this.data.decision = null;
 		this.token = undefined;
 		this.target.clear();
 		await this.o.db.run("UPDATE migrate_job SET data = ?, token = NULL WHERE id = 1", [JSON.stringify(this.data)]);
@@ -674,6 +772,7 @@ export class Migration {
 	private async halted(why: "pause" | "cancel" | "stop"): Promise<void> {
 		this.halt = why;
 		this.controller.abort();
+		if (why !== "pause") this.hardController.abort();
 		const loop = this.loop;
 		if (loop) await Promise.race([loop, new Promise((done) => setTimeout(done, 10_000).unref?.())]);
 	}
@@ -687,7 +786,13 @@ export class Migration {
 		const id = ++this.runId;
 		this.halt = undefined;
 		this.controller = new AbortController();
-		this.source = new BackendSource({ url: this.data!.source.url, token: this.token!, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), sleep: this.sleep, ...(this.o.tries ? { tries: this.o.tries } : {}) });
+		this.hardController = new AbortController();
+		const d = this.data!;
+		this.source = undefined;
+		this.flow = undefined;
+		if (d.source.kind === "backend") this.source = new BackendSource({ url: d.source.url, token: this.token!, ...(this.o.fetch ? { fetch: this.o.fetch } : {}), sleep: this.sleep, ...(this.o.tries ? { tries: this.o.tries } : {}) });
+		else if (d.source.kind === "basin") this.flow = new FromBasinFlow(this.host(), { accountId: d.source.accountId, bucket: d.source.bucket, namespace: d.source.namespace, token: this.token! });
+		else if (d.target) this.flow = new ToBasinFlow(this.host(), { events: d.target.events, recordings: d.target.recordings });
 		this.loop = this.run(id).finally(() => {
 			if (this.runId === id) this.loop = undefined;
 		});
@@ -708,8 +813,11 @@ export class Migration {
 	private async run(id: number): Promise<void> {
 		const d = this.data!;
 		try {
-			const manifest = await this.manifest();
-			if (manifest.server.instance && manifest.server.instance === this.o.instanceId()) throw new MigrateHttpError("that URL is this server: give the old server's address", 0, true);
+			if (this.source) {
+				const manifest = await this.manifest();
+				if (manifest.server.instance && manifest.server.instance === this.o.instanceId()) throw new MigrateHttpError("that URL is this server: give the old server's address", 0, true);
+			}
+			if (this.flow instanceof ToBasinFlow) await this.flow.pending();
 			for (const name of STEP_NAMES) {
 				const s = this.step(name);
 				if (s.state === "done") continue;
@@ -728,6 +836,14 @@ export class Migration {
 			this.log(`migrate: done (${days.map((r) => `${r.n} ${r.state}`).join(", ") || "no days"})`);
 		} catch (error) {
 			if (this.runId !== id) return;
+			if (error instanceof NeedsDecision) {
+				d.state = "needs_decision";
+				d.decision = error.decision;
+				d.waitingFor = null;
+				await this.save().catch(() => {});
+				this.log(`migrate: needs a decision on page ${error.decision.page} (${error.decision.why})`);
+				return;
+			}
 			if (error instanceof Stopped || this.halt) return;
 			d.state = "failed";
 			d.error = clean((error as Error).message ?? String(error));
@@ -744,6 +860,7 @@ export class Migration {
 	}
 
 	private async runStep(name: StepName): Promise<void> {
+		if (this.flow && (await this.flow.runStep(name))) return;
 		switch (name) {
 			case "erased":
 				return this.stepErased();
@@ -1081,9 +1198,61 @@ export class Migration {
 	private async setDay(day: DayRow, change: Partial<DayRow>): Promise<void> {
 		Object.assign(day, change);
 		await this.o.db.run(
-			"UPDATE migrate_days SET state = ?, rows_source = ?, hash_source = ?, rows_target = ?, next_page = ?, page_size = ?, staged_rows = ?, pass_rows = ?, imported = ?, tries = ?, verified = ?, note = ? WHERE tbl = ? AND day = ?",
-			[day.state, day.rows_source, day.hash_source, day.rows_target, day.next_page, day.page_size, day.staged_rows, day.pass_rows, day.imported, day.tries, day.verified, day.note, day.tbl, day.day],
+			"UPDATE migrate_days SET state = ?, rows_source = ?, hash_source = ?, rows_target = ?, next_page = ?, page_size = ?, staged_rows = ?, pass_rows = ?, imported = ?, tries = ?, verified = ?, note = ?, cursor = ? WHERE tbl = ? AND day = ?",
+			[day.state, day.rows_source, day.hash_source, day.rows_target, day.next_page, day.page_size, day.staged_rows, day.pass_rows, day.imported, day.tries, day.verified, day.note, day.cursor ?? "", day.tbl, day.day],
 		);
+	}
+
+	/** What a Basin flow borrows from the job. */
+	private host(): FlowHost {
+		const k = this.o.basin ?? {};
+		const self = this;
+		return {
+			db: this.o.db,
+			analytics: this.o.analytics,
+			clock: this.clock,
+			log: this.log,
+			get job() {
+				return self.data!;
+			},
+			target: this.target,
+			dir: join(this.o.dataDir, "migrate"),
+			fetch: this.o.fetch ?? fetch,
+			knobs: {
+				endpoint: k.endpoint ?? BASIN_SQL_API,
+				pageRows: Math.max(1, Math.min(10_000, k.pageRows ?? 10_000)),
+				windowRows: Math.max(1, k.windowRows ?? 50_000),
+				settleMs: k.settleMs ?? 10 * 60_000,
+				sendBytes: Math.max(1024, Math.min(4.5 * 1024 * 1024, k.sendBytes ?? 4 * 1024 * 1024)),
+				sendRows: Math.max(1, k.sendRows ?? 10_000),
+				rollWaitMs: k.rollWaitMs ?? 10 * 60_000,
+				rollPollMs: Math.max(1, k.rollPollMs ?? 30_000),
+				timeoutMs: k.timeoutMs ?? 25_000,
+				tries: Math.max(1, k.tries ?? this.o.tries ?? 6),
+			},
+			mergeRows: this.o.mergeRows ?? 1_000_000,
+			quietMs: this.o.quietMs ?? 10 * 60_000,
+			pollMs: this.o.pollMs ?? 60_000,
+			basinRead: this.o.basinRead,
+			warehouse: () => this.o.warehouse(),
+			keepDays: () => this.o.keepDays(),
+			token: () => {
+				if (!this.token) throw new Stopped();
+				return this.token;
+			},
+			signal: () => this.controller.signal,
+			hardSignal: () => this.hardController.signal,
+			sleep: (ms) => this.sleep(ms, this.controller.signal),
+			save: () => this.save(),
+			checkpoint: () => this.checkpoint(),
+			stopped: () => {
+				throw new Stopped();
+			},
+			pace: (rows, startedAt) => this.pace(rows, startedAt),
+			waitForRoom: () => this.waitForRoom(),
+			step: (name) => this.step(name),
+			setDay: (day, change) => this.setDay(day, change),
+		};
 	}
 
 	// Throttle -------------------------------------------------------------------------------------------------------------
