@@ -925,7 +925,7 @@ export class ToBasinFlow {
 				if (this.h.hardSignal().aborted) this.h.stopped();
 				const code = String((error as { code?: unknown }).code ?? "");
 				if (NOT_SENT.has(code) && attempt < tries) {
-					await this.h.sleep(delay);
+					await this.backoff(page, delay);
 					delay = Math.min(delay * 2, 30_000);
 					continue;
 				}
@@ -938,7 +938,7 @@ export class ToBasinFlow {
 			const text = (await readCapped(res, 64 * 1024).catch(() => "")) ?? "";
 			if (res.ok) return;
 			if ((res.status === 429 || res.status >= 500) && attempt < tries) {
-				await this.h.sleep(retryAfter(res, delay));
+				await this.backoff(page, retryAfter(res, delay));
 				delay = Math.min(delay * 2, 30_000);
 				continue;
 			}
@@ -946,6 +946,16 @@ export class ToBasinFlow {
 			await this.h.db.run("DELETE FROM migrate_pages WHERE id = ? AND state = 'sending'", [page.id]);
 			if (res.status === 401 || res.status === 403) throw new BasinMoveError(`Basin's stream refused the send token (${res.status}): it needs Pipelines Send`);
 			throw new BasinMoveError(`Basin's stream answered ${res.status}${text ? `: ${oneLine(text)}` : ""}`);
+		}
+	}
+
+	/** A wait before a retry. Basin took nothing so far: a pause or stop meanwhile puts the page back to unsent (no decision needed). */
+	private async backoff(page: PageRow, ms: number): Promise<void> {
+		try {
+			await this.h.sleep(ms);
+		} catch (error) {
+			await this.h.db.run("DELETE FROM migrate_pages WHERE id = ? AND state = 'sending'", [page.id]);
+			throw error;
 		}
 	}
 
