@@ -26,9 +26,12 @@ import { api } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
 import { fmtAgo, fmtDuration, fmtInt, fmtTime, shortId } from "@/lib/format";
 import { useParam } from "@/lib/hooks";
+import { useServerStreams } from "@/lib/live-streams";
 import { CONNECTED_GRACE_MS, useRemote, useRemoteRunner, useServerWatch } from "@/lib/remote-debug";
 import type { DebugStatus, FleetServerDetail, RemotePlayers, RemoteStatus } from "@/lib/types";
 import { DexTab } from "./server/DexTab";
+import { GameTab } from "./server/GameTab";
+import { LiveMapTab } from "./server/LiveMapTab";
 import { AuditTab, BudgetTab, BuildsTab, ErrorsTab, ModulesTab, NetworkTab } from "./server/InfoTabs";
 import { LogsTab, type PlayerLogRequest } from "./server/LogsTab";
 import { PlayersTab } from "./server/PlayersTab";
@@ -45,6 +48,9 @@ export const SERVER_TABS = [
 	{ id: "status", label: "Status" },
 	{ id: "logs", label: "Logs" },
 	{ id: "players", label: "Players" },
+	// Plans/34: what the game declared (commands, streams) and its players on the exported map.
+	{ id: "game", label: "Game" },
+	{ id: "map", label: "Live map" },
 	{ id: "state", label: "State" },
 	{ id: "dex", label: "Dex" },
 	{ id: "modules", label: "Modules" },
@@ -245,6 +251,9 @@ function ServerView({ job }: { job: string }) {
 	// Once, as soon as the server polls, whatever the tab: the header's place version and the Status tab come from it.
 	useFirstFetch(ready, status.run);
 	const players = useRemote<RemotePlayers>(call, "players");
+	// Plans/34: the game's declarations and stream frames, about every second while an owner's page is open on a live
+	// server (the page's watch makes the kernel post them). Page memory only.
+	const streams = useServerStreams(job, live && !readOnly);
 	const [logRequest, setLogRequest] = useState<PlayerLogRequest | undefined>();
 	const showLogs = useCallback(
 		(userId: number) => {
@@ -332,6 +341,12 @@ function ServerView({ job }: { job: string }) {
 						</TabsContent>
 						<TabsContent value="players" forceMount className="data-[state=inactive]:hidden">
 							<PlayersTab active={tab === "players"} players={players} onLogs={showLogs} />
+						</TabsContent>
+						<TabsContent value="game" forceMount className="data-[state=inactive]:hidden">
+							{readOnly ? <p className="text-sm text-muted-foreground">{READ_ONLY_TEXT}</p> : <GameTab streams={streams} />}
+						</TabsContent>
+						<TabsContent value="map" forceMount className="data-[state=inactive]:hidden">
+							{readOnly ? <p className="text-sm text-muted-foreground">{READ_ONLY_TEXT}</p> : <LiveMapTab active={tab === "map"} streams={streams} />}
 						</TabsContent>
 						<TabsContent value="state" forceMount className="data-[state=inactive]:hidden">
 							<StateTab active={tab === "state"} />

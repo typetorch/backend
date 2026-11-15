@@ -594,6 +594,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `bundle`, `deploy`, `mark` | game | the kernel's fleet posts (`bundle`: a [debug bundle](#debug-bundles-and-offline-history)) and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
 | `POST /v1/notify/intents`, `opened`, `played` | game | [experience notifications](#experience-notifications): intents (want / drop / presence / prefs), a verified open (`first` / `repeat` / `unknown`), the session length after it |
 | `GET /v1/fleet/commands`, `POST /v1/fleet/results` | game | [remote debug](#remote-debug): a watched server's long-poll for read-only commands, and its answers |
+| `POST /v1/fleet/streams` | game | [streams](#game-defined-debug-streams-and-the-live-map): a watched server's samples (positions, the game's streams), in memory only |
 | `POST /v1/query/<name>`, `GET /v1/queries` | admin, web | the logical queries |
 | `GET /v1/rollups/<daily\|players\|player_days\|edges>` | admin, web | the nightly rollup tables; `from` / `to` are dates or exact instants (widened to the days they touch) |
 | `POST /v1/sql` | admin, web | one read-only SELECT |
@@ -630,6 +631,8 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/fleet/servers/<jobId>` | admin, web | one server's view (its heartbeats, its debug state, its [offline history](#debug-bundles-and-offline-history)); the web role gets its location but not its [addresses](#game-server-addresses-and-locations) |
 | `GET /v1/fleet/servers/<jobId>/bundles`, `GET /v1/fleet/bundles/<id>` | admin, web | [debug bundles](#debug-bundles-and-offline-history); the web role gets a bundle's body without `playerLogs` |
 | `POST .../watch`, `POST .../commands`, `GET .../commands/<id>`, `GET /v1/fleet/debug/audit` | admin | [remote debug](#remote-debug) of one server: read-only ops only, each command audited, answers in memory only |
+| `GET /v1/fleet/servers/<jobId>/streams`, `POST /v1/fleet/live-map/watch`, `GET /v1/fleet/live-map` | admin | [streams and the live map](#game-defined-debug-streams-and-the-live-map) (player names and positions, memory only) |
+| `GET /v1/fleet/columns` | admin, web | the game's [custom fleet columns](#game-defined-debug-streams-and-the-live-map) (the live servers' declarations) |
 | `GET /v1/access` | admin | the owner list |
 | `PUT /v1/access` | admin token only (not a session) | `{ seq, owners: [UserId, ...] }` |
 | `GET /v1/admin/settings` | admin | runtime settings: values, sources, bounds, audit list; the webhook only as `{ set, source }` |
@@ -1028,8 +1031,13 @@ empty query lists the recent commands first (remembered in the browser). Command
 adds its own with `useRegisterCommands` (the Players page: Copy this player's pid). The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
 with a warning mark under 50 TPS or over 3,000 MB; Physics FPS, TPS min and Lua heap are in its Columns picker. Every JobId
 on the Fleet page opens **`/servers/<JobId>`**: the server's header, its last hour of TPS, memory and players, and while it
-runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, State, Dex, Modules, Builds, Budget, Errors,
-Network, Audit).
+runs, read-only [remote debug](#remote-debug) tabs (Status, Logs, Players, Game, Live map, State, Dex, Modules, Builds,
+Budget, Errors, Network, Audit). **Game** (plans/34) lists the commands the game declared as game-defined buttons (answers
+as a table, key-value pairs or JSON) and its streams' latest values; **Live map** draws the players on the exported map
+(the map from their positions, a switcher, the Maps page's 2D / 3D and height controls, the name on hover, a 20 s trail,
+the game's `points` streams as markers; click a dot or Follow to follow a player). **`/live`** (Live map, next to Fleet)
+shows every live server's players at once, coloured per server. The Fleet page's Columns picker also offers the game's
+[custom columns](#game-defined-debug-streams-and-the-live-map) (hidden until turned on).
 
 **Audience.** The filter bar's **Audience** button opens country, language, account age, Premium and join source
 filters (the [audience filters](#programmatic-api): player-level, from the players' join rows in the range; in the URL as
@@ -1694,7 +1702,7 @@ section it still writes for kernels before 0.4), so it works even when a game's 
 
 | Endpoint | Role | Body / answer |
 |---|---|---|
-| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)) |
+| `POST /v1/fleet/heartbeat` | game | the kernel's fleet status `{ t, b, c?, a?, n, m, s, u, p, pv?, x?, v, q, g, h, e?, sv, bu?, pf? }` + `j` (JobId; or header `X-TT-Job`). `t` = server type, `s`/`u` unix seconds. `pv` = game.PlaceVersion (what Roblox's [server logs](#roblox-server-logs) are filed under). `bu` (kernel 0.4.0) = the budget summary, `bu.mem = { t, h }` total memory and Lua heap in MB; `pf` (0.4.2) = `{ a, m, p }` server TPS averaged since the previous heartbeat, its slowest second, physics FPS. `k` is ignored: never stored or returned. Answers `202 { ok: true }`, plus `rd: 1` while the explorer watches that JobId ([remote debug](#remote-debug)). Kernel 0.5.7 adds `xh` / `xd` (the game's declarations) and `cv` (column values; the reply may carry `xq: 1` and `lm: 1`): see [game-defined debug](#game-defined-debug-streams-and-the-live-map) |
 | `POST /v1/fleet/report` | game | `{ s, b, a, j, r, e?, d?, t, g, k, p }` (`r`: swapped, failed, rolled_back, skipped, booted; `k` = kernel version) |
 | `POST /v1/fleet/alert` | game | `{ level: critical\|warning\|info, code, message, j, b, a, s, t, g, k, d? }`; the CLI posts with `j = "cli"` (e.g. `auto_rollback`, `server_stuck`). `d` (kernel 0.5.2) is kept as the alert's `details` when it is a flat object (at most 16 keys; values strings of at most 1,000 bytes, numbers or booleans; at most 4 KB of JSON), else `details` is `null` (never a 400). `deploy_failed` carries `{ stage, error, attempts, reason, kind, loadSeconds, swapSeconds, transient, rollbackTo }`; from 0.5.3 `d.bundle` names the [debug bundle](#debug-bundles-and-offline-history) that follows |
 | `POST /v1/fleet/bundle` | game | a kernel 0.5.3 [debug bundle](#debug-bundles-and-offline-history) (at most 512 KB, plain or `Content-Encoding: gzip`) -> `202 { ok: true, id }` |
@@ -1869,6 +1877,52 @@ Unknown argument keys are refused; args are at most 16 KB.
 - `GET /healthz` (admin) shows the counters and what is held (`remoteDebug: { queued, sent, done, failed, expired,
   ignored, dropped, commands, resultBytes, watched, wake }`), never an answer. `wake` is `"off"` or
   `{ published, failed, recent, limited }`.
+
+### Game-defined debug, streams and the live map
+
+Plans/34, kernel 0.5.7 and framework 0.7.1. The game declares what it wants to show; the backend keeps the declarations
+**in memory** per JobId (`src/fleet/live-debug.ts`). Names (commands, streams, columns) match `^[a-z][a-z0-9_]{0,31}$`.
+
+**Declarations ride the heartbeat**, only when the game declared anything: `xh` (a short hash) on every heartbeat, and
+`xd = { c: [{ n, l?, t? }], cmd: [{ n, l?, d? }], st: [{ n, hz, k?, l? }] }` on the first one, on a change and when the
+reply asked (`xq: 1`: the backend holds no declarations for that hash, e.g. after a restart). Up to 16 columns (`t`:
+`string` / `number` / `bool`, a display hint), 32 commands (label <= 40, description <= 200 characters) and 8 streams
+(0.2-4 Hz, `k`: `points` or `json`). Bad entries are left out, never a reason to refuse the heartbeat. A heartbeat
+without `xh` or `xd` declared nothing, and what was held goes. (`xd`, not `x`: `x = 1` is the A/B pin flag.)
+
+**Custom fleet columns**: `cv = { <name>: string (<= 64) | number | bool | null }` on the heartbeat, stored with the
+server row (fleet SQLite: game state, never player names or ids) and returned as `cv` on every `FleetServer`.
+`GET /v1/fleet/columns` (any signed-in role) lists the union of the live servers' declared columns; the Fleet page's
+**Columns** button turns them on (hidden by default).
+
+**Custom commands**: the explorer queues op `game.<name>` through `POST /v1/fleet/servers/<job>/commands` like any op;
+the backend takes it only when that JobId declared the command (else `400 ... not declared by this server`), args an
+optional JSON object of at most 2 KB, audited as `game-defined, <n> args` (never their values). Read-only is the game's
+promise (the kernel can't check it); the page labels them **game-defined**. An answer `{ kind: "table", columns, rows }`
+draws as a table, `{ kind: "kv", items }` as key-value pairs, anything else as JSON.
+
+**Streams** (while the server page watches the JobId): the kernel samples `positions` (built in, 2 Hz:
+`{ players: [{ u, n, x, y, z, yaw?, hp?, st: alive|dead|none }] }`) and the declared streams at their rate (a `points`
+stream: `{ points: [{ x, y, z, label?, color? }] }`) and posts every second:
+
+| Endpoint | Role | Body / answer |
+|---|---|---|
+| `POST /v1/fleet/streams` | game | `{ j, frames: [{ t: <unix ms>, s: { positions?, "game.<name>"?: value } }] }` (at most 64 KB, 32 frames; a value over 16 KB, an undeclared stream or a malformed one is dropped and counted) -> `200 { ok, watch, lm, dropped? }`; the kernel stops when neither `watch` nor `lm`. Kept only while someone looks (a JobId without a heartbeat, or nobody watching: nothing kept). 90 posts a minute per JobId |
+| `GET /v1/fleet/servers/<jobId>/streams?since=<t>` | admin | `{ declared: { streams, commands }, frames: [{ t, s }] }`, oldest first, frames after `since` (the kernel's sample time) |
+| `POST /v1/fleet/live-map/watch` | admin | the `/live` page is open (every 20 s; lapses after 60 s) -> `{ ok, until, wake }` |
+| `GET /v1/fleet/live-map` | admin | `{ servers: [{ job, branch, artifact, at, players }], watchedUntil }`: each live server's latest positions frame of the last 15 s |
+| `GET /v1/fleet/columns` | admin, web | `{ columns: [{ n, l?, t? }] }` |
+
+**The live map of every server** (`/live`): while its watch holds, heartbeat replies carry `lm: 1`, and when it
+**starts** the backend publishes one `{"k":"lm"}` on `TypeTorch/deploy` (the [instant wake](#instant-wake)'s key and
+rules; at most one per 30 s, inside the 10-a-minute cap). A kernel told `lm` posts only `positions`, one frame every 3 s,
+while the replies say `lm` (or `watch`).
+
+**Privacy.** Frames hold player names, UserIds and positions: a ring of the last **120 s** per JobId (at most 4 MB for a
+watched server, 512 KB for one only on the live map, 96 MB in all), **never** on disk, the event bus, `/v1/live` or a
+log line, dropped the moment the server is lost or closes. The explorer polls them into the page only. `GET /healthz`
+shows counters (`liveDebug: { frames, dropped, tooBig, undeclared, idle, asked, evicted, declared, streamJobs,
+streamBytes, liveMap }`), never a frame.
 
 ### Debug bundles and offline history
 
@@ -2282,6 +2336,8 @@ username on the row: the explorer resolves pid -> user through `identities`.
   up in a local database; no address leaves the server.
 - **Remote debug answers** (player names, logs, state) stay in the backend's memory for at most 3 minutes and in the
   owner's open page; they are never stored. The audit keeps who asked what, never a player's UserId or an answer.
+- **Live positions** (the server page's live map and `/live`: player names, UserIds, where they stand) stay in the
+  backend's memory for at most 2 minutes per server and only while an owner's page looks; never stored or logged.
 - Turning it off: the framework option `identity: false` stops sending identity rows; deleting
   `data/fleet.sqlite`'s `identities` rows (or the file, which also holds fleet history) forgets the mapping.
 

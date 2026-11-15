@@ -118,8 +118,11 @@ export interface FleetHttpOptions {
 	keepOpen?(req: Request): void;
 	/** Seconds between SSE keep-alive comments (default 15). */
 	pingSeconds?: number;
-	/** Plans/25: extra fields for a heartbeat's 202 reply (`rd: 1` while the explorer watches that JobId). */
-	heartbeatReply?(job: string): Record<string, unknown> | undefined;
+	/**
+	 * Extra fields for a heartbeat's 202 reply: plans/25 `rd: 1` while the explorer watches that JobId; plans/34 `xq: 1`
+	 * (send the declarations) and `lm: 1` (the live map is watched). `body` is the heartbeat as sent (its `xh` / `xd`).
+	 */
+	heartbeatReply?(job: string, body: unknown): Record<string, unknown> | undefined;
 	/** A debug bundle's `playerLogs` go to owners (the admin role) only; the read-only web role gets the body without them. Default: nobody. */
 	canReadPlayerLogs?(req: Request): boolean;
 	/** Game servers' addresses (`ip`, `firstIp`) go to owners (the admin role) only; the web role gets their locations. Default: nobody. */
@@ -264,7 +267,7 @@ export async function handleFleet(req: Request, url: URL, o: FleetHttpOptions, i
 				// The address is the connection's (resolved by the host), never anything the body says.
 				const heartbeat = { ...parseHeartbeat(body, header), ip: normalizeIp(ip) };
 				await accept("heartbeat", { kind: "heartbeat", heartbeat });
-				return json(202, { ok: true, ...(o.heartbeatReply?.(heartbeat.job) ?? {}) });
+				return json(202, { ok: true, ...(o.heartbeatReply?.(heartbeat.job, body) ?? {}) });
 			}
 			if (kind === "report") await accept("deploy", { kind: "report", report: parseReport(body) });
 			else if (kind === "closing") {

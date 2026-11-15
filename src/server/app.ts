@@ -112,6 +112,8 @@ import { FleetService, type Alert } from "../fleet/service.ts";
 import { RemoteDebugHub, type Caller } from "../fleet/remote-debug.ts";
 import { handleRemoteDebug, isRemoteDebugPath } from "../fleet/remote-debug-http.ts";
 import { RemoteDebugWaker } from "../fleet/remote-debug-wake.ts";
+import { LiveDebugHub } from "../fleet/live-debug.ts";
+import { handleLiveDebug, isLiveDebugPath, STREAM_POSTS_PER_MINUTE } from "../fleet/live-debug-http.ts";
 import { describeQueries, isQueryName, renderQuery } from "../queries/index.ts";
 import { ALERT_TICK_MS, BackendAlerts, diskOf } from "../alerts/evaluator.ts";
 import { runtimeName, serve, type Served } from "../runtime.ts";
@@ -225,6 +227,8 @@ export interface App {
 	readonly remoteDebug?: RemoteDebugHub;
 	/** Plans/25 "Instant wake": the wake publisher (off without OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID). */
 	readonly waker?: RemoteDebugWaker;
+	/** Plans/34: game declarations, streams and the live map watch (memory only). Undefined without the fleet part. */
+	readonly liveDebug?: LiveDebugHub;
 	/** Plans/29: experience notifications (notify.db, the planner, the sender, the signing keys). */
 	readonly notify: NotifyService;
 	/** Explorer sessions open right now. */
@@ -475,7 +479,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			})
 		: undefined;
 	// Plans/25: remote debug. Answers stay in this process's memory; only the audit (no answers) goes to disk.
-	const remoteDebug = fleet ? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit") }) : undefined;
+	// Plans/34: what each game server declared (commands, streams, columns), its stream frames, the live map watch.
+	// Memory only; the remote-debug hub asks it whether a game.<name> command was declared.
+	let liveDebug: LiveDebugHub | undefined;
+	const remoteDebug = fleet
+		? new RemoteDebugHub({ clock, log, auditDir: join(config.dataDir, "audit"), gameCommand: (job, name) => liveDebug?.hasCommand(job, name) ?? false })
+		: undefined;
 	// Plans/25 "Instant wake": with OPENCLOUD_API_KEY and TYPETORCH_UNIVERSE_ID, a watch that starts on a server
 	// that isn't polling publishes a wake (Open Cloud Messaging); without them, the heartbeat reply alone wakes it.
 	const waker = remoteDebug
@@ -487,6 +496,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				log,
 			})
 		: undefined;
+	liveDebug = remoteDebug
+		? new LiveDebugHub({ clock, isWatched: (job) => remoteDebug.isWatched(job), ...(waker?.enabled ? { wakeLiveMap: () => waker.wakeLiveMap() } : {}) })
+		: undefined;
+	// A lost or closed server's declarations and frames go at once (player names and positions are not kept past it).
+	if (fleet && liveDebug) {
+		const hub = liveDebug;
+		fleet.onGone((job) => hub.forget(job));
+	}
 
 	// Subscribers ------------------------------------------------------------------------------------------------------
 	// The DuckDB writer: appends the batch to the raw file before the 202 (a 202 means "on disk"). Subscribed once the
@@ -648,6 +665,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		jobCommands: new RateLimiter(60, clock),
 		watches: new RateLimiter(30, clock),
 	};
+	// Plans/34: stream posts per JobId, live map watches per user (the page repeats every 20 s).
+	const liveLimiters = { streams: new RateLimiter(STREAM_POSTS_PER_MINUTE, clock), watches: new RateLimiter(30, clock) };
 	// Plans/29: notification calls per address per minute (game servers share egress addresses), admin sends per minute.
 	const notifyLimiter = new RateLimiter(NOTIFY_IP_PER_MINUTE, clock);
 	const notifyAdminLimiter = new RateLimiter(NOTIFY_ADMIN_PER_MINUTE, clock);
@@ -1830,6 +1849,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (fleet) out.fleet = { ...(await fleet.counts()), streams: fleet.subscribers, ...(notifier.configured ? { webhook: notifier.stats } : {}) };
 		// Plans/25: counters and what is held in memory (never an answer).
 		if (remoteDebug) out.remoteDebug = { ...remoteDebug.stats, ...remoteDebug.memory, ...(waker?.enabled ? { wake: waker.stats } : { wake: "off" }) };
+		// Plans/34: counts only (never a frame).
+		if (liveDebug) out.liveDebug = { ...liveDebug.stats, ...liveDebug.memory };
 		// The bus: per subscriber what was handled, what is waiting and what was dropped (full queue).
 		out.bus = bus.stats();
 		out.live = live.stats;
@@ -2858,6 +2879,23 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path === "/v1/errors" && method === "POST") return postErrors(req, ip);
 		if (path === "/v1/identity" && method === "POST") return postIdentity(req, ip);
 		if (path === "/v1/notify/intents" || path === "/v1/notify/opened" || path === "/v1/notify/played") return notifyGame(req, path, ip);
+		if (path.startsWith("/v1/fleet/") && isLiveDebugPath(path)) {
+			if (!fleet || !liveDebug) return json(404, { error: "the fleet part is off on this server" });
+			return handleLiveDebug(req, url, path, {
+				hub: liveDebug,
+				fleet,
+				isGame: (r) => auth.hasGameKey(r),
+				badGameKey: (r) => badGameKey(r, ip, "streams"),
+				admin: (r, need) => {
+					const gate = need === "read" ? readGate(r, ip) : adminGate(r, ip);
+					if ("response" in gate) return gate;
+					const user = gate.principal.user;
+					return { caller: user.kind === "roblox" ? { kind: "roblox", userId: user.userId } : { kind: "token" } };
+				},
+				limiters: liveLimiters,
+				readCapped,
+			});
+		}
 		if (path.startsWith("/v1/fleet/") && isRemoteDebugPath(path)) {
 			if (!fleet || !remoteDebug) return json(404, { error: "the fleet part is off on this server" });
 			return handleRemoteDebug(req, url, path, {
@@ -2906,7 +2944,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 						keepOpen: (r) => keepOpen.get(r)?.(),
 						accept: (topic, message) => bus.publish(topic, message as never),
 						// Plans/25: a watched JobId's heartbeat reply wakes its kernel's debug poll.
-						heartbeatReply: (job) => remoteDebug?.heartbeatReply(job),
+						// Plans/34: `xq: 1` (send the declarations again) and `lm: 1` (the live map is watched).
+						heartbeatReply: (job, body) => ({ ...(remoteDebug?.heartbeatReply(job) ?? {}), ...(liveDebug?.heartbeat(job, body) ?? {}) }),
 						// A debug bundle's player logs (what each client logged) are for owners: the web role reads the rest.
 						canReadPlayerLogs: () => gate !== undefined && "principal" in gate && gate.principal.role === "admin",
 						// Game servers' addresses likewise (their locations go to every signed-in role).
@@ -3206,6 +3245,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		jobs.push(setInterval(() => void diskTick(), BACKUP_CHECK_MS));
 		void diskTick();
 		if (fleet) jobs.push(setInterval(() => void fleet.sweep().catch((e) => log(`fleet sweep failed: ${(e as Error).message}`)), 10_000));
+		if (liveDebug) jobs.push(setInterval(() => liveDebug?.sweep(), 10_000));
 		// Plans/29: the planner every 30 s, the sender every second, the kv sweep every minute, the prune every 10 minutes.
 		jobs.push(
 			setInterval(() => void notify.planTick().catch((e) => log(`notify planner failed: ${(e as Error).message}`)), 30_000),
@@ -3347,6 +3387,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		settings: runtime,
 		...(remoteDebug ? { remoteDebug } : {}),
 		...(waker ? { waker } : {}),
+		...(liveDebug ? { liveDebug } : {}),
 		notify,
 		bus,
 		errors,

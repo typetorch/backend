@@ -98,6 +98,7 @@ const SCHEMAS: Record<string, Schema> = {
 			firstIp: nullable("string", "admin role only: the first address it was seen from"),
 			ipChangedAt: nullable("string", "ISO time the address last changed (null: never)"),
 			location: { oneOf: [ref("ServerLocation"), { type: "null" }], description: "every signed-in role; null while unknown" },
+			cv: { type: ["object", "null"], description: "plans/34: the game's custom column values (name -> string, number, bool or null); null when it declares none" },
 		},
 	},
 };
@@ -256,6 +257,16 @@ const ROUTES: Route[] = [
 	),
 	{ method: "get", path: "/v1/fleet/commands", tag: "game", roles: ["game"], summary: "Remote debug: a watched server's long-poll for commands" },
 	{ method: "post", path: "/v1/fleet/results", tag: "game", roles: ["game"], summary: "Remote debug: command answers", body: obj({ j: str(), results: arr(obj()) }) },
+	{
+		method: "post",
+		path: "/v1/fleet/streams",
+		tag: "game",
+		roles: ["game"],
+		summary: "Plans/34: a watched server's stream samples (positions, game streams), memory only",
+		description: "`{ j, frames: [{ t, s }] }`, at most 64 KB and 32 frames, each value at most 16 KB -> `{ ok, watch, lm, dropped? }`.",
+		body: obj({ j: str(), frames: arr(obj({ t: int("unix ms"), s: obj() })) }, ["frames"]),
+		response: obj({ ok: { type: "boolean" }, watch: { type: "boolean" }, lm: { type: "boolean" } }),
+	},
 
 	// Analytics -----------------------------------------------------------------------------------------------------------
 	{ method: "get", path: "/v1/queries", tag: "analytics", roles: ["admin", "web"], summary: "The logical queries: name, summary, default range" },
@@ -475,6 +486,18 @@ const ROUTES: Route[] = [
 	{ method: "post", path: "/v1/fleet/servers/{jobId}/commands", tag: "fleet", roles: ["admin"], summary: "Remote debug: queue a read-only command", params: [JOB], body: obj({ op: str(), args: obj() }, ["op"]) },
 	{ method: "get", path: "/v1/fleet/servers/{jobId}/commands/{id}", tag: "fleet", roles: ["admin"], summary: "Remote debug: one command's answer", params: [JOB, p("id", "the command id")] },
 	{ method: "get", path: "/v1/fleet/debug/audit", tag: "fleet", roles: ["admin"], summary: "Remote debug audit list" },
+	{
+		method: "get",
+		path: "/v1/fleet/servers/{jobId}/streams",
+		tag: "fleet",
+		roles: ["admin"],
+		summary: "Plans/34: one server's declared streams and commands, and its stream frames (the last 120 s, memory only)",
+		params: [JOB, q("since", "frames after this sample time, unix ms", int())],
+		response: obj({ declared: obj({ streams: arr(obj()), commands: arr(obj()) }), frames: arr(obj({ t: int(), s: obj() })) }),
+	},
+	{ method: "post", path: "/v1/fleet/live-map/watch", tag: "fleet", roles: ["admin"], summary: "Plans/34: the live map is open (repeat every 20 s; lapses after 60 s)", response: obj({ ok: { type: "boolean" }, until: int(), wake: { type: "boolean" } }) },
+	{ method: "get", path: "/v1/fleet/live-map", tag: "fleet", roles: ["admin"], summary: "Plans/34: every live server's latest player positions", response: obj({ servers: arr(obj({ job: str(), branch: str(), artifact: str(), at: int(), players: arr(obj()) })) }) },
+	{ method: "get", path: "/v1/fleet/columns", tag: "fleet", roles: ["admin", "web"], summary: "Plans/34: the game's custom fleet columns (the live servers' declarations)", response: obj({ columns: arr(obj({ n: str(), l: str(), t: str("string, number or bool") })) }) },
 
 	// Roblox ------------------------------------------------------------------------------------------------------------------
 	// Maps (plans/33) ------------------------------------------------------------------------------------------------------
