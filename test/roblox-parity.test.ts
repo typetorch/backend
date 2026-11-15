@@ -245,6 +245,12 @@ describe("realtime: session time counts sessions when they end", () => {
 		expect(r.current.sessions).toBe(2); // B, C
 		expect(r.current.running).toBe(2);
 	});
+
+	test("mergeGapMinutes: off by default, validated", async () => {
+		const off = await rt.query("realtime", {}, { hours: 1, ccuDays: 1, mergeGapMinutes: 0 });
+		expect(off.current.avgSessionMinutes).toBe(31.5);
+		expect(() => rt.render("realtime", {}, { mergeGapMinutes: 31 })).toThrow("mergeGapMinutes");
+	});
 });
 
 describe("realtime: concurrent players by device", () => {
