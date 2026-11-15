@@ -2452,6 +2452,9 @@ under what one core ingests. Memory stays under ~600 MB including the nightly ex
 400MB cap and spills; a flow graph over many days is the slowest query. Real props make bigger Parquet files than
 these synthetic ones.
 
+A sudden surge (shed load from the CLI, resize the VPS, tune DuckDB for a bigger machine): [Emergency backend
+scale-ups](https://github.com/typetorch/docs/blob/main/guides/emergency-scale-ups.md).
+
 ## Development
 
 ```sh
