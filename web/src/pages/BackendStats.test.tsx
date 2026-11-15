@@ -144,6 +144,15 @@ describe("Backend stats page", () => {
 		expect(screen.getByRole("button", { name: /paused/i }).getAttribute("aria-pressed")).toBe("false");
 	});
 
+	it("shows ingest in flight and the busy refusals when the server reports them", async () => {
+		mount({ ...view, ingest: { busy: 12, inflight: 3, lastBusyAt: NOW - 30_000 } });
+		const tiles = await screen.findByTestId("stats-tiles");
+		expect(within(tiles).getByText("Ingest in flight")).toBeTruthy();
+		expect(within(tiles).getByText("12 busy (503) since start")).toBeTruthy();
+		expect(within(tiles).getByText(/Last busy 30s ago/)).toBeTruthy();
+		expect(screen.getByText("Ingest busy (503)")).toBeTruthy();
+	});
+
 	it("shows the server's error when the stats can't load", async () => {
 		vi.spyOn(api, "backendStats").mockRejectedValue(new ApiError(403, "read-only access: this needs the admin token or an owner's session", "/v1/admin/stats"));
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

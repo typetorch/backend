@@ -16,7 +16,7 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
 import { groupMarks } from "@/lib/deploys";
-import { fmtBytes, fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
+import { fmtAgo, fmtBytes, fmtDuration, fmtInt, fmtNum, fmtTime } from "@/lib/format";
 import type { DeployMark } from "@/lib/perf";
 import type { BackendStats, RouteGroup, RouteStats, StatsBucket, StatsWindow } from "@/lib/types";
 
@@ -234,13 +234,21 @@ export default function BackendStatsPage() {
 			{!data && !stats.isError ? <LoadingBlock rows={6} /> : null}
 			{data ? (
 				<>
-					<div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7" data-testid="stats-tiles">
+					<div className={`grid grid-cols-2 gap-3 md:grid-cols-4 ${data.ingest ? "xl:grid-cols-8" : "xl:grid-cols-7"}`} data-testid="stats-tiles">
 						<Metric label="Requests / s" value={perSecond(data.rates.requests)} sub={`${perSecond(data.rates.errors)} errors / s (5xx)`} hint={`Last ${data.rates.seconds} s`} />
 						<Metric label="Queries / s" value={perSecond(data.rates.duckQueries)} sub={`DuckDB statements · SQLite reads ${perSecond(data.rates.sqliteReads)} / s`} hint={`DuckDB p50 ${ms(data.duckdb.recent.p50)}, p99 ${ms(data.duckdb.recent.p99)}`} />
 						<Metric label="Inserts / s" value={perSecond(data.rates.rowsIn)} sub={`rows accepted · loaded ${perSecond(data.rates.rowsLoaded)} / s`} hint={`SQLite writes ${perSecond(data.rates.sqliteWrites)} / s`} />
 						<Metric label="Latency p50" value={ms(data.latency.recent.p50)} sub={`p90 ${ms(data.latency.recent.p90)} · p99 ${ms(data.latency.recent.p99)}`} hint={`Max ${ms(data.latency.recent.max)}, ${fmtInt(data.latency.recent.count)} requests`} />
 						<Metric label="Memory" value={mb(data.sample?.rssMb)} sub={`heap ${mb(data.sample?.heapMb)} of ${mb(data.sample?.heapTotalMb)}`} hint={`Native, buffers ${mb(data.sample?.externalMb)} (RSS is the process)`} />
 						<Metric label="CPU" value={data.sample ? `${fmtNum(data.sample.cpuPercent, 1)}%` : "–"} sub={`event loop lag ${ms(data.sample?.loopLagMs)}`} hint="100% = one core busy" />
+						{data.ingest ? (
+							<Metric
+								label="Ingest in flight"
+								value={fmtInt(data.ingest.inflight)}
+								sub={`${fmtInt(data.ingest.busy)} busy (503) since start`}
+								hint={data.ingest.lastBusyAt ? `Last busy ${fmtAgo(data.ingest.lastBusyAt, data.now)}; game servers keep the batch and retry` : "Never answered busy"}
+							/>
+						) : null}
 						<Metric label="Uptime" value={fmtDuration(data.uptimeSeconds * 1000)} sub={`${data.runtime} · v${data.version}`} hint={data.state === "ready" ? "Ready" : `State: ${data.state}`} tone={data.state === "ready" ? undefined : "muted"} />
 					</div>
 
@@ -308,6 +316,7 @@ export default function BackendStatsPage() {
 							<KeyValue label="Rows loaded">{fmtInt(data.totals.rowsLoaded)}</KeyValue>
 							<KeyValue label="SQLite reads">{fmtInt(data.totals.sqliteReads)}</KeyValue>
 							<KeyValue label="SQLite writes">{fmtInt(data.totals.sqliteWrites)}</KeyValue>
+							{data.ingest ? <KeyValue label="Ingest busy (503)">{fmtInt(data.ingest.busy)}</KeyValue> : null}
 						</div>
 					</Section>
 				</>

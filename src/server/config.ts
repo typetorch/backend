@@ -135,6 +135,15 @@ export interface ServerConfig {
 	maxInflateBytes: number;
 	ipPerMinute: number;
 	jobPerMinute: number;
+	/**
+	 * Plans/35 D, the busy 503: POST /v1/ingest answers 503 + Retry-After before reading the body while raw/incoming holds
+	 * more than this many bytes (TYPETORCH_BUSY_BYTES, default 512 MB, 0 = off)...
+	 */
+	busyBytes: number;
+	/** ...or more than this many ingest requests are in flight (TYPETORCH_BUSY_REQUESTS, default 256, 0 = off). */
+	busyRequests: number;
+	/** Plans/35 A: the migration job's default rows per second (TYPETORCH_MIGRATE_ROWS_PER_SECOND, default 20000). */
+	migrateRowsPerSecond: number;
 	// DuckDB
 	memoryLimit: string;
 	threads: number;
@@ -525,6 +534,9 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		maxInflateBytes: num(env, "TYPETORCH_MAX_INFLATE", 16 * 1024 * 1024, 1024, 256 * 1024 * 1024),
 		ipPerMinute: num(env, "TYPETORCH_IP_PER_MINUTE", 6000, 1, 1_000_000),
 		jobPerMinute: num(env, "TYPETORCH_JOB_PER_MINUTE", 60, 1, 100_000),
+		busyBytes: Math.floor(num(env, "TYPETORCH_BUSY_BYTES", 512 * 1024 * 1024, 0, 1024 ** 4)),
+		busyRequests: Math.floor(num(env, "TYPETORCH_BUSY_REQUESTS", 256, 0, 100_000)),
+		migrateRowsPerSecond: Math.floor(num(env, "TYPETORCH_MIGRATE_ROWS_PER_SECOND", 20_000, 1, 10_000_000)),
 		memoryLimit: env.TYPETORCH_MEMORY_LIMIT ?? "400MB",
 		threads: num(env, "TYPETORCH_THREADS", 2, 1, 64),
 		loadSeconds: num(env, "TYPETORCH_LOAD_SECONDS", 5, 0.2, 3600),

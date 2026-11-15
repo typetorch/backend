@@ -10,6 +10,7 @@ import { useState, type ReactNode } from "react";
 import { alertRulesChange, BackendAlertRules, type AlertRulesDraft } from "@/components/BackendAlertRules";
 import { BackupCard } from "@/components/BackupCard";
 import { CentralLoginSection } from "@/components/CentralLoginSection";
+import { MigrationCard } from "@/components/MigrationCard";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -20,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError } from "@/lib/api";
-import { fmtAgo, fmtInt, fmtTime, plural } from "@/lib/format";
+import { fmtAgo, fmtBytes, fmtInt, fmtTime, plural } from "@/lib/format";
 import type { RuntimeSetting, SecretSetting, SettingSource, SettingsAuditEntry, SettingsView, ValueSetting } from "@/lib/types";
 
 export const SETTINGS_KEY = ["admin-settings"] as const;
@@ -29,7 +30,7 @@ const GROUPS: { id: RuntimeSetting["group"]; title: string; description: string 
 	{ id: "alerts", title: "Alerts", description: "Where fleet alerts go, and which ones." },
 	{ id: "backendAlerts", title: "Backend alerts", description: "Alerts the backend raises from its own data, checked once a minute. They show on the Fleet page and go to the webhook like the game's." },
 	{ id: "access", title: "Access", description: "Who may reach the explorer, and how owners sign in." },
-	{ id: "limits", title: "Rate limits", description: "Per minute. Game servers past a limit get 429 and retry." },
+	{ id: "limits", title: "Rate limits", description: "Per minute, and when ingest counts as busy. Game servers past a limit get 429 (503 when busy), keep the batch and retry." },
 	{ id: "retention", title: "Retention and error budgets", description: "How long data is kept, and how much error data is stored." },
 	{ id: "keys", title: "API keys", description: "Named API keys (typetorch keys): the requests a minute per key, and the events a support key may read per player." },
 	{ id: "notify", title: "Notifications", description: "Experience notifications: pause, dry run, the send rate ceiling and the day clock. The Notifications page has the per-kind switches." },
@@ -57,6 +58,13 @@ export function numberProblem(setting: Pick<ValueSetting, "min" | "max" | "zero"
 	if (setting.zero && n === 0) return null;
 	if (n < (setting.min ?? -Infinity) || n > (setting.max ?? Infinity)) return `from ${range}`;
 	return null;
+}
+
+/** A number of bytes as typed, readable ("= 64 MB"); empty for 0 (the bounds say what 0 means) or a typo. */
+export function bytesHint(text: string): string {
+	const t = text.trim();
+	if (!/^\d+$/.test(t) || Number(t) === 0) return "";
+	return `= ${fmtBytes(Number(t))}`;
 }
 
 /** "10.0.0.0/8, 203.0.113.7" or one per line -> the list the backend takes. */
@@ -435,6 +443,11 @@ function SettingsForm({ data }: { data: SettingsView }) {
 	}
 
 	function noteFor(setting: RuntimeSetting): ReactNode {
+		if (setting.kind === "number" && setting.unit === "bytes") {
+			const shown = Object.hasOwn(draft, setting.key) ? (draft[setting.key] === null ? setting.fallback : draft[setting.key]) : setting.value;
+			const hint = bytesHint(String(shown ?? ""));
+			return hint ? <p className="text-xs text-muted-foreground tabular-nums">{hint}</p> : null;
+		}
 		if (setting.key === "adminAllowIps")
 			return (
 				<p className="text-xs text-muted-foreground">
@@ -530,6 +543,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 			})}
 			{data.centralLogin ? <CentralLoginSection info={data.centralLogin} /> : null}
 			<BackupCard />
+			<MigrationCard />
 			<p className="text-xs text-muted-foreground">
 				Environment only (change these on Coolify and redeploy): <span className="font-mono">{data.envOnly.join(", ")}</span>.
 			</p>

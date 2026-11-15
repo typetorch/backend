@@ -2625,6 +2625,66 @@ export interface BackendStats {
 	minutes: StatsBucket[];
 	window: StatsWindow;
 	routes: RouteStats[];
+	/** Ingest backpressure (missing on servers before it): 503 busy refusals since start, requests in flight now. */
+	ingest?: IngestPressure;
+}
+
+export interface IngestPressure {
+	/** 503 busy refusals since the process started. */
+	busy: number;
+	/** Ingest requests in flight now. */
+	inflight: number;
+	/** Unix ms of the last busy refusal, or null. */
+	lastBusyAt: number | null;
+}
+
+// Migration (GET / POST /v1/admin/migrate) ------------------------------------------------------------------------------
+
+export type MigrateState = "idle" | "running" | "paused" | "waiting" | "done" | "failed" | "cancelled" | "needs_decision";
+export type MigrateStepName = "erased" | "identities" | "fleet" | "events" | "recordings" | "live" | "rollups" | "verify";
+export type MigrateDayState = "pending" | "importing" | "match" | "missing" | "differs" | "duplicates";
+
+export interface MigrateStep {
+	name: MigrateStepName;
+	state: "pending" | "running" | "done" | "failed";
+	done: number;
+	total: number;
+	note?: string;
+}
+
+export interface MigrateDay {
+	table: "events" | "recordings";
+	/** YYYY-MM-DD (UTC). */
+	day: string;
+	state: MigrateDayState;
+	rowsSource: number;
+	rowsTarget: number;
+	note: string;
+}
+
+/** A move from another server (or to / from a basin): where it is, per step and per day. Times are unix ms. */
+export interface MigrateStatus {
+	state: MigrateState;
+	direction: "from-backend" | "from-basin" | "to-basin" | null;
+	source: { kind: "backend"; url: string } | null;
+	startedAt: number | null;
+	finishedAt: number | null;
+	rowsPerSecond: number;
+	rowsDone: number;
+	rowsTotal: number;
+	steps: MigrateStep[];
+	days: MigrateDay[];
+	waitingFor: string | null;
+	decision: null | Record<string, unknown>;
+	error: string | null;
+}
+
+export type MigrateAction = "pause" | "resume" | "cancel";
+
+/** POST /v1/admin/migrate { action: "start" }: the old server and its admin token (sent once, never shown again). */
+export interface MigrateStartInput {
+	from: { kind: "backend"; url: string; token: string };
+	rowsPerSecond?: number;
 }
 
 /** One entry of the audit log (GET /v1/admin/audit): who did what on the admin side. */

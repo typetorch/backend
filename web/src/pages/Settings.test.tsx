@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import type { RuntimeSetting, SettingsView } from "@/lib/types";
-import Settings, { buildChanges, numberProblem, splitList } from "./Settings";
+import Settings, { buildChanges, bytesHint, numberProblem, splitList } from "./Settings";
 
 afterEach(() => {
 	cleanup();
@@ -199,6 +199,22 @@ describe("settings helpers", () => {
 		expect(numberProblem(b, "7.5")).toContain("a whole number");
 		expect(numberProblem(b, "")).toContain("a whole number");
 		expect(numberProblem({ min: 1, max: 10 }, "0")).toBe("from 1 to 10");
+	});
+
+	it("the busy limits (bytes and requests, 0 = off) render in Rate limits; bytes get a readable size", async () => {
+		const busyBytes: RuntimeSetting = { key: "busyBytes", env: "TYPETORCH_BUSY_BYTES", group: "limits", kind: "number", label: "Busy above bytes in flight", help: "Ingest bytes in flight before 503.", source: "default", min: 1_048_576, max: 4_294_967_296, zero: "off", unit: "bytes", value: 67_108_864, fallback: 67_108_864, fallbackSource: "default" };
+		const busyRequests: RuntimeSetting = { key: "busyRequests", env: "TYPETORCH_BUSY_REQUESTS", group: "limits", kind: "number", label: "Busy above requests in flight", help: "Ingest requests in flight before 503.", source: "default", min: 1, max: 10_000, zero: "off", unit: "requests", value: 0, fallback: 0, fallbackSource: "default" };
+		mount({ ...view, settings: [...settings, busyBytes, busyRequests] });
+		const bytes = (await screen.findByLabelText("Busy above bytes in flight")).closest("[data-setting]") as HTMLElement;
+		expect(within(bytes).getByText("= 64.0 MB")).toBeTruthy();
+		expect(within(bytes).getByText(/0 = off/)).toBeTruthy();
+		fireEvent.change(screen.getByLabelText("Busy above bytes in flight"), { target: { value: "2097152" } });
+		expect(within(bytes).getByText("= 2.0 MB")).toBeTruthy();
+		const requests = screen.getByLabelText("Busy above requests in flight").closest("[data-setting]") as HTMLElement;
+		expect(within(requests).getByText(/requests; 0 = off/)).toBeTruthy();
+		expect(bytesHint("0")).toBe("");
+		expect(bytesHint("abc")).toBe("");
+		expect(bytesHint("1536")).toBe("= 1.5 KB");
 	});
 
 	it("the support events list (plans/31) is edited as names, one per line, and saved as a list", async () => {

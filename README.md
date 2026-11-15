@@ -32,6 +32,7 @@ is the same command.
 - [Deploy on Coolify](#deploy-on-coolify)
 - [Audit log](#audit-log)
 - [Backups and restore](#backups-and-restore) ([Disk space](#disk-space))
+- [Move to another server](#move-to-another-server) (the export API, the migration job, the runbook)
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
 - [The explorer](#the-explorer)
@@ -146,6 +147,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_HANDOVER_SECONDS` | `600` | Rolling deploys: how long a new server waits for the old one to let go of DuckDB before it gives up and exits 1 (see [Deploys on Coolify](#deploys-on-coolify-rolling-updates)). |
 | `TYPETORCH_MAX_BODY`, `TYPETORCH_MAX_INFLATE` | 2 MB, 16 MB | Ingest body caps (gzip, inflated). |
 | `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
+| `TYPETORCH_BUSY_BYTES`, `TYPETORCH_BUSY_REQUESTS` | 512 MB, `256` | [The busy 503](#limits-and-the-busy-503): ingest answers `503` + `Retry-After` while `raw/incoming` holds more than this many bytes, or more than this many ingest requests are in flight (`0` = off). Also on the Settings page. |
+| `TYPETORCH_MIGRATE_ROWS_PER_SECOND` | `20000` | The [migration job](#move-to-another-server)'s default rows per second (a `start` may name its own). |
 | `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds per minute the fleet API lets in, and (counted on their own) the error logs. |
 | `TYPETORCH_SQLITE` | `<data dir>/fleet.sqlite` | The SQLite file (fleet, identities, error logs). |
 | `TYPETORCH_GEOIP`, `TYPETORCH_GEOIP_ASN` | `dbip` in production (`NODE_ENV=production`, as in the image), else `off` | [Game server locations](#game-server-addresses-and-locations): `dbip` downloads DB-IP's free City Lite and ASN Lite databases into `<data dir>/geoip/` and refreshes them monthly; a path uses that City `.mmdb` file as it is (e.g. MaxMind GeoLite2, kept fresh by `geoipupdate`; `TYPETORCH_GEOIP_ASN` names an ASN one); `off` shows no locations. Lookups never leave the server. |
@@ -196,6 +199,8 @@ as noted for the token login).
 | Viewers (`webViewers`) | `TYPETORCH_WEB_VIEWERS` | up to 200 Roblox UserIds who sign in with Roblox as read-only viewers (the web role); a viewer taken off the list is signed out at once |
 | Ingest per address (`ipPerMinute`) | `TYPETORCH_IP_PER_MINUTE` | 100 to 1,000,000 a minute |
 | Ingest per server (`jobPerMinute`) | `TYPETORCH_JOB_PER_MINUTE` | 10 to 100,000 a minute |
+| Busy: raw backlog (`busyBytes`) | `TYPETORCH_BUSY_BYTES` | 1 MB to 1 TB in bytes, or 0 = off ([the busy 503](#limits-and-the-busy-503)) |
+| Busy: requests in flight (`busyRequests`) | `TYPETORCH_BUSY_REQUESTS` | 1 to 100,000, or 0 = off |
 | Error logs per address (`errorsIpPerMinute`) | `TYPETORCH_ERRORS_IP_PER_MINUTE` | 60 to 1,000,000 a minute |
 | New servers per minute (`fleetNewJobsPerMinute`) | `TYPETORCH_NEW_JOBS_PER_MINUTE` | 100 to 1,000,000 a minute |
 | Analytics history (`keepDays`) | `TYPETORCH_KEEP_DAYS` | 7 to 36,500 days, or 0 = forever (applied at the nightly export) |
@@ -440,8 +445,8 @@ Revoked and expired keys answer 401 like unknown ones; `last_used_at` is written
 | `admin` | all |
 
 - A key is a Bearer only; it never opens an explorer session. Admin keys act like the admin token, except the owner list
-  (`PUT /v1/access`) and the trust-link signing keys (`PUT /v1/access/keys`): those take the env admin token only (403 for a
-  named key). Analyst keys read like the web role within their scopes.
+  (`PUT /v1/access`), the trust-link signing keys (`PUT /v1/access/keys`), the export API (`/v1/admin/export/*`) and
+  starting or steering a migration (`POST /v1/admin/migrate`): those take the env admin token only (403 for a named key). Analyst keys read like the web role within their scopes.
 - The CLI's `typetorch keys create | list | revoke` ship in the next CLI release (after 0.18.1); the routes work today.
 - Rate limit: runtime setting `keys.ratePerMinute` (`TYPETORCH_KEYS_RATE_PER_MINUTE`, default 120) per key, `429 { error: "rate_limited" }` + Retry-After;
   game keys keep the ingest limits; the env tokens keep theirs.
@@ -597,7 +602,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 
 | Route | Role | What |
 |---|---|---|
-| `POST /v1/ingest` | game | gzip JSON `{ events, recordings, identities? }`. Appended to a raw file, then `202 { accepted, rejected }` |
+| `POST /v1/ingest` | game | gzip JSON `{ events, recordings, identities? }`. Appended to a raw file, then `202 { accepted, rejected }`; `503 { busy: true }` + `Retry-After` while the backend is behind ([the busy 503](#limits-and-the-busy-503)) |
 | `POST /v1/errors` | game | error logs (see [Error logs](#error-logs)) |
 | `POST /v1/identity` | game | pid <-> UserId rows from Basin games |
 | `POST /v1/fleet/heartbeat`, `report`, `alert`, `closing`, `bundle`, `deploy`, `mark` | game | the kernel's fleet posts (`bundle`: a [debug bundle](#debug-bundles-and-offline-history)) and the CLI's release start, chart marks (`mark`: `j = "cli"` only) and alerts |
@@ -652,7 +657,9 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/admin/audit` | admin | the [audit log](#audit-log), newest first: `?actor=&action=&outcome=&since=&until=&before=&limit=&facets=1` |
 | `GET /v1/admin/backups`, `POST /v1/admin/backups` | admin | [backups](#backups-and-restore): the schedule, the local backups and the [disk](#disk-space); `POST` makes one now (2 a minute with the download) |
 | `POST /v1/admin/backups/download` | admin | a tar of a fresh backup, streamed (without the webhook URL and `instance.key`) |
-| `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`) |
+| `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`); `ingest: { busy, inflight, lastBusyAt }` (busy 503s since the start, ingest requests in flight) |
+| `GET /v1/admin/export/manifest`, `rows`, `hash` (`GET` or `POST`), `fleet`, `erased` | admin token only (a Bearer: not a session, not the web role) | the [export API](#the-export-api-every-backend): what a new server pulls when it [moves](#move-to-another-server); read-only, one at a time, 120 a minute |
+| `GET /v1/admin/migrate`, `POST /v1/admin/migrate` | admin | the [migration job](#the-migration-job-the-new-server): its status and per-day report; `start` / `pause` / `resume` / `cancel` (audited as `migrate.<action>`, never with the token) |
 | `GET` / `PUT /v1/notify/config`, `GET /v1/notify/status`, `PUT /v1/notify/keys`, `POST /v1/notify/test`, `POST /v1/notify/send` | admin | [experience notifications](#experience-notifications): the pushed config, the queue and switches (never a key), the signing keys, a test send (bypasses the caps), a one-off send |
 | `GET /v1/notify/user?uid=\|pid=\|name=` | admin | one player's notifications: consent (prompt checks / shown / closed, inferred state and when, mute), every send with its open and play, the intents |
 | `GET /v1/notify/recent?limit=&kind=` | admin | the newest sends of everyone (1..500, default 100), with the cached name, the player's opt-in state and the send's params |
@@ -845,6 +852,119 @@ goes out like any other fleet alert, so the alert webhook carries it: one per le
 room again (a restart does not repeat an open one). To make room: shorter retention on the Settings page (events,
 recordings, error logs, the audit log), fewer local backups (`TYPETORCH_BACKUP_KEEP`), or a bigger volume. The local
 backups are hard links, so they cost little until the day files they share are pruned.
+
+## Move to another server
+
+Plans/35 A. A move never copies the data folder (file systems are fragile during migrations): the new server is set up
+first, the game switches to it, then the history moves over slowly, row by row through the two servers' APIs, and is
+checked day by day. The old server is only read; you turn it off when the report says every day matches.
+
+```
+1. new server up, empty      2. game switches to it          3. history moves over, verified per day
+   new URL, the old keys        typetorch backend setup         new ──pull──► old (read-only export API)
+                                --url <new>; servers follow     old stays up until every day matches
+                                within 5-55 s
+```
+
+**Both servers need this version** (the old one serves the export API, the new one runs the job), and the same DuckDB
+version (the per-day hash is DuckDB's `hash()`; one backend version pins one DuckDB).
+
+### Runbook
+
+1. Update the old server to this version (it gains the export API). Deploy the backend on the new machine (Coolify, or
+   [the systemd recipe](#run-it-on-a-vps-without-docker)) with **its own URL** and **the old keys** (`TYPETORCH_API_KEY`,
+   `TYPETORCH_ADMIN_TOKEN`, the same as the old server's), so nothing else changes.
+2. `typetorch backend setup --url <new>` (the keys are already in the game repo's `.env`). The signed record moves every game
+   server within a minute (they read it at least every 55 s). The old server keeps its address and takes in what servers
+   had in flight.
+3. Switch the Roblox **erasure webhook** to `<new>/v1/erasure` (Creator Hub > Webhooks; same secret). From now on an
+   erasure reaches the new server, and it covers rows imported later too.
+4. Start the move on the new server: `typetorch backend migrate --from <old>` (the old admin token from
+   `TYPETORCH_OLD_ADMIN_TOKEN` in the env or `.env`, never a flag), or `POST /v1/admin/migrate` (below), or the Settings page's
+   **Migration** card. Watch `typetorch backend migrate status`, the card, or `GET /v1/admin/migrate`.
+5. When the report is all `match`: keep a last [backup](#backups-and-restore) of the old server, then turn it off. The public
+   domain can move to the new server later.
+
+Not moved: the raw archives (the same rows again), `devices.json` (trust your browsers again: `typetorch backend bless`),
+`instance.key` (the new server has its own: Sign in with typetorch.dev needs **Add project** again for the new fingerprint),
+the alert webhook URL (enter it again on the Settings page), the admin allow list and the token login (guarded settings: set
+them again on purpose), the named API keys (`typetorch keys create` again), notifications (`notify.db`).
+
+### The export API (every backend)
+
+Read-only: it reads the day files and the live tables through the warehouse's read connections (never the writer, never
+`live.duckdb` for writing), and SQLite through plain SELECTs. **The admin token as a Bearer only**: a browser session (even
+an owner's), the web role, any named API key (even an admin one) and the game key are refused. One export request at a time (`429` +
+`Retry-After` otherwise) and 120 a minute. Rows of erased players are left out of every answer. Its working files (a
+sorted copy of a day's live rows, a page on its way out) are in `<data dir>/export/` and deleted after use.
+
+| Route | Answer |
+|---|---|
+| `GET /v1/admin/export/manifest` | `{ version: 1, server: { instance, now }, tables: { events: [{ day, rows, hash }], recordings: [...] }, live: { day, rows, lastRt }, fleet: { <table>: { rows, maxId } }, erased }`. `day` = `YYYY-MM-DD` (UTC); `hash` = the decimal string of `bit_xor(hash(<every stored column>))`, order-free, so either side computes it. Days of the day files plus the live rows (a day with both shows their sum). A day file's numbers are cached while it is unchanged. |
+| `GET /v1/admin/export/rows?table=events\|recordings&day=&page=&size=` | gzip NDJSON (`application/x-ndjson`, `content-encoding: gzip`) in the stored row format with `rt`; `x-typetorch-rows`, `x-typetorch-pages`, `x-typetorch-last-page: 1` on the last page. `size` 1 to 50,000. The day file comes first in its own order (a page is a range of its row numbers: stable, a day file is immutable), then the day's live rows ordered by every column. |
+| `GET /v1/admin/export/hash?table=&day=&exclude=a,b` (or `POST` with `{ exclude: [...] }`, up to 100,000 pids) | `{ rows, hash }` of the day without those pids (the new server's erasures since). |
+| `GET /v1/admin/export/fleet?table=&after=&size=` | `{ rows, next }`: pages (1 to 5,000 rows) of `deploys`, `marks`, `reports`, `alerts`, `server_metrics`, `error_kinds`, `error_counts`, `error_jobs`, `error_pids`, `identities`, `saved_queries`, `audit_log`. The cursor is the rowid (the integer key); the three `WITHOUT ROWID` error tables page by position. |
+| `GET /v1/admin/export/erased` | `{ pids }` |
+
+### The migration job (the new server)
+
+`POST /v1/admin/migrate` (admin; a cookie request also needs `X-TypeTorch: 1`):
+
+```json
+{ "action": "start", "from": { "kind": "backend", "url": "https://old.example.com", "token": "<old admin token>" }, "rowsPerSecond": 20000 }
+{ "action": "pause" }  { "action": "resume" }  { "action": "cancel" }
+```
+
+Every answer, and `GET /v1/admin/migrate`, is the status:
+
+```json
+{ "state": "idle|running|paused|waiting|done|failed|cancelled|needs_decision",
+  "direction": "from-backend", "source": { "kind": "backend", "url": "https://old.example.com" },
+  "startedAt": 0, "finishedAt": null, "rowsPerSecond": 20000, "rowsDone": 0, "rowsTotal": 0,
+  "steps": [{ "name": "erased|identities|fleet|events|recordings|live|rollups|verify", "state": "pending|running|done|failed", "done": 0, "total": 0, "note": "" }],
+  "days": [{ "table": "events", "day": "2026-11-14", "state": "pending|importing|match|missing|differs|duplicates", "rowsSource": 0, "rowsTarget": 0, "note": "" }],
+  "waitingFor": null, "decision": null, "error": null }
+```
+
+`from.url` is https (plain http only on this machine: the token would cross the network in clear); redirects are refused.
+`from: { kind: "basin" }` and `to: { kind: "basin" }` (plans/35 B) answer `501 { error: "not built yet" }`. One job at a
+time: a second `start` while one runs, waits or is paused is `409`. `resume` also restarts a `failed` job from where it
+stopped. `cancel` keeps what was already imported (the old server is never touched either way). `start` again after
+`done` (same old server) takes what changed since: day files merge without duplicates, the SQLite tables go on from their
+cursors.
+
+**The order.**
+
+| Step | What |
+|---|---|
+| `erased`, `identities` | The old server's erased pids are applied here first (their rows are then dropped at import), then pid <-> UserId, so an erasure that reaches this server during the move finds the pids and covers imported rows too. |
+| `fleet` | Deploys (by seq: this server's own releases since the cutover stay), marks, reports, alerts, server metrics, error logs (counts added up), saved queries (a name this server already has wins), the audit log; then the runtime settings the old server's Settings page saved, unless this server saved its own (never the webhook URL, the admin allow list or the token login). Each page and its cursor commit in one SQLite transaction: exactly once. |
+| `events`, `recordings` | Newest day first, in pages (50,000 events, 1,000 recording chunks). Pages are staged in `<data dir>/migrate/` and merged into the day file by the nightly export's **late-row merge** (old file + the rows -> exact duplicates dropped, sorted, a temp file, renamed) as one warehouse job, so it never races the loader, the nightly export or an erasure, and rows never pass through `live.duckdb`. A long day merges every million rows. Re-running a page or a day changes nothing. Days older than this server's analytics history setting (`keepDays`) are skipped. |
+| `live` | Once the old server has received nothing for 10 minutes (`live.lastRt`; state `waiting` meanwhile), the days that changed since they were imported (its live rows, late rows, its nightly export) are imported again. |
+| `rollups` | Rebuilt here from the imported day files (finished days), then `players.parquet`; never copied. |
+| `verify` | The old server's manifest once more, every day checked again. |
+
+**Verify, per day.** Days before the cutover (the first day this server held rows of its own when the job started) must
+have the same `(rows, hash)` as the old server's, minus the pids erased here since (the old server computes that hash).
+The cutover days also hold new rows: checked as a superset, every old row must be here (an anti-join on the contract
+columns, page by page; the note says how many rows only this server has). The report: `match`, `missing` (`missing <n>`),
+`differs`. A day that fails is imported again once, then left for you.
+
+**Throttle.** At most `rowsPerSecond` rows a second (`TYPETORCH_MIGRATE_ROWS_PER_SECOND`, default 20,000: about 5 minutes for
+6 million rows). Live ingest comes first: the job waits while the loader is behind (raw files older than two loader ticks)
+and while a query runs (up to 30 s at a time). The old server's own limits (one export at a time, 120 a minute) are waited
+out.
+
+**Survives anything.** The state (the source, the old token, a cursor per SQLite table and per day, each day's result) is in
+the SQLite file (`migrate_job`, `migrate_days`, `migrate_cursors`); a crash or a redeploy of either server resumes at the
+last page. **The old token** is sealed (AES-256-GCM under a key derived from `instance.key`; the job makes the instance key
+on first use when Sign in with typetorch.dev is off), never echoed, logged or written to the audit log (the redactor knows
+it); it is dropped when the job ends or is cancelled. A backup leaves `instance.key` out: a job restored from a backup asks
+to be started again.
+
+**Visible.** The Settings page's **Migration** card (progress per step, the days still to go, the per-day report, pause /
+resume / cancel, a start form), a banner on the analytics pages ("History before <day> still importing", so a half-empty
+chart doesn't read as a traffic drop; owners only), and `typetorch backend migrate status`.
 
 ## The event bus
 
@@ -1652,12 +1772,33 @@ How it works:
   (`TYPETORCH_KEEP_DAYS` 400, raw archives `TYPETORCH_RAW_KEEP_DAYS` 14), and a rewrite of `live.duckdb`
   when it passes `TYPETORCH_COMPACT_MB` (DuckDB doesn't reliably give space back after deletes).
 - **Queries** read today's file plus only the day files in the range.
-- **Limits:** body 2 MB gzip / 16 MB inflated, 6,000 requests a minute per IP, 60 per JobId, a query timeout of
+- **Limits** ([Limits and the busy 503](#limits-and-the-busy-503)): body 2 MB gzip / 16 MB inflated, 6,000 requests a minute per IP, 60 per JobId, a query timeout of
   60 s, 2 queries at once. DuckDB: `memory_limit` 400MB, 2 threads, spill folder `data/tmp`.
 - **One process per data folder.** The server keeps `data/lock.duckdb` (empty) and `live.duckdb` attached while it runs;
   the nightly jobs and the loader use that same DuckDB instance, ad-hoc SQL its own read-only one on
   `data/sql/sandbox.duckdb` (never `live.duckdb`). Another server on the folder waits for it (a deploy's handover,
   [Deploys on Coolify](#deploys-on-coolify-rolling-updates)); the scripts (`report`, `loadtest`) go through HTTP.
+
+### Limits and the busy 503
+
+| Limit | Default | Answer |
+|---|---|---|
+| Body | 2 MB gzip, 16 MB inflated (`TYPETORCH_MAX_BODY`, `TYPETORCH_MAX_INFLATE`) | `413` |
+| Per address | 6,000 requests a minute (`ipPerMinute`) | `429` + `Retry-After` |
+| Per game server (JobId) | 60 requests a minute (`jobPerMinute`) | `429` + `Retry-After` |
+| Raw backlog | 512 MB waiting in `raw/incoming` (`busyBytes`, `TYPETORCH_BUSY_BYTES`, `0` = off) | `503` busy |
+| Requests in flight | 256 ingest requests at once (`busyRequests`, `TYPETORCH_BUSY_REQUESTS`, `0` = off) | `503` busy |
+
+**The busy 503** (plans/35 D). Without it an overloaded backend only answers slower, until Roblox's HTTP calls time out and
+every game server retries at once. Now `POST /v1/ingest` answers `503 { "error": "busy: ...", "busy": true }` with
+`Retry-After: <10-30>` (jittered, so the retries spread out) **before it reads the body**, while the loader is behind (the
+raw files waiting for it hold more than `busyBytes`; measured at most once a second) or more than `busyRequests` ingest
+requests are being handled. Game servers keep a 503'd batch in their queue and back off (framework 0.7.2 waits at least the
+`Retry-After`). It is checked after the game key and before the rate limits (a refusal doesn't use up the address's
+budget). **Only ingest is refused this way**: heartbeats, deploy reports, alerts, error logs and identities never are.
+`GET /v1/admin/stats` counts it (`ingest.busy` since the start, `ingest.inflight` now, `ingest.lastBusyAt`); the explorer's
+Overview shows a note while it refused in the last minute, and Backend stats the counters. Both limits are runtime settings
+(Settings page, "Rate limits"): raise them when the disk and the loader can take more, lower `busyBytes` on a small disk.
 
 **Right to Erasure.** In Creator Hub > Webhooks, add `https://<your host>/v1/erasure` for "Right to erasure request"
 with a secret (`ROBLOX_WEBHOOK_SECRET`). The server checks `roblox-signature` (`t=<unix s>,v1=<base64

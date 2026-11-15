@@ -64,7 +64,11 @@
  *   POST /v1/admin/settings/test-alert   one test alert through the current webhook (3 a minute)
  *   GET  /v1/admin/alert-rules       the backend alert rules' state (src/alerts): ok, waiting, firing, off (admin)
  *   GET  /v1/admin/stats?window=1m|5m|15m|1h   server metrics (server/metrics.ts): requests, queries, inserts per second,
- *                                   latency percentiles, memory, CPU, per route group (the explorer's Backend stats page)
+ *                                   latency percentiles, memory, CPU, per route group (the explorer's Backend stats page),
+ *                                   `ingest` { busy, inflight, lastBusyAt } (plans/35 D, server/busy.ts)
+ *   GET  /v1/admin/export/manifest | rows | hash | fleet | erased   the export API (plans/35 A, server/export.ts): the admin
+ *                                   token as a Bearer only (never a browser session or the web role); one at a time
+ *   GET|POST /v1/admin/migrate      the migration job (plans/35 A, server/migrate.ts): status; start / pause / resume / cancel
  *
  *   open
  *   GET  /healthz                   { ok }; with the admin token: loader lag, memory, counts, bus
@@ -165,6 +169,10 @@ import { MapsRoutes } from "./maps.ts";
 import type { MapPositionsResult } from "../queries/maps.ts";
 import type { LiveEventLiftResult } from "../queries/live-event-lift.ts";
 import { GeoIpUpdater } from "./geoip.ts";
+import { IngestBusy } from "./busy.ts";
+import { ExportApi } from "./export.ts";
+import { MigrateError, Migration, type StartBody } from "./migrate.ts";
+import { randomBytes } from "node:crypto";
 
 export interface AppOptions {
 	clock?: () => number;
@@ -184,6 +192,8 @@ export interface AppOptions {
 	diskUsage?: (path: string) => DiskUsage | null;
 	/** The map export's waits (tests pass fast ones; maps/store.ts). */
 	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
+	/** The migration job's knobs (tests: small pages, no waits; server/migrate.ts). */
+	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries">>;
 }
 
 /**
@@ -231,6 +241,10 @@ export interface App {
 	readonly liveDebug?: LiveDebugHub;
 	/** Plans/29: experience notifications (notify.db, the planner, the sender, the signing keys). */
 	readonly notify: NotifyService;
+	/** Plans/35 A: the migration job (pulls an old server's history through its export API). */
+	readonly migration: Migration;
+	/** Plans/35 D: the busy 503's counters. */
+	readonly busy: IngestBusy;
 	/** Explorer sessions open right now. */
 	sessionCount(): number;
 	/** The explorer's session store (tests make sessions directly, e.g. a viewer's without Roblox in the loop). */
@@ -389,12 +403,14 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	};
 	/** Named API keys made by this process (plans/31): redacted from the audit whatever a handler puts there (bounded). */
 	const madeKeys: string[] = [];
+	/** Plans/35 A: the migration job, made below (its old-server token goes on the audit's redaction list). */
+	let migration: Migration | undefined;
 	// The audit log (server/audit.ts): every secret in play is redacted from it, whatever a handler puts in the details.
 	const audit = await AuditLog.open(sqlite, {
 		clock,
 		log,
 		keepDays: () => runtime.get("auditKeepDays"),
-		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys],
+		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, ...(migration?.secrets() ?? [])],
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	// Scheduled live events (live-events.ts): the schedule the owner signs with the CLI, and each event's lift report.
@@ -588,6 +604,38 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		};
 	})();
 	const adminTokenHash = Sessions.hashToken(config.adminToken);
+
+	// Plans/35 D: the busy 503 on POST /v1/ingest (both limits are runtime settings, 0 = off).
+	const busy = new IngestBusy({
+		maxBytes: () => runtime.get("busyBytes"),
+		maxRequests: () => runtime.get("busyRequests"),
+		pendingBytes: () => warehouse?.raw.pendingBytes(),
+		clock,
+	});
+	// Plans/35 A: the export API (this server as the old one) and the migration job (this server as the new one).
+	const bootId = `boot-${randomBytes(8).toString("hex")}`;
+	const instanceId = () => central?.key.fingerprint ?? bootId;
+	let migrateKey: InstanceKey | undefined;
+	const exportApi = new ExportApi({ warehouse: () => warehouse, analytics: config.parts.has("analytics"), sqlite, clock, instance: instanceId, keepOpen: (r) => keepOpen.get(r)?.(), log });
+	migration = await Migration.open({
+		db: sqlite,
+		dataDir: config.dataDir,
+		warehouse: () => (analytics === "ready" && !stopping ? warehouse : undefined),
+		analytics: config.parts.has("analytics"),
+		identities,
+		errors,
+		runtime,
+		instanceKey: () => (migrateKey ??= central?.key ?? InstanceKey.loadOrCreate(config.dataDir).key),
+		instanceId,
+		defaultRowsPerSecond: config.migrateRowsPerSecond,
+		loadSeconds: config.loadSeconds,
+		keepDays: () => runtime.get("keepDays"),
+		...(options.fetch ? { fetch: options.fetch } : {}),
+		...(options.migrate ?? {}),
+		clock,
+		log,
+	});
+	const migrator = migration;
 	/** The origin challenge, served to the broker (any address): per address per minute. */
 	const challengeLimiter = new RateLimiter(60, clock);
 	const site = config.webDir ? new StaticSite(config.webDir) : undefined;
@@ -785,6 +833,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	async function ingest(req: Request, ip: string): Promise<Response> {
 		if (!config.parts.has("analytics")) return analyticsOff();
 		if (!auth.hasGameKey(req)) return badGameKey(req, ip, "ingest");
+		// Plans/35 D: behind (raw backlog, requests in flight) = 503 + Retry-After before the body is read; the sender keeps
+		// the batch and backs off. Not counted against the rate limits.
+		const refused = busy.check();
+		if (refused) return json(503, { error: `busy: ${refused.why}; try again later`, busy: true }, { "retry-after": String(refused.retryAfter) });
+		const leave = busy.enter();
+		try {
+			return await ingestBody(req, ip);
+		} finally {
+			leave();
+		}
+	}
+
+	async function ingestBody(req: Request, ip: string): Promise<Response> {
 		if (!ipLimiter.take(ip)) return tooMany(ipLimiter.retryAfter(ip));
 		// In a handover the batch isn't read: the sender keeps it and sends it again (analytics: backoff from 5 s).
 		const warehouse = analyticsOr();
@@ -2639,6 +2700,32 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	// The audit log and backups (owners only) ----------------------------------------------------------------------------
 
+	/** POST /v1/admin/migrate { action, ... }: answers the status. The old server's token is never echoed, logged or audited. */
+	async function migrateAction(req: Request): Promise<Response> {
+		const raw = await readCapped(req, 16 * 1024);
+		if (!raw) return json(413, { error: "body over 16 KB" });
+		let body: StartBody;
+		try {
+			body = JSON.parse(Buffer.from(raw).toString("utf8")) as StartBody;
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+		if (!isRecordLike(body)) return json(400, { error: "send { action: ... }" });
+		const action = typeof body.action === "string" && /^[a-z_]{1,16}$/.test(body.action) ? body.action : "unknown";
+		const from = isRecordLike(body.from) && typeof body.from.url === "string" ? body.from.url : undefined;
+		let origin: string | undefined;
+		try {
+			origin = from ? new URL(from).origin : undefined;
+		} catch {}
+		noteAudit(req, { action: `migrate.${action}`, details: { ...(origin ? { from: origin } : {}), ...(isRecordLike(body.from) && typeof body.from.kind === "string" ? { kind: body.from.kind.slice(0, 16) } : {}) } });
+		try {
+			return json(200, await migrator.act(body));
+		} catch (error) {
+			if (error instanceof MigrateError) return json(error.status, { error: error.message });
+			throw error;
+		}
+	}
+
 	/** GET /v1/admin/audit?actor=&action=&outcome=&since=&until=&before=&limit=&facets=1: newest first, a page at a time. */
 	async function auditRead(url: URL): Promise<Response> {
 		const allowed = new Set(["actor", "action", "outcome", "since", "until", "before", "limit", "facets"]);
@@ -2749,7 +2836,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		let details = note?.details;
 		let gameKey = false;
 		if (!action) {
-			if (READ_METHODS.has(method) || method === "OPTIONS" || WEB_POST_ALLOWED.test(path)) return;
+			// POST /v1/admin/export/hash only reads (its body is a list of pids): not an audited write.
+			if (READ_METHODS.has(method) || method === "OPTIONS" || WEB_POST_ALLOWED.test(path) || path === "/v1/admin/export/hash") return;
 			gameKey = method === "POST" && (path === "/v1/fleet/deploy" || path === "/v1/fleet/mark") && auth.hasGameKey(req);
 			if (!principal && !gameKey) return;
 			const named = routeAction(method, path);
@@ -3059,7 +3147,25 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (admin instanceof Response) return admin;
 				const window = parseStatsWindow(url.searchParams.get("window"));
 				if (!window) return json(400, { error: `window must be one of ${STATS_WINDOWS.join(", ")}` });
-				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName() });
+				return json(200, { ...metrics.view(window), state: serverState(), version: PACKAGE.version, runtime: runtimeName(), ingest: busy.view() });
+			}
+			// Plans/35 A: the export API (the admin token as a Bearer only) and the migration job.
+			if (path.startsWith("/v1/admin/export/")) {
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				if (admin.via !== "bearer") return json(403, { error: "the export API takes the admin token as a Bearer (the CLI, the migration job), not a browser session" });
+				// Every row and the pid <-> UserId table in one go: the env admin token only, never a named API key (even an admin one).
+				if (isNamedKey(admin)) return json(403, { error: "the export API takes the env admin token (TYPETORCH_ADMIN_TOKEN), not a named API key" });
+				return exportApi.handle(req, path, url);
+			}
+			if (path === "/v1/admin/migrate") {
+				if (method !== "GET" && method !== "POST") return json(405, { error: "GET or POST only" });
+				const admin = manage();
+				if (admin instanceof Response) return admin;
+				if (method === "GET") return json(200, await migrator.status());
+				// Starting a move makes this server import another one's data: the env admin token or an owner, never a named API key.
+				if (isNamedKey(admin)) return json(403, { error: "the migration is run with the env admin token (the CLI) or by an owner, not a named API key" });
+				return migrateAction(req);
 			}
 			if (path === "/v1/admin/alert-rules") {
 				if (method !== "GET") return json(405, { error: "GET only" });
@@ -3358,6 +3464,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const drainUntil = Date.now() + STOP_DRAIN_MS;
 		while (inflight > 0 && Date.now() < drainUntil) await new Promise((done) => setTimeout(done, 20));
 		await served.stop();
+		// The migration job: its state stays in SQLite (a running job goes on at the next start).
+		await migrator.stop();
 		// A handover attempt that is opening DuckDB right now closes what it opened (it sees `stopping`).
 		await handover.attempt;
 		// Queued subscribers get a moment to finish (a stuck webhook must not hold the shutdown).
@@ -3389,6 +3497,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		...(waker ? { waker } : {}),
 		...(liveDebug ? { liveDebug } : {}),
 		notify,
+		migration: migrator,
+		busy,
 		bus,
 		errors,
 		access,
