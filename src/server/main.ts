@@ -26,7 +26,7 @@ async function main(): Promise<void> {
 	if (config.role === "ingest") {
 		let node: Promise<IngestNode> | undefined;
 		const lifecycle = handleShutdown({ stop: async () => (await node?.catch(() => undefined))?.stop(), log, exit: (code) => process.exit(code) });
-		node = startIngestNode(config, { log: (line) => console.log(`[ingest] ${line}`) });
+		node = startIngestNode(config, { log: (line) => console.log(`[ingest] ${line}`), onFatal: () => void lifecycle.shutdown("fatal error", 1) });
 		const started = await node;
 		if (lifecycle.requested) return;
 		console.log(`[ingest] listening on ${config.host}:${started.port} (${runtimeName()}); node ${started.node || "(waiting for the data folder)"}; ${describeConfig(config)}`);

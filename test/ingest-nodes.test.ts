@@ -456,7 +456,7 @@ describe("the main server", () => {
 		}
 	});
 
-	test("busy counts the bucket backlog it has seen; a file it can't load waits (quarantined) with an alert", async () => {
+	test("busy counts the bucket backlog it has seen; a file it can't load waits (quarantined) with an alert, the rest go in", async () => {
 		const s3 = fakeS3();
 		const h = await harness({ TYPETORCH_ROLE: "main", ...queueEnv(s3), TYPETORCH_BUSY_BYTES: "1000" });
 		try {
@@ -464,9 +464,16 @@ describe("the main server", () => {
 			s3.objects.set("incoming/events/abcd1234-1000-1.parquet", new Uint8Array(4096).fill(65));
 			// Not a key the queue writes: left alone.
 			s3.objects.set("incoming/events/../../etc.parquet", new Uint8Array(10));
+			// A good file from a node in the same tick: it goes in; only the bad one waits.
+			const n = await startNode(s3, h.base);
+			expect((await n.call("/v1/ingest", post(API, { events: [event("pGoodFile", T0)] }))).status).toBe(202);
+			await n.node.cycle();
+			await n.node.stop();
 			expect((await h.call("/v1/ingest", post(API, { events: [event("pBacklog", T0)] }))).status).toBe(202);
-			expect((await h.app.load()).rows).toBe(1);
+			expect((await h.app.load()).rows).toBe(2);
 			expect(await liveCount(h, "pid = 'pBacklog'")).toBe(1);
+			expect(await liveCount(h, "pid = 'pGoodFile'")).toBe(1);
+			expect(s3.keys("incoming/events/").filter((k) => k.includes("abcd1234"))).toEqual(s3.keys("incoming/events/").filter((k) => !k.includes("..")));
 			expect(s3.keys("incoming/events/abcd")).toEqual(["incoming/events/abcd1234-1000-1.parquet"]);
 			expect(s3.objects.has("incoming/events/../../etc.parquet")).toBe(true);
 			const stats = await asJson(await h.call("/v1/admin/stats?window=1m", { headers: bearer(ADMIN) }));

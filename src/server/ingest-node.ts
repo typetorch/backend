@@ -64,6 +64,8 @@ export interface IngestNodeOptions {
 	bucket?: QueueBucket;
 	backend?: "bun" | "node";
 	handoverRetryMs?: number;
+	/** The node can't go on (it gave up waiting for its data folder): main.ts shuts down and exits 1. */
+	onFatal?: (error: Error) => void;
 }
 
 export interface IngestNodeStats extends QueueStats {
@@ -632,8 +634,12 @@ export async function startIngestNode(config: ServerConfig, options: IngestNodeO
 					log(`handover: the folder is ours after ${((Date.now() - handover.since) / 1000).toFixed(1)} s; ingest is on`);
 					startJobs(spool);
 				} catch (error) {
-					if (!(error instanceof DataFolderLocked)) return log(`error: the ingest node could not open its data folder: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
-					if (Date.now() - handover.since >= config.handoverSeconds * 1000) return log(`error: gave up after ${config.handoverSeconds} s waiting for ${error.file}: stop the other process using ${config.dataDir}`);
+					const fatal = (message: string) => {
+						log(`error: ${message}`);
+						options.onFatal?.(new Error(message));
+					};
+					if (!(error instanceof DataFolderLocked)) return fatal(`the ingest node could not open its data folder: ${((error as Error).message ?? String(error)).slice(0, 300)}`);
+					if (Date.now() - handover.since >= config.handoverSeconds * 1000) return fatal(`gave up after ${config.handoverSeconds} s waiting for ${error.file}: stop the other process using ${config.dataDir}`);
 					retry();
 				}
 			}, options.handoverRetryMs ?? HANDOVER_RETRY_MS);

@@ -536,10 +536,24 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			result = await w.loadWithRemote(remote);
 		} catch (error) {
 			if (!remote.length) throw error;
-			// A queue file the warehouse can't take: it waits; the server's own raw files go in now.
-			mainQueue.failedLoad(remote, error);
-			const own = await w.load();
+			// The server's own raw files first: if they fail too, the fault is local (the queue files come again next tick).
+			let own: { files: number; rows: number };
+			try {
+				own = await w.load();
+			} catch (local) {
+				mainQueue.discard(remote);
+				throw local;
+			}
+			// Then each queue file on its own: one the warehouse can't take waits (quarantined, an alert); the rest go in.
 			result = { ...own, remoteKeys: [] };
+			for (const file of remote) {
+				try {
+					const one = await w.loadWithRemote([file]);
+					result = { files: result.files + one.files, rows: result.rows + one.rows, remoteKeys: [...result.remoteKeys, ...one.remoteKeys] };
+				} catch (bad) {
+					mainQueue.failedLoad([file], bad);
+				}
+			}
 		}
 		const loaded = remote.filter((f) => result.remoteKeys.includes(f.key));
 		await mainQueue.finish(loaded, done);

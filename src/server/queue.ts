@@ -294,6 +294,8 @@ export class MainQueue {
 			const path = join(this.o.dir, object.table, parsed.name);
 			try {
 				const got = await this.o.bucket.download(object.key, path);
+				// Replaced by something bigger between the listing and the download: not taken.
+				if (got > maxFileBytes) throw new BadQueueFile(`${got} bytes, over the ${maxFileBytes} a file may have`);
 				if (object.table === "identities") {
 					await this.identities(path);
 					done.push(object.key);
@@ -338,6 +340,11 @@ export class MainQueue {
 		this.stats.lastErrorAt = this.clock();
 		this.log(`queue bucket: ${this.stats.lastError} (skipped for ${QUARANTINE_MS / 60_000} min)`);
 		void Promise.resolve(this.o.onBadFile?.({ key: key.slice(this.o.prefix.length), error })).catch(() => {});
+	}
+
+	/** Downloads that weren't loaded (a local failure): their local copies go; the bucket still has them. */
+	discard(files: readonly RemoteFile[]): void {
+		for (const file of files) rmSync(file.path, { force: true });
 	}
 
 	/** The load failed with these files in it: they wait (quarantined) and the loader goes on with its own raw files. */
