@@ -127,7 +127,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_CENTRAL_LOGIN_LABEL` | no | The name the origin report gives typetorch.dev (64 characters; default the public URL's host). |
 | `TYPETORCH_ROBLOX_BROKER_CLIENT_ID` | no | Not needed: the backend reads TypeTorch's Roblox OAuth client id (the audience of the Roblox ID token the broker passes on) and Roblox's discovery document from `<issuer>/.well-known/typetorch-login`. Set, this and `TYPETORCH_ROBLOX_BROKER_DISCOVERY` are **pins**: they are used, and a published value that differs refuses every typetorch.dev login (logged once). |
 | `ROBLOX_WEBHOOK_SECRET` | no | The secret on Roblox's "Right to erasure" webhook. |
-| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId; with `universe.analytics:read` (and `TYPETORCH_UNIVERSE_ID`) the Roblox page shows Roblox's own [play-through rate and impressions](#roblox-acquisition-numbers) |
+| `OPENCLOUD_API_KEY` | no | An Open Cloud key with `universe-datastores.objects:read` (and `:list` for backfill, `:delete` with `TYPETORCH_ERASURE_DELETE_LINK=1`) for erasure and the identity backfill.; with `universe-messaging-service:publish` on the game's universe (and `TYPETORCH_UNIVERSE_ID`) it also sends remote debug's [instant wake](#instant-wake); with `universe:read` (and `TYPETORCH_UNIVERSE_ID`) the explorer shows Roblox's [server logs](#roblox-server-logs) per JobId; with `universe.analytics:read` (and `TYPETORCH_UNIVERSE_ID`) the Roblox page shows Roblox's own [play-through rate and impressions](#roblox-acquisition-numbers); with `universe.place.luau-execution-session:read` and `:write` the Maps page exports maps from the place, and with `asset:read` it says when an export is out of date; with `universe-datastores.objects:read` the Live events page checks what servers have. One table per feature: [Open Cloud key scopes](https://www.typetorch.dev/guides/backend-operations#open-cloud-key-scopes) |
 | `TYPETORCH_UNIVERSE_ID` | no | The game's universe id (erasure ignores other games' requests; the instant wake publishes to it). |
 | `TYPETORCH_ALERT_WEBHOOK_URL` | no | A Discord, Slack or JSON webhook for critical alerts (https; the server won't start with another scheme). Also settable on the Settings page. |
 
@@ -156,7 +156,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_ERRORS_IP_PER_MINUTE` | `1200` | `POST /v1/errors` per address per minute (game servers share egress addresses). |
 | `TYPETORCH_ERROR_ROWS_PER_DAY` | `2000000` | New error count and player rows per UTC day; past it new rows are dropped and counted. |
 | `TYPETORCH_ERROR_DROP_RULES` | none | Error drop rules ([Error logs](#error-logs)): a JSON list of expressions; the Errors page overrides it. |
-| `TYPETORCH_SESSION_MAX_DAYS` | `3` | Explorer session lifetime from sign-in (no idle timeout). |
+| `TYPETORCH_SESSION_MAX_DAYS` | `3` | Explorer session lifetime from sign-in (no idle timeout; 0.01 to 90). |
 | `TYPETORCH_LOGIN_MAX_FAILURES`, `TYPETORCH_LOGIN_WINDOW_MINUTES` | `5`, `15` | Failed logins per address before 429. |
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
 | `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams, and the same number of `GET /v1/fleet/stream` streams. |
@@ -164,6 +164,9 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_AUDIT_KEEP_DAYS` | `365` | Days of [audit log](#audit-log) entries kept (also on the Settings page). |
 | `TYPETORCH_BACKUP_DIR`, `TYPETORCH_BACKUP_KEEP`, `TYPETORCH_BACKUP_HOURS` | `<data dir>/backups`, `3`, `24` | [Local backups](#backups-and-restore): where, how many are kept, hours between them (`0` = no schedule). |
 | `TYPETORCH_DISK_WARN_PERCENT`, `TYPETORCH_DISK_CRITICAL_PERCENT` | `15`, `5` | [Disk space](#disk-space): free percent of the data disk under which the explorer warns and a `disk_low` alert is raised (`0` = never). |
+| `TYPETORCH_KEYS_RATE_PER_MINUTE` | `120` | Requests a minute per [named API key](#named-api-keys-and-roles) (`game`-role keys keep the ingest limits). Also on the Settings page. |
+| `TYPETORCH_PLAYERS_SUPPORT_EVENTS` | `ac_flag,ac_action,ac_honeypot,join,leave` | Comma-separated event names a `support` key may read per player (at most 64; `join` / `leave` / `device` are session rows, `feedback` the player feedback). Also on the Settings page. |
+| `TYPETORCH_NOTIFY_*` | see [Experience notifications](#experience-notifications) | The notification switches' defaults (`ENABLED`, `DRY_RUN`, `RATE`, `CLOCK`, `PRESENCE_STALE_HOURS`, `KINDS_OFF`), `TYPETORCH_NOTIFY_KEY`, and `OPENCLOUD_NOTIFY_KEY`. |
 | `TYPETORCH_RUNTIME_SETTINGS` | `on` | `off` ignores what the Settings page saved (the file stays) and makes the page read only: the way back in after locking yourself out. |
 
 </details>
@@ -202,6 +205,10 @@ as noted for the token login).
 | Error rows per day (`errorRowsPerDay`) | `TYPETORCH_ERROR_ROWS_PER_DAY` | 10,000 to 1,000,000,000 |
 | Audit log history (`auditKeepDays`) | `TYPETORCH_AUDIT_KEEP_DAYS` | 7 to 3,650 days (pruned hourly) |
 | Deploy history (`deployKeepDays`) | `TYPETORCH_DEPLOY_KEEP_DAYS` | 7 to 3,650 days (pruned hourly; at most 10,000 releases either way) |
+| Error drop rules (`errorDropRules`) | `TYPETORCH_ERROR_DROP_RULES` | the [Error logs](#error-logs) drop rules (the Errors page edits them) |
+| Notifications (`notify.enabled`, `notify.dryRun`, `notify.rate`, `notify.clock`, `notify.presenceStaleHours`, `notify.kinds`) | `TYPETORCH_NOTIFY_ENABLED`, `_DRY_RUN`, `_RATE`, `_CLOCK`, `_PRESENCE_STALE_HOURS`, `_KINDS_OFF` | see [Experience notifications](#experience-notifications) |
+| Requests per key (`keys.ratePerMinute`) | `TYPETORCH_KEYS_RATE_PER_MINUTE` | 1 to 100,000 a minute |
+| Support events (`players.supportEvents`) | `TYPETORCH_PLAYERS_SUPPORT_EVENTS` | up to 64 event names |
 
 The bounds apply to values saved on the page (the environment keeps its own, wider checks). A save is all or nothing: one
 wrong value and nothing changes. **Not editable** (change them on Coolify and redeploy): `TYPETORCH_API_KEY`,
@@ -432,9 +439,11 @@ Revoked and expired keys answer 401 like unknown ones; `last_used_at` is written
 | `analyst` | analytics:sql, analytics:query, identity:resolve |
 | `admin` | all |
 
-- A key is a Bearer only; it never opens an explorer session. Admin keys act like the admin token (the CLI-only routes
-  `PUT /v1/access` and `PUT /v1/access/keys` included); analyst keys read like the web role within their scopes.
-- Rate limit: runtime setting `keys.ratePerMinute` (default 120) per key, `429 { error: "rate_limited" }` + Retry-After;
+- A key is a Bearer only; it never opens an explorer session. Admin keys act like the admin token, except the owner list
+  (`PUT /v1/access`) and the trust-link signing keys (`PUT /v1/access/keys`): those take the env admin token only (403 for a
+  named key). Analyst keys read like the web role within their scopes.
+- The CLI's `typetorch keys create | list | revoke` ship in the next CLI release (after 0.18.1); the routes work today.
+- Rate limit: runtime setting `keys.ratePerMinute` (`TYPETORCH_KEYS_RATE_PER_MINUTE`, default 120) per key, `429 { error: "rate_limited" }` + Retry-After;
   game keys keep the ingest limits; the env tokens keep theirs.
 - `GET /v1/players/by-uid/<uid>/events?names=&since=&before=&limit=` (1..100, default 50; `since` / `before` unix ms,
   default the last 30 days): `{ uid, known, pids, rows: [{ t, name, kind, pid, job, props }], more }`, every pid of the
@@ -613,6 +622,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/identity/resolve` | admin, lookup | `?pid=a,b&uid=1,2` (<= 100): `{ byPid: [{ pid, uid \| null }], byUid: [{ uid, pids }] }`; the [lookup token](#the-lookup-token-for-scripts-and-llm-agents)'s only route |
 | `GET /v1/identity/<pid>/profile` | admin, web | the pid's UserId and its Roblox username, display name and headshot, looked up by the server (see [Player profiles](#player-profiles)) |
 | `GET /v1/errors`, `GET /v1/errors/<fp>`, `GET /v1/errors/<fp>/players` | admin, web | error kinds with counts; one kind; the players who hit it |
+| `GET /v1/errors/drop-rules`, `POST /v1/errors/drop-rules/preview` | admin, web / admin | the [drop rules](#error-logs) with drops per rule; a preview of what one expression would drop (owners) |
 | `GET /v1/players/<pid>/errors` | admin, web | the error kinds one player hit |
 | `GET /v1/servers/<job>/errors` | admin, web | the error kinds one game server reported |
 | `GET /v1/saved-queries`, `GET /v1/saved-queries/<id>` | admin, web | the Query page's saved queries (see [Saved queries](#saved-queries)) |
@@ -714,7 +724,7 @@ the image; `test/deploy-files.test.ts` reads the Dockerfile and compose file and
 Things to know: the container runs as the non-root `bun` user (uid 1000), so a **bind-mounted** `/data` must be writable by
 it (`chown 1000:1000`; a named volume just works). On `SIGTERM` the server closes DuckDB and SQLite and exits within
 seconds (below). Give the container at least 1 GB; DuckDB takes `TYPETORCH_MEMORY_LIMIT` (400 MB) of it. Back up the volume
-(`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `access.json`, `runtime-settings.json`: it holds the alert webhook URL,
+(`events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `notify.db`, `access.json`, `notify-keys.json`, `runtime-settings.json`: it holds the alert webhook URL,
 so keep the backup as secret as the env), or use the built-in [backups](#backups-and-restore), which are safe while the server runs. Rotating the API key: put the new one in
 `TYPETORCH_API_KEY`, the old in `TYPETORCH_API_KEY_PREVIOUS`, update the games (`typetorch backend setup`), then remove the
 old one. Locally, `docker compose -f compose.yaml -f compose.local.yaml up --build` publishes 127.0.0.1:8787.
@@ -760,11 +770,13 @@ guards), test alerts, the owner list (`access.owners`: seq, added, removed) and 
 Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), live events (`live-events.create`,
 `live-events.cancel`), remote debug watches and commands, the CLI's release starts and marks (`deploy.start`,
 `deploy.mark`, by the API key), experiment changes prepared on the Experiments page (`experiment.prepare`: the
-experiment, the change and the CLI command; a refused body as `failed`), and any other write by a
+experiment, the change and the CLI command; a refused body as `failed`), named API keys (`keys.create`, `keys.revoke`:
+the id, name and role, never the secret), per-player support reads (`players.read`: the key, the route template, the
+status and a pid count, never the UserId), the opt-in list's CSV export (`notify.users.export`, counts only), and any other write by a
 signed-in caller under `<METHOD> <route>` (a write the web role tried is recorded as `refused`).
 
 Each entry has the time, the actor (`admin token`, `roblox user <id> (<name>)`, `typetorch.dev user <id> (<name>)`,
-`api key`, `anonymous`, `server (scheduled)`), the role, how (`bearer` = the CLI, `cookie` = the explorer), the client
+`api key` (the game key), `key <name> (<id>)` (a named API key), `anonymous`, `server (scheduled)`), the role, how (`bearer` = the CLI, `cookie` = the explorer), the client
 address, the action, the outcome (`ok`, `failed`, `refused`), the HTTP status and the details. It is written in one place
 (`handle` in `src/server/app.ts`, after the route answered), so a new admin route is recorded without code of its own.
 
@@ -786,8 +798,9 @@ A backup is safe while the server runs and consistent:
   `recordings/`, `rollups/`) hard-linked (no extra space on the same disk; copied on another), both **between the
   warehouse's jobs**: no loader tick, nightly export, prune, compaction or erasure runs meanwhile, so the two belong
   together. Day files are never changed in place, so a link is a snapshot. DuckDB is copied first, then SQLite;
-- `access.json`, `runtime-settings.json`, `devices.json`, `bless-keys.json`, `settings.json`, `instance.key`, `erasure/`,
-  `audit/`, and a `manifest.json`.
+- `notify.db` as `notify.sqlite`, the same way as `fleet.sqlite` (notification intents, sends, the queue);
+- `access.json`, `runtime-settings.json`, `devices.json`, `bless-keys.json`, `settings.json`, `instance.key`,
+  `notify-keys.json`, `erasure/`, `audit/`, and a `manifest.json`.
 
 **Left out:** `raw/incoming/` (the last seconds of accepted batches: loaded at the next tick, in the next backup) and
 `raw/archive/` (the loaded batches again; their rows are in `live.duckdb` and the day files). A fleet-only server backs up
@@ -800,8 +813,9 @@ does not survive losing the volume): mount another volume there, or download bac
 backup** are on the Settings page (owners only).
 
 **The download** (`POST /v1/admin/backups/download`, admin; the cookie needs `X-TypeTorch: 1`) streams a tar of a fresh
-backup built in `<data dir>/backup-tmp` and deleted once sent. It leaves out the two secrets of the folder: the alert
-webhook URL (removed from `runtime-settings.json`) and `instance.key` (the typetorch.dev identity). For a big folder use curl:
+backup built in `<data dir>/backup-tmp` and deleted once sent. It leaves out the secrets of the folder: the alert
+webhook URL (removed from `runtime-settings.json`), `instance.key` (the typetorch.dev identity) and `notify-keys.json`
+(the notification signing keys: after restoring a download, run `typetorch notify key rotate` again). For a big folder use curl:
 
 ```sh
 curl -X POST -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" -o backup.tar https://backend.example.com/v1/admin/backups/download
@@ -812,9 +826,10 @@ curl -X POST -H "Authorization: Bearer $TYPETORCH_ADMIN_TOKEN" -o backup.tar htt
 1. Stop the app (Coolify: Stop; a rolling deploy would hand the folder to a server that is still writing).
 2. Unpack the backup: `tar -xf backup.tar` (a local one is already a folder).
 3. In the data volume, move the old `live.duckdb`, `live.duckdb.wal`, `fleet.sqlite`, `fleet.sqlite-wal`,
-   `fleet.sqlite-shm`, `events/`, `recordings/` and `rollups/` aside, and delete `lock.duckdb`, `tmp/` and `sql/`.
-4. Copy the backup's files into the volume (everything but `manifest.json`); keep the old `instance.key` if the download
-   left it out. Owned by uid 1000 on Docker: `chown -R 1000:1000 /data`.
+   `fleet.sqlite-shm`, `notify.db` (with its `-wal` / `-shm`), `events/`, `recordings/` and `rollups/` aside, and delete
+   `lock.duckdb`, `tmp/` and `sql/`.
+4. Copy the backup's files into the volume (everything but `manifest.json`), with `notify.sqlite` renamed to `notify.db`
+   (it sits next to `fleet.sqlite`); keep the old `instance.key` and `notify-keys.json` if the download left them out. Owned by uid 1000 on Docker: `chown -R 1000:1000 /data`.
 5. Start the app. It loads `raw/incoming` and anything else accepted after the backup that is still on the volume, and
    finishes erasures the backup predates (`live.erased` drives the rewrite at start). Save the alert webhook again on the
    Settings page if the backup was a download.
@@ -1020,12 +1035,13 @@ Roblox, Retention (two tabs over the join-day cohorts: **Players back**, and **R
 Sessions, Timeline and Errors views; the Timeline shows each join row's raw join data `jd`, plans/30, collapsed, with a truncated badge), Flow, Experiments, First session, **Recordings**, **Economy**, **Monetization**, Events, Fleet, **Errors**, **Performance**, Query, **Settings** (the
 runtime settings: grouped fields with their source, Reset to env, Send test alert, the recent changes; see
 [Runtime settings](#runtime-settings-the-settings-page)) and **Backend stats** (the server process itself, below). The sidebar groups them (Overview; Players & gameplay: Players,
-Events, Funnels, Flow, Retention, Demographics, First session, Recordings, Economy, Monetization, Experiments, Roblox; Fleet, Errors, Performance; Query; Settings and
-Backend stats, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
+Events, Funnels, Flow, Retention, Demographics, Notifications, Feedback, First session, Recordings, Maps, Economy, Monetization, Live events,
+Experiments, Roblox; Observe & troubleshoot: Fleet, Live map, Deploys, Errors, Performance; Data: Query; Admin: Settings, Backend stats and
+Audit log, owners only), with a place card on top (the game's name, live players and icon: `GET /v1/place`, also the tab title), the
 TypeTorch Dashboard link at the bottom while Sign in with typetorch.dev is on, and at its foot who is signed in (Roblox
 name and avatar, or "admin token") with a Sign out button. A light / dark / system theme toggle sits in the header. **Ctrl+K**
 (Cmd+K on a Mac, also from inside a text field) or the header's **Search...** button opens the command palette: fuzzy search
-over every page (keeping the shared filters; owner-only pages only for owners), "Open player <pid or UserId>", the date-range
+over every page (keeping the shared filters; owner-only pages only for owners), `Open player <pid or UserId>`, the date-range
 presets, Clear filters, Copy link to this view, Refresh data, the theme and Sign out; arrows and Enter run, Escape closes, an
 empty query lists the recent commands first (remembered in the browser). Commands live in `web/src/lib/commands.ts`; a page
 adds its own with `useRegisterCommands` (the Players page: Copy this player's pid). The Fleet page's servers table shows TPS (average / slowest second) and Memory (MB),
@@ -1244,7 +1260,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
   `branch`, `channel`, `dev`, `players` (`"new"` = first-ever sessions, `"returning"`), `variant`
   (`{ experiment, variant }`), `sexp`, `place`. Without `from`, a query covers its default number of days.
   **Audience filters** (player-level): `country` (ISO codes, `"US"`), `lang` (language codes without the region, `"en"`;
-  join `locale`, framework 2026-11-15 on, so older joins match no language), `age` (Roblox account-age buckets: `<1d`,
+  join `locale`, framework 0.7.1+, so older joins match no language), `age` (Roblox account-age buckets: `<1d`,
   `1-7d`, `7-30d`, `30-90d`, `90-365d`, `1-3y`, `3y+`), `prem` (`true` / `false`) and `source` (the join's `from`:
   `direct`, `teleport`, `teleport_game`, `referral`, `share`, `follow`). A player matches when one of their
   `session` / `join` rows in the range says so (all set audience filters on that one row), and then **all** their rows
@@ -1270,7 +1286,7 @@ const { servers } = await fleet.servers({ branch: "prod" });
 |---|---|---|
 | `overview` | players, new players, sessions, playtime, in total and per day; windows of a day or less also per step (`bucketMs`: 1 min up to an hour, 5 min up to 6 h, else 1 h; `buckets`, by the time a session started) | 30 days |
 | `roblox` | first-play bounce (first session < 60 s), qualified plays (sessions >= 5 min), D1/D7, playtime and play days per user, payer conversion, Robux per user and per payer | 30 days |
-| `demographics` | who plays, from join events: country, language (`locale`, framework 2026-11-15 on), device, Roblox account age, Premium; each player once per dimension, `share` of the players with a join | 28 days |
+| `demographics` | who plays, from join events: country, language (`locale`, framework 0.7.1+), device, Roblox account age, Premium; each player once per dimension, `share` of the players with a join | 28 days |
 | `explain` | why a metric moved between two windows ([Explain this change](#explain-this-change)): `metric` (`players`, `dau`, `newPlayers`, `returningPlayers`, `sessions`, `playtime`, `playtimePerPlayer`, `sessionsPerPlayer`, `avgSession`, `d1`, `payerConversion`, `robuxPerPlayer`, `revenuePerPlayer`; default `players`) in the filter range vs `baseline` (`{from, to}`; default the same length right before it), per segment of `dimension` (`device`, `country`, `language`, `accountAge`, `premium`, `source`, `build`, `branch`, `playerType`, or `all`, the default): both windows' players, value and share, and a shift-share split of the change into `rate` and `mix` effects, ranked, the rest past `top` (8, at most 20) folded into one `other` row; `small` when a segment has fewer than `minPlayers` (30) players in a window; `within: {dimension, value}` for one segment only (the drill-down). Every filter applies | 7 days |
 | `retention` | retention by join-day cohort (`days`: up to 31 offsets from 1 to 90, default 1, 3, 7, 14, 30; the explorer asks for every day 1-30; days not over are `null`) | 30 days |
 | `ltv` | revenue per join-day cohort (the `retention` cohorts; every filter applies, so a join source or country filter shows whether a campaign's players paid back): per cohort and `days` offset (default D0 = the join day, 1, 3, 7, 14, 30; up to 12 offsets from 0 to 90), cumulative `robux` paid, `robuxPerPlayer`, `revenuePerPlayer` (x `creatorShare`, 0.7), `payers` and `payerShare` by that day; a day not started is `null`, the day in progress (today, UTC) `partial: true` and out of the `average` (weighted by cohort size; `players` = the new players it covers). Purchases as in `monetization` (server-sent distinct rows, Studio left out), on any device or build | 30 days |
@@ -2094,7 +2110,9 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
 - **Planner** (every 30 s, at most 500 users a tick): one send per user at a time (a want that outranks a send still
   planned for later cancels it); priority (lower first; `beats` lets a kind outrank listed kinds in its last hours), repeat (`once_ever`, `per_key`, `daily` + `perWeek`), muted / online / quiet after
   leaving / the day cap (`notify.clock`: `rolling24` or `utc_day`) / lapse decay / the unopened backoff, then the user's usual
-  hour (mode of the last 20 session starts, default 17:00 UTC) +-20 min, no later than `until - 1 h`.
+  hour (mode of the last 20 session starts, default 17:00 UTC) +-20 min, no later than `until - 1 h`. The held slot: when
+  that send would fill the day cap before a higher-priority intent's window opens (and the cap would not free before that
+  window ends), nothing is planned (`skipped {why: "held"}`) and the user is looked at again when that window opens.
 - **Sender** (every second, 4 workers): a token bucket under our ceiling `notify.rate` (default 50 / s) and Roblox's own
   `x-ratelimit-*` headers (4000 / s per key: never more in a window than `remaining`); 429 halves the rate and honours
   `Retry-After`, +10 % a minute back. Retries (network, 5xx, 429) at 30 s, 2 min, 8 min. Not opted in (400
@@ -2138,7 +2156,8 @@ through Roblox's Open Cloud (`POST https://apis.roblox.com/cloud/v2/users/{id}/n
   120 days); the Notifications page's Subscribers tab shows it and exports the CSV.
 - **Coolify**: real sends need `OPENCLOUD_NOTIFY_KEY` (or `OPENCLOUD_API_KEY`) with the user-notifications scope on the
   universe, and `TYPETORCH_UNIVERSE_ID`; then turn dry run off.
-- **Erasure**: the Right to Erasure path deletes the user's rows in all three tables and their queued sends.
+- **Erasure**: the Right to Erasure path deletes the user's rows in `notify_sends`, `notify_intents`, `notify_users`,
+  `notify_prefs` and `notify_outbox`, and their queued sends.
 - **Limits**: 200 items and 256 KB per intents request, 6000 notify requests a minute per address (plus the ingest limit),
   2,000,000 pending intents at most (`full`), 30 admin sends / config / key changes a minute.
 
@@ -2159,7 +2178,7 @@ TT_EVENTS
 ```
 
 (the page gives the exact command, a PowerShell one and the JSON file). The start and end times are INSIDE the signed
-record (unix seconds, UTC), and the framework (`src/settings.ts`, the release after 0.7.0) switches each event's values on and off on the
+record (unix seconds, UTC), and the framework (`src/settings.ts`, 0.7.1+) switches each event's values on and off on the
 server's own clock: no message at the start or end, so a server that starts mid-event has it from its first read, and
 the event ends on time even when the backend is down. While it runs, its `set` values replace `game[key]` for
 `TypeTorch.liveConfig(key)` (the game's `parse` still checks them); `TypeTorch.liveEvents()` lists the active and upcoming
@@ -2233,7 +2252,7 @@ fleet's servers report):
   apis.roblox.com would) and is never logged.
 - **Storage.** `<data dir>/maps/index.json` (the latest export: place, place version, when, by whom, each map's bounds
   and part counts; a 20-entry history; the overrides) and `<data dir>/maps/geometry/<sha256>.ttmp`, one file per map named
-  by its content hash (an unchanged map is never written twice; files no export uses are removed). Gnome (2026-11-15,
+  by its content hash (an unchanged map is never written twice; files no export uses are removed). A test game (2026-11-15,
   place version 3617): 6 maps and the lobby, 4,991 parts, 240 KB, 7 s from the click to stored.
 - **Out of date.** The place's newest version from the Assets API (`asset:read` on the key); when the key can't read it,
   the newest `pv` the fleet's game servers reported in the last day (`placeVersion.source` says which, `note` why).
@@ -2244,8 +2263,8 @@ against the map's box grown by 8 studs, the override's offset applied: `aligned`
 20%, `off` below that with a `suggestedOffset` (the events' median minus the box's center on x and z; on y the events'
 low end minus 3 studs minus the box's floor), `unknown` under 10 events. When that's `unknown`, the page runs the same
 check on the **recordings' positions** on that map (the `recording-layers` silhouette's cells, the filter bar's range;
-`web/src/lib/maps.ts` `alignmentOf`) and says which source it used. Gnome (2026-11-15, 7 days of recordings): all six
-maps aligned, 100% inside (HedgeMaze 46,268 positions, recordings frame x 636..1008, z -164..164 inside its export's box). The **manual override**
+`web/src/lib/maps.ts` `alignmentOf`) and says which source it used. A test game (2026-11-15, 7 days of recordings): all six
+maps aligned, 100% inside (the hedge maze: 46,268 positions, recordings frame x 636..1008, z -164..164 inside its export's box). The **manual override**
 (`PUT /v1/maps/<name>/override { path?, offset? }`, owners) sets the model to export (an instance path such as
 `ReplicatedStorage.assets.maps.Mall`, used at the next export) and/or an offset (applied at once, to the geometry, never
 to the events); `DELETE` removes it.
@@ -2290,7 +2309,7 @@ collides (flag 8), visible or invisible, in its own color (invisible ones see-th
 visible non-colliding parts that aren't meshes or unions (small decoration). Off by default, each behind a toggle:
 **decorative meshes** (meshes and unions that don't collide: their boxes are only bounding volumes, often huge) and
 **markers and triggers** (invisible parts that don't collide). No tint: a mesh or union drawn as a box gets a thin dark
-outline instead. Gnome's HedgeMaze (581 parts): drawn by default 267 (the floor and 12 other visible colliding parts,
+outline instead. A test game's hedge maze map (581 parts): drawn by default 267 (the floor and 12 other visible colliding parts,
 245 invisible walls, 9 small decorations); hidden 13 hedge meshes (whole maze quadrants such as 154 x 20 x 154) and 301
 markers.
 
@@ -2306,7 +2325,7 @@ topic?, ctx? })` on the server; the framework validates and rate-limits it and w
 (`thumbs` / `stars` / `scale`), `steps`, `r`, `norm` (0..1), `label`, `text`, `len`, `topic`, `play_s`, `ctx`. No UserId or
 username on the row: the explorer resolves pid -> user through `identities`.
 
-- **Older rows**: CuceGame's `kind = custom, name = feedback` rows (`{ rating 1..5, text, length }`) read as scale
+- **Older rows**: a game's older `kind = custom, name = feedback` rows (`{ rating 1..5, text, length }`) read as scale
   `legacy_faces5` (type `scale`, 5 steps, labels BAD / MEH / OK / GOOD / GREAT, norm = (rating - 1) / 4), mapped at query
   time and marked `legacy: true`. No migration; their `username` prop is never returned.
 - **Queries**: `feedback-summary` and `feedback-list` (see [Queries](#queries); `src/queries/feedback.ts`). A scale
@@ -2384,8 +2403,8 @@ curl https://<your host>/healthz
 
 Then: the game points at it with `typetorch backend setup --url https://<your host>` (its game key and the admin token in
 the game repo's `.env`), and the Roblox erasure webhook is at `https://<your host>/v1/erasure`. Back
-up `events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite` and `access.json` off the VPS (e.g. `rclone sync` to
-object storage, nightly).
+up `events/`, `recordings/`, `rollups/`, `raw/archive/`, `fleet.sqlite`, `notify.db` and `access.json` off the VPS (e.g. `rclone sync` to
+object storage, nightly), or download the built-in [backups](#backups-and-restore).
 
 ## Load tests
 
