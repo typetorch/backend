@@ -232,6 +232,10 @@ describe("recordings", () => {
 		expect(out.recordings).toEqual([]);
 		expect(out.failed).toBe(2);
 		expect(out.errors[1]).toContain("no decoder");
+		// plans/36: tt-ext-1 rows next to a session's tt-rec-1 ones are left to their own decoder, never a failure
+		const ext = decodeSessions([{ pid: "p", sid: "x", chunk: 0, codec: "tt-ext-1", data: "AQAAAA==", n: 0 }]);
+		expect(ext.failed).toBe(0);
+		expect(ext.recordings).toEqual([]);
 	});
 
 	const T = 1_000_000;

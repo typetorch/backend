@@ -159,8 +159,10 @@ export interface WhereOptions {
 	prefix?: string;
 	/** Leave out the time range (the caller adds its own). */
 	noTime?: boolean;
-	/** Only the filters that exist on the recordings table (time, art). */
+	/** Only the filters that exist on the recordings table (time, art), and only `codecs` rows (default tt-rec-1). */
 	recordings?: boolean;
+	/** With `recordings`: the codecs to read (default `["tt-rec-1"]`; plans/36's `tt-ext-1` rows only when asked). */
+	codecs?: readonly string[];
 	/**
 	 * The events table for a range: the audience filters need it (their join rows). Without it they don't apply (server
 	 * and fleet rows have no player, like the device filter's perf.ts serverFilters).
@@ -208,6 +210,7 @@ export function whereSql(f: NormalizedFilters, dialect: Dialect, options: WhereO
 	const parts: string[] = [];
 	if (!options.noTime) parts.push(`${p}t >= ${int(f.from)}`, `${p}t < ${int(f.to)}`);
 	if (f.art) parts.push(inList(`${p}art`, f.art));
+	if (options.recordings) parts.push(inList(`${p}codec`, [...(options.codecs ?? ["tt-rec-1"])]));
 	if (!options.recordings) {
 		if (f.branch) parts.push(inList(`${p}branch`, f.branch));
 		if (f.channel) parts.push(inList(`${p}channel`, f.channel));

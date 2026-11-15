@@ -295,6 +295,9 @@ export interface DecodedSessions {
 export function decodeSessions(rows: ChunkRow[]): DecodedSessions {
 	const bySession = new Map<string, ChunkRow[]>();
 	for (const row of rows) {
+		// plans/36: a session's tt-ext-1 rows (extended recording) sit next to its tt-rec-1 ones; not this decoder's (an
+		// unknown codec still counts as a failed session)
+		if (row.codec === "tt-ext-1") continue;
 		const list = bySession.get(row.sid) ?? [];
 		list.push(row);
 		bySession.set(row.sid, list);

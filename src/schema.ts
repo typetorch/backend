@@ -50,8 +50,12 @@ export type Source = (typeof SOURCES)[number];
  */
 export const SERVER_ONLY_KINDS: readonly EventKind[] = ["purchase", "currency", "feedback"];
 
-/** The only recording codec so far (documented by the framework in framework/src/analytics/SCHEMA.md). */
-export const RECORDING_CODECS = ["tt-rec-1"] as const;
+/**
+ * Recording codecs (documented by the framework in framework/src/analytics/SCHEMA.md): `tt-rec-1` the first-session
+ * recording; `tt-ext-1` the extended recording's streams (poses, tracked models, animations, the UI tree; plans/36), rows
+ * next to the tt-rec-1 ones with their own chunk counter. Queries read tt-rec-1 unless they ask for more.
+ */
+export const RECORDING_CODECS = ["tt-rec-1", "tt-ext-1"] as const;
 export type RecordingCodec = (typeof RECORDING_CODECS)[number];
 
 /** props is a JSON string of at most this many bytes (UTF-8). */
