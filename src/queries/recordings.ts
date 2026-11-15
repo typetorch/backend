@@ -3,7 +3,8 @@
  *   recording-layers    per map: a top-down frame, a density silhouette, and layers (path, idle, deaths, spawns,
  *                       screens, buttons, prompts, quits, positioned events) as grid cells
  *   recording-sessions  recorded sessions, filtered by map cell, why the recording ended, or a confusion signal
- *   recording-replay    one session: samples, inputs, events, signals and maps, for the top-down replay
+ *   recording-replay    one session: samples, inputs, events, signals and maps, for the top-down replay; with the
+ *                       session's extended streams (plans/36 tt-ext-1) when it has them
  *   quit-autopsy        the last seconds before a player left, classified, against the sessions that didn't leave
  *   first-action        seconds from spawn to the first move, screen, button, prompt and round, by device and build
  *
@@ -57,7 +58,9 @@ import {
 	type SessionEvent,
 	type Track,
 } from "../recording-analysis.ts";
-import { decodeSessions, decoderVersion, detectSignals, type ChunkRow, type RecordingInput, type Signal, type SignalKind, type ZoneTimeline } from "../recording.ts";
+import { noteAnimationIds } from "../anims/store.ts";
+import { animationIdsOf, decodeTtExt1, TT_EXT_CODEC, type ExtTimeline } from "../recording-ext.ts";
+import { decodeSessions, decoderVersion, detectSignals, type ChunkRow, type RecordingInput, type RecordingSample, type Signal, type SignalKind, type ZoneTimeline } from "../recording.ts";
 import { assertSafeKey } from "../sql/dialect.ts";
 import { whereSql, type NormalizedFilters } from "../sql/filters.ts";
 import { defineQuery, eventsTable, int, lit, num, playerRows, str, strOrNull, type QueryContext, type Row, type Rows, type RunStatements } from "./core.ts";
@@ -905,6 +908,8 @@ export interface SessionSummary {
 	inputs: number;
 	maps: string[];
 	signals: { idle: number; camera_spin: number; repeated_clicks: number };
+	/** plans/36: the session also has extended streams (tt-ext-1 rows). */
+	extended?: boolean;
 }
 
 export interface SessionsResult {
@@ -1006,6 +1011,15 @@ export const recordingSessions = defineQuery<SessionsOptions, SessionsResult>({
 				signals: counts,
 			};
 		});
+		if (out.length) {
+			const ext = await run({
+				ext:
+					`SELECT DISTINCT r.sid AS sid FROM ${recTable(ctx, f)} r WHERE ${whereSql(f, ctx.dialect, { prefix: "r.", recordings: true, codecs: [TT_EXT_CODEC] })} ` +
+					`AND r.sid IN (${out.map((s) => lit(s.sid)).join(", ")}) ${ctx.dialect.limit(out.length)}`,
+			});
+			const withExt = new Set((ext.ext ?? []).map((r) => str(r.sid)));
+			for (const s of out) if (withExt.has(s.sid)) s.extended = true;
+		}
 		return {
 			total: matched.length,
 			sessions: out,
@@ -1047,8 +1061,15 @@ export interface ReplayResult {
 	duration?: number;
 	gaps?: number;
 	chunks?: number;
-	/** [t, x, y, z, yaw (radians, 0 = facing -Z, from the camera look), lookY]; x/y/z null without a character. */
-	samples?: [number, number | null, number | null, number | null, number | null, number | null][];
+	/**
+	 * [t, x, y, z, yaw (radians, 0 = facing -Z, from the camera look), lookY, character yaw, camera x, y, z]; x/y/z and
+	 * the character yaw null without a character (the last four: plans/36's Player view).
+	 */
+	samples?: [number, number | null, number | null, number | null, number | null, number | null, number | null, number | null, number | null, number | null][];
+	/** Client fps over time (the session's `tech` / `client` rows): [t, fps]. */
+	fps?: [number, number][];
+	/** plans/36: the session's extended streams (tt-ext-1 rows), decoded; null when it has none. */
+	extended?: ExtTimeline | null;
 	inputs?: (Omit<RecordingInput, "t"> & { t: number })[];
 	events?: { t: number; kind: string; name: string; state?: string | null; props?: Record<string, unknown> }[];
 	signals?: { t: number; kind: SignalKind; amount: number; target?: string; zone?: string }[];
@@ -1061,6 +1082,26 @@ export interface ReplayResult {
 }
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
+
+/** tt-ext-1 rows read for one replay (300 s at a chunk every ~10 s is ~30; 24 KB cuts make more). */
+const MAX_EXT_CHUNKS = 2000;
+
+/** A session's tt-ext-1 rows decoded for the replay (null: none); the animation ids it saw go to the clip store. */
+function extendedOf(rows: readonly Row[], start: number): ExtTimeline | null {
+	if (!rows.length) return null;
+	const chunks: ChunkRow[] = rows.map((r) => ({ sid: str(r.sid), pid: str(r.pid), chunk: num(r.chunk), codec: TT_EXT_CODEC, data: str(r.data), n: num(r.n), t: num(r.t) }));
+	const timeline = decodeTtExt1(chunks, start);
+	if (rows.length >= MAX_EXT_CHUNKS) timeline.truncated = true;
+	const ids = animationIdsOf(timeline);
+	if (ids.length) {
+		try {
+			noteAnimationIds(ids);
+		} catch {
+			// fire-and-forget: the clip store never breaks a replay
+		}
+	}
+	return timeline;
+}
 
 export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 	name: "recording-replay",
@@ -1079,6 +1120,9 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 			events:
 				`SELECT e.t AS t, e.kind AS kind, e.name AS name, e.state AS state, e.props AS props, e.job AS job FROM ${eventsTable(ctx, f)} e ` +
 				`WHERE e.t >= ${int(f.from)} AND e.t < ${int(f.to)} AND e.sid = ${lit(o.sid)} AND e.kind <> 'tech' ORDER BY e.t, e.kind, e.name ${ctx.dialect.limit(3000)}`,
+			fps:
+				`SELECT e.t AS t, ${ctx.dialect.jsonNumber("e.props", "fps")} AS fps FROM ${eventsTable(ctx, f)} e ` +
+				`WHERE e.t >= ${int(f.from)} AND e.t < ${int(f.to)} AND e.sid = ${lit(o.sid)} AND e.kind = 'tech' AND e.name = 'client' ORDER BY e.t ${ctx.dialect.limit(2000)}`,
 		};
 	},
 	shape(rows, _ctx, _f, o) {
@@ -1092,6 +1136,9 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 				chunks:
 					`SELECT r.sid AS sid, r.pid AS pid, r.job AS job, r.art AS art, r.chunk AS chunk, r.codec AS codec, r.data AS data, r.n AS n, r.t AS t ` +
 					`FROM ${recTable(ctx, f)} r WHERE r.t >= ${int(f.from)} AND r.t < ${int(f.to)} AND r.sid = ${lit(o.sid)} AND r.codec = 'tt-rec-1' ORDER BY r.chunk ${lim(10_000)}`,
+				ext:
+					`SELECT r.sid AS sid, r.pid AS pid, r.chunk AS chunk, r.codec AS codec, r.data AS data, r.n AS n, r.t AS t ` +
+					`FROM ${recTable(ctx, f)} r WHERE r.t >= ${int(f.from)} AND r.t < ${int(f.to)} AND r.sid = ${lit(o.sid)} AND r.codec = '${TT_EXT_CODEC}' ORDER BY r.chunk ${lim(MAX_EXT_CHUNKS)}`,
 		});
 		const first = { chunks: chunkRows.chunks ?? [], events: firstRows.events ?? [] };
 		if (!first.chunks.length) return result;
@@ -1126,10 +1173,13 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 		}
 		const dominant = [...perMap].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? NO_MAP;
 		const rel = (t: number) => Math.round(t - track.start);
+		// the decoded samples in the track's order (toTrack's stable sort): the character yaw and the camera position
+		const raw: RecordingSample[] = [...decoded.recordings[0].samples].sort((a, b) => a.t - b.t);
 		const samples: NonNullable<ReplayResult["samples"]> = [];
 		for (let i = 0; i < track.t.length; i++) {
 			const has = !Number.isNaN(track.x[i]);
 			const look = !Number.isNaN(track.lx[i]);
+			const s = raw[i];
 			samples.push([
 				rel(track.t[i]),
 				has ? r2(track.x[i]) : null,
@@ -1137,7 +1187,17 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 				has ? r2(track.z[i]) : null,
 				look ? r2(Math.atan2(-track.lx[i], -track.lz[i])) : null,
 				look ? r2(track.ly[i]) : null,
+				s?.yaw !== undefined ? r2(s.yaw) : null,
+				s?.cam ? r2(s.cam[0]) : null,
+				s?.cam ? r2(s.cam[1]) : null,
+				s?.cam ? r2(s.cam[2]) : null,
 			]);
+		}
+		const extended = extendedOf(chunkRows.ext ?? [], track.start);
+		const fps: [number, number][] = [];
+		for (const r of firstRows.fps ?? []) {
+			const value = Number(r.fps);
+			if (r.fps !== null && r.fps !== undefined && Number.isFinite(value)) fps.push([rel(num(r.t)), Math.round(value * 10) / 10]);
 		}
 		return {
 			...result,
@@ -1150,6 +1210,8 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 			gaps: track.gaps,
 			chunks: chunks.length,
 			samples,
+			fps,
+			extended,
 			inputs: track.inputs.map((i) => ({ ...i, t: rel(i.t) })),
 			events: events.map((e) => ({ ...e, t: rel(e.t) })),
 			signals: detectSignals(trackToDecoded(track), zoneTimeline(events)).map((sig) => ({

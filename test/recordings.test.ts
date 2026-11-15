@@ -26,7 +26,8 @@ import { decodeSessions, registerDecoder, type DecodedRecording, type RecordingI
 import { clearRecordingCache, firstActionExamples, prepareMaps, refineFrame, sampleSessions, trackCache, type LoadedSession } from "../src/queries/recordings.ts";
 import { BasinStore } from "../src/store/basin.ts";
 import { DuckDbStore, readRows } from "../src/store/duckdb.ts";
-import { fixtureDb } from "./fixtures.ts";
+import { ExtChunkWriter } from "./fixtures/ext-encoder.ts";
+import { fixtureDb, insertRows } from "./fixtures.ts";
 import { MAP_CENTERS, RF_ART_NEW, RF_ART_OLD, RF_NOW, recordingFixture } from "./recording-fixture.ts";
 import { RecWriter } from "./recwriter.ts";
 
@@ -540,6 +541,52 @@ describe("recording-replay", () => {
 		expect(r.events?.find((e) => e.name === "screen")).toMatchObject({ t: 17_000, kind: "state", state: "zone:Arena|screen:Shop|activity:round" });
 		expect(r.signals).toEqual([{ t: 19_000, kind: "repeated_clicks", amount: 3, target: "Shop/Buy/Coins100", zone: "Arena" }]);
 		expect(r.frame?.minX).toBeLessThan(1000);
+	});
+	test("plans/36: the Player view's fields (character yaw, camera position), pointer positions; no extended rows: null", async () => {
+		const s = left.find((x) => x.group === 1);
+		if (!s) throw new Error("fixture");
+		const r = await store.query("recording-replay", {}, { sid: s.sid });
+		expect(r.extended).toBeNull();
+		expect(r.fps).toEqual([]);
+		expect(r.samples?.every((x) => x.length === 10)).toBe(true);
+		// the fixture's camera sits behind the character: a camera position on every sample with one
+		expect(r.samples?.filter((x) => x[7] !== null).length).toBeGreaterThan(0);
+		expect(r.samples?.[0][6]).toBeTypeOf("number");
+	});
+	test("plans/36: a session with tt-ext-1 rows decodes them as `extended`; its client fps; the sessions list marks it", async () => {
+		const s = left.find((x) => x.group === 0);
+		if (!s) throw new Error("fixture");
+		const c0 = new ExtChunkWriter({ keyframe: true })
+			.keyframe()
+			.string(0, "zombie")
+			.string(1, "rbxassetid://507767714")
+			.view(1280, 720, 36, 70, 58)
+			.spawn(1, 0, 1, [10, 3, 10], 0, [4, 5, 1])
+			.animPlay(1, 1, 1, 1, 1, true, 0)
+			.uiNode(0, 65535, 0, { order: 0, rect: [0, 0, 1280, 684] });
+		const c1 = new ExtChunkWriter({ last: true }).afk(true, 2000).afk(false, 3000).gone(1, 100);
+		await insertRows(connection, "recordings", [
+			{ v: 1, t: s.start + 500, pid: s.pid, sid: s.sid, job: s.job, art: s.art, chunk: 0, codec: "tt-ext-1", data: Buffer.from(c0.finish()).toString("base64"), n: c0.count },
+			{ v: 1, t: s.start + 10_500, pid: s.pid, sid: s.sid, job: s.job, art: s.art, chunk: 1, codec: "tt-ext-1", data: Buffer.from(c1.finish()).toString("base64"), n: c1.count },
+		]);
+		const base = fx.events.find((e) => e.sid === s.sid) as (typeof fx.events)[number];
+		await insertRows(connection, "events", [{ ...base, t: s.start + 4_000, kind: "tech", name: "client", state: "", props: JSON.stringify({ fps: 57.5, mem: 900 }) }]);
+		clearRecordingCache();
+		const r = await store.query("recording-replay", {}, { sid: s.sid });
+		// today's data is unchanged (same as the first replay test)
+		expect(r).toMatchObject({ found: true, chunks: 3, duration: 23_000 });
+		expect(r.samples?.length).toBe(231);
+		expect(r.fps).toEqual([[4_000, 57.5]]);
+		const x = r.extended;
+		expect(x).toMatchObject({ chunks: 2, gaps: 0, skipped: 0, view: [[500, 1280, 720, 36, 70, 58]], afk: [[12_500, 15_500]] });
+		expect(x?.entities).toEqual([{ e: 1, kind: "zombie", humanoid: true, player: false, size: [4, 5, 1], from: 500, to: 15_600, moves: [[500, 10, 3, 10, 0]] }]);
+		expect(x?.anims[0]).toMatchObject({ e: 1, id: "rbxassetid://507767714", from: 500, to: 15_600 });
+		expect(x?.ui).toEqual([{ i: 0, cls: 0, from: 500, to: null, parent: null, f: { order: 0, rect: [0, 0, 1280, 684] } }]);
+		const list = await store.query("recording-sessions", {}, { limit: 100 });
+		const marked = list.sessions.filter((x) => x.extended).map((x) => x.sid);
+		expect(marked).toEqual([s.sid]);
+		// today's queries don't count the new rows
+		expect(list.sessions.find((x) => x.sid === s.sid)?.samples).toBe(231);
 	});
 	test("an unknown session; a bad sid", async () => {
 		expect(await store.query("recording-replay", {}, { sid: "nope" })).toMatchObject({ found: false, sid: "nope" });

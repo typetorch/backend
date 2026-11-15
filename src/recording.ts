@@ -53,6 +53,9 @@ export interface RecordingInput {
 	code?: number;
 	/** The game processed the input (e.g. a click on UI). */
 	processed?: boolean;
+	/** Pointer inputs (clicks, taps): the position across the viewport, 0..1 from the top left. */
+	x?: number;
+	y?: number;
 }
 
 export interface DecodedRecording {
@@ -250,7 +253,14 @@ export function decodeTtRec1(chunks: ChunkRow[]): DecodedRecording {
 				out.samples.push({ t, cam: [v[0], v[1], v[2]], look: lookVector(v[3], v[4]) });
 			} else if ((r.tag === TT_REC_TAGS.key || r.tag === TT_REC_TAGS.pointer) && r.kind !== undefined) {
 				const type = INPUT_KINDS[r.kind];
-				if (type) out.inputs.push({ t, type, ...(r.code !== undefined ? { code: r.code } : {}), processed: r.processed === true });
+				if (type) {
+					const input: RecordingInput = { t, type, ...(r.code !== undefined ? { code: r.code } : {}), processed: r.processed === true };
+					if (r.x !== undefined && r.y !== undefined) {
+						input.x = Math.round(r.x * 10_000) / 10_000;
+						input.y = Math.round(r.y * 10_000) / 10_000;
+					}
+					out.inputs.push(input);
+				}
 			} else if (r.tag === TT_REC_TAGS.event && r.kind !== undefined) {
 				const type = EVENT_KINDS[r.kind];
 				if (type) out.inputs.push({ t, type, ...(r.text !== undefined ? { target: r.text } : {}) });
