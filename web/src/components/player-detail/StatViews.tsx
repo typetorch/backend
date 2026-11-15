@@ -3,11 +3,13 @@
  * numbers as a table), and the purchases or sessions themselves. All from one `player-stats` answer.
  */
 import type { ReactNode } from "react";
+import { Link, useLocation } from "react-router";
 import { EmptyState } from "@/components/common";
 import { ProductId, ProductKind, productKindLabel } from "@/components/ProductId";
 import { JobLink } from "@/pages/server/shared";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
+import { replayHref } from "@/lib/commands";
 import { fmtInt, fmtMinutes, fmtNum, fmtTime, shortId } from "@/lib/format";
 import { productLabel } from "@/lib/products";
 import type { PlayerPurchase, PlayerSessionRow, PlayerStatsResult } from "@/lib/types";
@@ -129,12 +131,31 @@ export function PlaytimeView({ stats, show, onShow }: ViewProps) {
 
 // Sessions -------------------------------------------------------------------------------------------------------------
 
+/** "Replay" for a recorded session: the Recordings page's replay, its range the session's days. */
+function ReplayLink({ session }: { session: PlayerSessionRow }) {
+	const { search } = useLocation();
+	return (
+		// The row opens the session's timeline; the link opens the replay instead.
+		<Link to={replayHref(search, session)} onClick={(e) => e.stopPropagation()} className="text-xs underline" aria-label={`Replay session ${shortId(session.sid)}`}>
+			Replay
+		</Link>
+	);
+}
+
 const SESSION_COLUMNS: DataColumn<PlayerSessionRow>[] = [
 	{ id: "start", header: "Started (UTC)", type: "date", accessor: (s) => s.start, cell: (s) => fmtTime(s.start), format: (_v, s) => fmtTime(s.start), className: "font-mono text-xs tabular-nums" },
 	{ id: "length", header: "Length", type: "number", accessor: (s) => s.minutes, cell: (s) => fmtMinutes(s.minutes), format: (_v, s) => fmtMinutes(s.minutes), hint: "minutes", align: "right" },
 	{ id: "events", header: "Events", type: "number", accessor: (s) => s.events, cell: (s) => fmtInt(s.events), align: "right" },
 	{ id: "dev", header: "Device", type: "enum", accessor: (s) => s.dev },
 	{ id: "first", header: "First", type: "boolean", accessor: (s) => s.firstSession, cell: (s) => (s.firstSession ? <Badge variant="secondary">first session</Badge> : null) },
+	{
+		id: "recording",
+		header: "Recording",
+		type: "boolean",
+		title: "A first-session recording: opens its replay on the Recordings page",
+		accessor: (s) => s.recorded === true,
+		cell: (s) => (s.recorded ? <ReplayLink session={s} /> : null),
+	},
 	{
 		id: "server",
 		header: "Server",
