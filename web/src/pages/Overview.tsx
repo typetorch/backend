@@ -5,6 +5,7 @@ import { CompareToggle } from "@/components/CompareToggle";
 import { DayBars, fillDays, fillSteps, type DayPoint } from "@/components/DayBars";
 import { DeployMarksToggle, useDeployMarks, useOpenDeploy } from "@/components/DeployMarkers";
 import { ExplainButton, ExplainPanel } from "@/components/ExplainPanel";
+import { IngestBusyNote } from "@/components/IngestBusyNote";
 import { SavedQueryTile } from "@/components/SavedQueryView";
 import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
@@ -118,7 +119,7 @@ export default function Overview() {
 	const q = useAnalytics("overview");
 	const prev = useAnalytics("overview", {}, { enabled: compare && period !== undefined, ...(period ? { filters: period.filters } : {}) });
 	const branch = typeof apiFilters.branch === "string" ? apiFilters.branch : undefined;
-	// The storage card is the server's disk: owners only (the backend refuses it to a viewer).
+	// The storage card and the busy note are the server's own state: owners only (the backend refuses them to a viewer).
 	const readOnly = isReadOnly(useAuth());
 	return (
 		<>
@@ -127,6 +128,7 @@ export default function Overview() {
 				description={`Players, sessions and playtime, ${describeRange(state)}. Session length = first to last event.`}
 				actions={<CompareToggle disabled={!period} {...(!period ? { title: "Pick a start date to compare with the period before" } : {})} />}
 			/>
+			{readOnly ? null : <IngestBusyNote />}
 			<QueryState query={q} loadingRows={6}>
 				{(data) => <Body data={data} branch={branch} {...(compare && prev.data ? { previous: prev.data } : {})} />}
 			</QueryState>

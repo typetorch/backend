@@ -9,6 +9,7 @@ import { Outlet, useLocation } from "react-router";
 import { cn } from "cn";
 import { CommandPalette } from "@/components/CommandPalette";
 import { FilterBar } from "@/components/FilterBar";
+import { HistoryImportingBanner } from "@/components/HistoryImportingBanner";
 import { FindPlayer } from "@/components/Identity";
 import { PlaceCard, PlaceIconLink, usePageTitle } from "@/components/PlaceCard";
 import { SidebarNav } from "@/components/SidebarNav";
@@ -221,6 +222,8 @@ export function AppShell() {
 				</header>
 				<main className="flex-1 space-y-4 p-4">
 					<UntrustedBrowserBanner />
+					{/* The analytics pages (the ones with filters): history still importing from another server. */}
+					{current?.noFilters ? null : <HistoryImportingBanner />}
 					<Suspense fallback={<LoadingBlock rows={6} />}>
 						<Outlet />
 					</Suspense>

@@ -58,6 +58,9 @@ import type {
 	RemoteOp,
 	GameColumn,
 	LiveMapServer,
+	MigrateAction,
+	MigrateStartInput,
+	MigrateStatus,
 	ServerStreams,
 	SettingsView,
 	SqlResult,
@@ -309,6 +312,12 @@ export function createApi(options: ApiOptions = {}) {
 		/** The audit log (owners only): newest first, a page at a time; `facets` adds the actors and actions to filter by. */
 		audit: (filters: AuditFilters & { facets?: boolean } = {}, signal?: AbortSignal) =>
 			get<AuditPage>(`/v1/admin/audit${qs({ actor: filters.actor, action: filters.action, outcome: filters.outcome, before: filters.before, limit: filters.limit, facets: filters.facets ? 1 : undefined })}`, signal),
+		/** A move from another server (owners only): the state, per step and per day. */
+		migrateStatus: (signal?: AbortSignal) => get<MigrateStatus>("/v1/admin/migrate", signal),
+		/** Pause, resume or cancel the running move; answers the new status (409 when the action doesn't apply). */
+		migrateAction: (action: MigrateAction, signal?: AbortSignal) => post<MigrateStatus>("/v1/admin/migrate", { action }, signal),
+		/** Starts a move from the old server; the token goes in the body once and is never sent back. */
+		migrateStart: (input: MigrateStartInput, signal?: AbortSignal) => post<MigrateStatus>("/v1/admin/migrate", { action: "start", ...input }, signal),
 		/** Backups (owners only): the schedule, the last outcome, the local backups. */
 		backups: (signal?: AbortSignal) => get<BackupsStatus>("/v1/admin/backups", signal),
 		/** A local backup now; answers the new status. */
