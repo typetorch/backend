@@ -93,7 +93,7 @@ function stubMapsFetch() {
 		vi.fn(async (input: string) => {
 			const url = String(input);
 			if (url === "/api/v1/maps") return Response.json(view(MAPS));
-			if (/\/geometry$/.test(url)) return new Response(ttmp([{ pos: [1100, -1, 100], size: [200, 2, 200] }]) as Uint8Array<ArrayBuffer>);
+			if (/\/geometry(\?v=2)?$/.test(url)) return new Response(ttmp([{ pos: [1100, -1, 100], size: [200, 2, 200] }]) as Uint8Array<ArrayBuffer>);
 			return new Response("{}", { status: 404 });
 		}),
 	);

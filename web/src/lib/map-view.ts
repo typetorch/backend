@@ -10,6 +10,7 @@
  *                    absent = all (a replay: player), `band=all` = all even in a replay
  *   decor=1          non-colliding meshes and unions drawn (as boxes)
  *   markers=1        invisible non-colliding parts drawn (markers, triggers)
+ *   tex=0            textures off: no Decals / Textures / MaterialVariant images, no material look (default on)
  *   hide=a,b         layers switched off (Maps page; the Recordings page keeps its `layers` list)
  *
  * Switching maps keeps all of it; only a free band range that doesn't fit the new map's heights is dropped.
@@ -25,9 +26,11 @@ export interface MapViewState extends DrawToggles {
 	cell: CellSize | null;
 	band: BandChoice;
 	hidden: string[];
+	/** Decals, Textures, MaterialVariants and the materials' look (plans/36 phase 5). Default on. */
+	textures: boolean;
 }
 
-export const VIEW_KEYS = ["mode", "draw", "cell", "band", "decor", "markers", "hide"] as const;
+export const VIEW_KEYS = ["mode", "draw", "cell", "band", "decor", "markers", "hide", "tex"] as const;
 
 export function readMapView(params: URLSearchParams): MapViewState {
 	const cell = Number(params.get("cell"));
@@ -41,6 +44,7 @@ export function readMapView(params: URLSearchParams): MapViewState {
 		decorative: params.get("decor") === "1",
 		markers: params.get("markers") === "1",
 		hidden: (params.get("hide") ?? "").split(",").filter(Boolean),
+		textures: params.get("tex") !== "0",
 	};
 }
 
@@ -78,6 +82,7 @@ export function mapViewPatch(state: Partial<MapViewState>): Record<string, strin
 	if (state.decorative !== undefined) patch.decor = state.decorative ? "1" : null;
 	if (state.markers !== undefined) patch.markers = state.markers ? "1" : null;
 	if (state.hidden !== undefined) patch.hide = state.hidden.length ? state.hidden.join(",") : null;
+	if (state.textures !== undefined) patch.tex = state.textures ? null : "0";
 	return patch;
 }
 

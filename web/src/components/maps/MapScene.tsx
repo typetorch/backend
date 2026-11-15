@@ -23,6 +23,8 @@ export interface MapSceneProps {
 	decorative?: boolean;
 	/** Invisible non-colliding parts (markers, triggers). Default off. */
 	markers?: boolean;
+	/** Decals, Textures, MaterialVariant images and the materials' look (plans/36 phase 5). Default on. */
+	textures?: boolean;
 	/** A click on the 2D map, in world studs. */
 	onPick?: (point: { x: number; z: number }) => void;
 	/** The pointer over the 2D map (world studs, and px from the scene's top left), or null when it leaves (the live map's names). */
@@ -37,7 +39,7 @@ const NO_OFFSET: Vec3 = [0, 0, 0];
 /** Pointer travel (px) under which a press is a click, not a pan. */
 const CLICK_PX = 5;
 
-export default function MapScene({ geometry, bounds, mode, layers = [], offset = NO_OFFSET, band = null, decorative = false, markers = false, onPick, onHover, label, className }: MapSceneProps) {
+export default function MapScene({ geometry, bounds, mode, layers = [], offset = NO_OFFSET, band = null, decorative = false, markers = false, textures = true, onPick, onHover, label, className }: MapSceneProps) {
 	const host = useRef<HTMLDivElement>(null);
 	const renderer = useRef<MapRenderer | null>(null);
 	const [failed, setFailed] = useState<string | null>(null);
@@ -58,8 +60,8 @@ export default function MapScene({ geometry, bounds, mode, layers = [], offset =
 	}, []);
 
 	useEffect(() => {
-		renderer.current?.update(geometry, bounds, layers, { mode, offset, band, decorative, markers });
-	}, [geometry, bounds, layers, mode, offset, band, decorative, markers]);
+		renderer.current?.update(geometry, bounds, layers, { mode, offset, band, decorative, markers, textures });
+	}, [geometry, bounds, layers, mode, offset, band, decorative, markers, textures]);
 
 	const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
 		const start = down.current;

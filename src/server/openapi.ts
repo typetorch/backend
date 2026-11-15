@@ -524,7 +524,7 @@ const ROUTES: Route[] = [
 		tag: "maps",
 		roles: ["admin", "web"],
 		summary: "One map's geometry (binary TTMP, README \"Maps\"), with an ETag",
-		params: [p("name", "the map name as the events spell it (case and punctuation ignored), or (lobby)")],
+		params: [p("name", "the map name as the events spell it (case and punctuation ignored), or (lobby)"), q("v", "2: TTMP version 2 with the texture section (Decals, Textures, MaterialVariants) when the map has one; absent: version 1")],
 		ok: { status: 200, description: "the map's parts", contentType: "application/octet-stream" },
 	},
 	{
@@ -537,6 +537,35 @@ const ROUTES: Route[] = [
 		body: obj({ path: str("an instance path, e.g. ReplicatedStorage.assets.maps.Mall"), offset: arr({ type: "number" }, "[x, y, z] studs") }),
 	},
 	{ method: "delete", path: "/v1/maps/{name}/override", tag: "maps", roles: ["admin"], summary: "Remove a map's override", params: [p("name", "the map name")] },
+	// Images and animation clips (plans/36) -------------------------------------------------------------------------------
+	{ method: "get", path: "/v1/images", tag: "maps", roles: ["admin", "web"], summary: "The image store's numbers: stored, blocked, failed, queued, downloading, backoff" },
+	{
+		method: "get",
+		path: "/v1/images/{assetId}",
+		tag: "maps",
+		roles: ["admin", "web"],
+		summary: "A Roblox image (from the public thumbnails API, stored once): 200 the PNG / WebP, 202 { state: pending } while it resolves, 404 { state: blocked | error | unknown }",
+		params: [p("assetId", "the image's asset id (digits)")],
+		ok: { status: 200, description: "the image, cached a year (immutable)", contentType: "image/png" },
+	},
+	{ method: "get", path: "/v1/anims", tag: "maps", roles: ["admin", "web"], summary: "The animation clip store: seen, exported, failed, waiting, the last pass, the default R6 ids" },
+	{
+		method: "get",
+		path: "/v1/anims/{animationId}",
+		tag: "maps",
+		roles: ["admin", "web"],
+		summary: "An animation clip: { id, length, looped, priority, rig, keyframes: [{ t, poses: { name: [qx, qy, qz, qw] } }], joints }; 404 { state: pending | failed } until exported",
+		params: [p("animationId", "the animation's asset id, or a url-encoded rbxassetid://<id>")],
+	},
+	{
+		method: "post",
+		path: "/v1/anims/export",
+		tag: "maps",
+		roles: ["admin"],
+		summary: "Run the animation pass (a read-only Luau Execution task loading the noted animation ids with KeyframeSequenceProvider)",
+		description: "Also runs after every successful map export. Needs OPENCLOUD_API_KEY (universe.place.luau-execution-session:read and :write) and TYPETORCH_UNIVERSE_ID.",
+		ok: { status: 202, description: "the pass started (200 { pass: null } when nothing waits)" },
+	},
 
 	{ method: "get", path: "/v1/place", tag: "roblox", roles: ["admin", "web"], summary: "The game's name, live players and icon" },
 	{

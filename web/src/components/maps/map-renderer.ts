@@ -20,6 +20,11 @@
  *     unions are their boxes, marked by a thin dark outline (not a fill color, which would read like the game's).
  *   - Layers (world coordinates): points (fixed-size dots), paths (lines), polygons (filled, a camera cone), heat cells
  *     (flat squares at the cell's height, colored by count on a log scale).
+ *   - Textures (plans/36 phase 5, the `textures` option, default on): Decals and Textures as quads on their part's face,
+ *     one instanced mesh per image (lib/map-textures.ts groupSurfaces); MaterialVariant parts with the variant's ColorMap
+ *     tiled every StudsPerTile studs (their own instanced meshes per shape and variant); solid parts with a light
+ *     procedural pattern per built-in Material (MATERIAL_LOOK_GLSL). Images load from /api/v1/images/<id> (ImageLoader:
+ *     a pending one is asked again later); until one arrives its parts keep their plain colour.
  * Shapes follow Roblox's: a cylinder's axis is the part's X; a wedge's slope faces -Z (its tall face is +Z); the corner
  * wedge's peak is over its (+X, -Z) corner (not checked against Studio).
  */
@@ -27,6 +32,7 @@ import * as THREE from "three";
 import { MapControls } from "three/addons/controls/MapControls.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { FLAGS, heatColor, isDrawn, partKind, type Bounds, type MapGeometry, type MapLayer, type MapPoint, type Vec3 } from "@/lib/maps";
+import { groupSurfaces, ImageLoader, MATERIAL_LOOK_GLSL, partVariant, type SurfaceGroup } from "@/lib/map-textures";
 
 export type MapMode = "2d" | "3d";
 
@@ -38,6 +44,8 @@ export interface SceneOptions {
 	decorative: boolean;
 	/** Invisible non-colliding parts. */
 	markers: boolean;
+	/** Decals, Textures, MaterialVariants and the built-in materials' look (default on). */
+	textures?: boolean;
 }
 
 /** A unit box's 12 edges (24 endpoints), for the mesh / union outlines. */
@@ -95,12 +103,68 @@ const PARTS_ORDER = 1000;
  * cut: solids darker (their own color, shade 0.45), see-through parts their full color and less see-through (SEE_THROUGH
  * cap: half way to opaque), so walls cut by the band stand out in the top-down view.
  */
-function withCap(material: THREE.MeshLambertMaterial, shade: number, opaque: number): THREE.MeshLambertMaterial {
-	const cap = `if (!gl_FrontFacing) { outgoingLight = diffuseColor.rgb * ${shade.toFixed(3)}; diffuseColor.a = mix(diffuseColor.a, 1.0, ${opaque.toFixed(3)}); }`;
+function withCap(material: THREE.MeshLambertMaterial, shade: number, opaque: number, extra: Omit<ShaderPatch, "cap"> = {}): THREE.MeshLambertMaterial {
+	return patchMaterial(material, { ...extra, cap: { shade, opaque } });
+}
+
+/** What patchMaterial adds to a Lambert material's shader. */
+export interface ShaderPatch {
+	/** Back faces drawn flat (the band's cut). */
+	cap?: { shade: number; opaque: number };
+	/** The built-in materials' look (needs the `ttMaterial` instance attribute); the uniform turns it on (1) or off (0). */
+	look?: { value: number };
+	/** The map tiled every `value` studs over the part (a MaterialVariant's ColorMap). */
+	tile?: { value: number };
+	/** A Decal / Texture quad: `ttUv` (repeat u, v, offset u, v) and `ttTint` (rgb, alpha) per instance. */
+	surface?: boolean;
+}
+
+const PLANE_GLSL = "vec2 ttPlane(vec3 p, vec3 n) { vec3 a = abs(n); return a.x > 0.5 ? p.zy : (a.y > 0.5 ? p.xz : p.xy); }";
+
+/** Patches a Lambert material's shader (cap, look, tile, surface); one program per distinct patch. */
+export function patchMaterial<M extends THREE.MeshLambertMaterial>(material: M, patch: ShaderPatch): M {
+	const cap = patch.cap ? `if (!gl_FrontFacing) { outgoingLight = diffuseColor.rgb * ${patch.cap.shade.toFixed(3)}; diffuseColor.a = mix(diffuseColor.a, 1.0, ${patch.cap.opaque.toFixed(3)}); }` : "";
+	const local = Boolean(patch.look || patch.tile);
 	material.onBeforeCompile = (shader) => {
-		shader.fragmentShader = shader.fragmentShader.replace("#include <opaque_fragment>", `${cap}\n#include <opaque_fragment>`);
+		let v = shader.vertexShader;
+		let f = shader.fragmentShader;
+		if (local) {
+			const head = ["varying vec3 vTTLocal;", "varying vec3 vTTNormal;", ...(patch.look ? ["attribute float ttMaterial;", "varying float vTTMaterial;"] : []), ...(patch.tile ? ["uniform float ttStudsPerTile;", PLANE_GLSL] : [])];
+			v = v.replace("#include <common>", `#include <common>\n${head.join("\n")}`);
+			v = v.replace(
+				"#include <begin_vertex>",
+				[
+					"#include <begin_vertex>",
+					"#ifdef USE_INSTANCING",
+					"vec3 ttScale = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));",
+					"#else",
+					"vec3 ttScale = vec3(1.0);",
+					"#endif",
+					"vTTLocal = position * ttScale;",
+					"vTTNormal = normal;",
+					...(patch.look ? ["vTTMaterial = ttMaterial;"] : []),
+					...(patch.tile ? ["#ifdef USE_MAP", "vMapUv = ttPlane(vTTLocal, normal) / max(ttStudsPerTile, 0.01);", "#endif"] : []),
+				].join("\n"),
+			);
+			if (patch.look) {
+				f = f.replace("#include <common>", `#include <common>\nvarying vec3 vTTLocal;\nvarying vec3 vTTNormal;\nvarying float vTTMaterial;\nuniform float ttLookOn;\n${MATERIAL_LOOK_GLSL}`);
+				f = f.replace("#include <color_fragment>", "#include <color_fragment>\ndiffuseColor.rgb *= mix(1.0, ttLook(vTTMaterial, vTTLocal, vTTNormal), ttLookOn);");
+				shader.uniforms.ttLookOn = patch.look;
+			}
+			if (patch.tile) shader.uniforms.ttStudsPerTile = patch.tile;
+		}
+		if (patch.surface) {
+			v = v.replace("#include <common>", "#include <common>\nattribute vec4 ttUv;\nattribute vec4 ttTint;\nvarying vec4 vTTTint;");
+			v = v.replace("#include <uv_vertex>", "#include <uv_vertex>\n#ifdef USE_MAP\nvMapUv = vec2(uv.x * ttUv.x + ttUv.z, 1.0 - ((1.0 - uv.y) * ttUv.y + ttUv.w));\n#endif\nvTTTint = ttTint;");
+			f = f.replace("#include <common>", "#include <common>\nvarying vec4 vTTTint;");
+			f = f.replace("#include <map_fragment>", "#include <map_fragment>\ndiffuseColor *= vTTTint;");
+		}
+		if (cap) f = f.replace("#include <opaque_fragment>", `${cap}\n#include <opaque_fragment>`);
+		shader.vertexShader = v;
+		shader.fragmentShader = f;
 	};
-	material.customProgramCacheKey = () => cap;
+	const key = [cap, patch.look ? "look" : "", patch.tile ? "tile" : "", patch.surface ? "surface" : ""].join("|");
+	material.customProgramCacheKey = () => key;
 	return material;
 }
 
@@ -117,12 +181,12 @@ export interface PartMaterials {
  * set), once per pixel. Both pulled toward the camera by the same polygon offset, so they match each other and win over
  * a coplanar floor.
  */
-export function partMaterials(clippingPlanes: THREE.Plane[]): PartMaterials {
+export function partMaterials(clippingPlanes: THREE.Plane[], look?: { value: number }): PartMaterials {
 	const base = { clippingPlanes, side: THREE.DoubleSide } as const;
 	// One pass for both sides (three otherwise draws a transparent double-sided material back, then front); the depth and
 	// the stencil already keep only the nearest surface.
 	const offset = { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4, forceSinglePass: true } as const;
-	const color = { solid: withCap(new THREE.MeshLambertMaterial({ ...base }), 0.45, 0) } as PartMaterials["color"];
+	const color = { solid: withCap(new THREE.MeshLambertMaterial({ ...base }), 0.45, 0, look ? { look } : {}) } as PartMaterials["color"];
 	const depth = {} as PartMaterials["depth"];
 	for (const { look, opacity, cap, bit } of SEE_THROUGH) {
 		depth[look] = new THREE.MeshBasicMaterial({ ...base, ...offset, colorWrite: false, depthWrite: true, transparent: true });
@@ -153,7 +217,18 @@ export class MapRenderer {
 	private readonly scene = new THREE.Scene();
 	private readonly world = new THREE.Group();
 	private readonly parts = new THREE.Group();
+	private readonly surfaces = new THREE.Group();
 	private readonly marks = new THREE.Group();
+	/** The built-in materials' look: 1 on, 0 off (the Textures toggle). */
+	private readonly lookOn = { value: 1 };
+	/** Loaded images by asset id (kept across rebuilds and maps). */
+	private readonly images = new Map<string, THREE.Texture>();
+	private readonly loader: ImageLoader;
+	private surfaceGroups: SurfaceGroup[] = [];
+	/** MaterialVariant materials of the current parts, by variant index (their tiling and image id). */
+	private variantMaterials = new Map<number, { material: THREE.MeshLambertMaterial; image: string }>();
+	/** Geometries the current parts own (per-bucket copies carrying instance attributes). */
+	private ownedGeometries: THREE.BufferGeometry[] = [];
 	private readonly perspective = new THREE.PerspectiveCamera(50, 1, 0.5, 20_000);
 	private readonly ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 50_000);
 	private controls: OrbitControls | MapControls;
@@ -169,7 +244,7 @@ export class MapRenderer {
 	private pickPoints: THREE.Vector3[] = [];
 	private pickCells: THREE.InstancedMesh[] = [];
 	private readonly raycaster = new THREE.Raycaster();
-	private options: SceneOptions = { mode: "3d", offset: [0, 0, 0], band: null, decorative: false, markers: false };
+	private options: SceneOptions = { mode: "3d", offset: [0, 0, 0], band: null, decorative: false, markers: false, textures: true };
 	private readonly keys = new Set<string>();
 	private flying = 0;
 	private disposed = false;
@@ -183,13 +258,14 @@ export class MapRenderer {
 		this.renderer.domElement.tabIndex = 0;
 		this.renderer.domElement.style.outline = "none";
 		host.appendChild(this.renderer.domElement);
-		this.materials = partMaterials(this.clip);
+		this.materials = partMaterials(this.clip, this.lookOn);
+		this.loader = new ImageLoader((id, blob) => this.onImage(id, blob));
 		this.outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, clippingPlanes: this.clip });
 		this.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
 		const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 		sun.position.set(0.4, 1, 0.25);
 		this.scene.add(sun);
-		this.world.add(this.parts);
+		this.world.add(this.parts, this.surfaces);
 		this.scene.add(this.world, this.marks);
 		this.ortho.up.set(0, 0, -1);
 		this.controls = this.makeControls("3d");
@@ -231,13 +307,18 @@ export class MapRenderer {
 		const geometryChanged = geometry !== this.geometry;
 		const modeChanged = options.mode !== this.options.mode;
 		const offsetChanged = options.offset.some((v, i) => v !== this.options.offset[i]);
-		const looksChanged = options.decorative !== this.options.decorative || options.markers !== this.options.markers;
+		const textures = options.textures !== false;
+		const looksChanged = options.decorative !== this.options.decorative || options.markers !== this.options.markers || textures !== (this.options.textures !== false);
 		this.geometry = geometry;
 		this.bounds = bounds;
 		this.layers = layers;
-		this.options = { ...options };
+		this.options = { ...options, textures };
+		this.lookOn.value = textures ? 1 : 0;
 		this.world.position.set(...options.offset);
-		if (geometryChanged || looksChanged) this.buildParts();
+		if (geometryChanged || looksChanged) {
+			this.buildParts();
+			this.buildSurfaces();
+		}
 		this.applyBand();
 		this.buildMarks();
 		if (modeChanged) {
@@ -255,9 +336,14 @@ export class MapRenderer {
 			if (child instanceof THREE.InstancedMesh) child.dispose();
 			else if (child instanceof THREE.LineSegments) child.geometry.dispose();
 		}
+		for (const geometry of this.ownedGeometries) geometry.dispose();
+		this.ownedGeometries = [];
+		for (const { material } of this.variantMaterials.values()) material.dispose();
+		this.variantMaterials.clear();
 		const g = this.geometry;
 		if (!g) return;
 		const toggles = { decorative: this.options.decorative, markers: this.options.markers };
+		const textures = this.options.textures !== false ? g.textures : null;
 		const buckets = new Map<string, number[]>();
 		const outlined: number[] = [];
 		for (let i = 0; i < g.count; i++) {
@@ -267,7 +353,9 @@ export class MapRenderer {
 			const kind = partKind(flags);
 			const look: Look = kind === "marker" ? "marker" : flags & FLAGS.invisible ? "wall" : t >= 0.5 ? "glassy" : "solid";
 			if (flags & (FLAGS.mesh | FLAGS.union)) outlined.push(i);
-			const key = `${Math.min(g.shape[i] as number, 4)}:${look}`;
+			// A solid part with a MaterialVariant that has a ColorMap: its own bucket (the variant's tiled image).
+			const variant = look === "solid" ? partVariant(textures, i) : -1;
+			const key = `${Math.min(g.shape[i] as number, 4)}:${look}:${variant}`;
 			let list = buckets.get(key);
 			if (!list) buckets.set(key, (list = []));
 			list.push(i);
@@ -287,8 +375,17 @@ export class MapRenderer {
 			return m.compose(p, q, s);
 		};
 		for (const [key, list] of buckets) {
-			const [shape, look] = key.split(":") as [string, Look];
-			const mesh = new THREE.InstancedMesh(this.shapes[Number(shape)] as THREE.BufferGeometry, this.materials.color[look], list.length);
+			const [shape, look, variantKey] = key.split(":") as [string, Look, string];
+			const variant = Number(variantKey);
+			let geometry = this.shapes[Number(shape)] as THREE.BufferGeometry;
+			if (look === "solid") {
+				// The material look reads each part's Material from an instance attribute: a copy of the shape per bucket.
+				geometry = geometry.clone();
+				geometry.setAttribute("ttMaterial", new THREE.InstancedBufferAttribute(Float32Array.from(list, (i) => g.material[i] as number), 1));
+				this.ownedGeometries.push(geometry);
+			}
+			const material = variant >= 0 && textures ? this.variantMaterial(variant, textures.variants[variant] as { image: string | null; studsPerTile: number }) : this.materials.color[look];
+			const mesh = new THREE.InstancedMesh(geometry, material, list.length);
 			list.forEach((i, k) => {
 				mesh.setMatrixAt(k, matrixOf(i, Number(shape)));
 				color.setRGB((g.color[i * 3] as number) / 255, (g.color[i * 3 + 1] as number) / 255, (g.color[i * 3 + 2] as number) / 255, THREE.SRGBColorSpace);
@@ -325,6 +422,84 @@ export class MapRenderer {
 			outline.renderOrder = 5;
 			this.parts.add(outline);
 		}
+	}
+
+	/** A MaterialVariant's material: the solid look with its ColorMap tiled (plain until the image arrives). */
+	private variantMaterial(index: number, variant: { image: string | null; studsPerTile: number }): THREE.MeshLambertMaterial {
+		const existing = this.variantMaterials.get(index);
+		if (existing) return existing.material;
+		const image = variant.image as string;
+		const material = withCap(new THREE.MeshLambertMaterial({ clippingPlanes: this.clip, side: THREE.DoubleSide }), 0.45, 0, { tile: { value: variant.studsPerTile > 0.01 ? variant.studsPerTile : 4 } });
+		const texture = this.images.get(image);
+		if (texture) material.map = texture;
+		this.variantMaterials.set(index, { material, image });
+		this.loader.want([image]);
+		return material;
+	}
+
+	/** Decals and Textures: one instanced quad mesh per loaded image; the rest wait for their image. */
+	private buildSurfaces(): void {
+		for (const child of [...this.surfaces.children]) {
+			this.surfaces.remove(child);
+			if (child instanceof THREE.InstancedMesh) {
+				child.dispose();
+				child.geometry.dispose();
+				(child.material as THREE.Material).dispose();
+			}
+		}
+		this.surfaceGroups = [];
+		const g = this.geometry;
+		if (!g?.textures || this.options.textures === false) return;
+		this.surfaceGroups = groupSurfaces(g, g.textures, { decorative: this.options.decorative, markers: this.options.markers });
+		for (const group of this.surfaceGroups) if (this.images.has(group.image)) this.addSurfaceMesh(group);
+		this.loader.want(this.surfaceGroups.map((group) => group.image));
+	}
+
+	private addSurfaceMesh(group: SurfaceGroup): void {
+		const texture = this.images.get(group.image);
+		if (!texture) return;
+		const plane = new THREE.PlaneGeometry(1, 1);
+		plane.setAttribute("ttUv", new THREE.InstancedBufferAttribute(group.uv, 4));
+		plane.setAttribute("ttTint", new THREE.InstancedBufferAttribute(group.tint, 4));
+		const material = patchMaterial(new THREE.MeshLambertMaterial({ map: texture, transparent: true, depthWrite: false, side: THREE.FrontSide, clippingPlanes: this.clip, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8 }), { surface: true });
+		const mesh = new THREE.InstancedMesh(plane, material, group.count);
+		mesh.instanceMatrix.array.set(group.matrices);
+		mesh.instanceMatrix.needsUpdate = true;
+		mesh.computeBoundingSphere();
+		// After the solids, before the see-through looks (glass in front of a sign tints it).
+		mesh.renderOrder = PARTS_ORDER - 100;
+		mesh.userData.image = group.image;
+		this.surfaces.add(mesh);
+	}
+
+	/** An image arrived: its surfaces get their mesh, its variants their map. */
+	private onImage(id: string, blob: Blob): void {
+		if (this.disposed || this.images.has(id)) return;
+		const url = URL.createObjectURL(blob);
+		new THREE.TextureLoader().load(
+			url,
+			(texture) => {
+				URL.revokeObjectURL(url);
+				if (this.disposed) {
+					texture.dispose();
+					return;
+				}
+				texture.colorSpace = THREE.SRGBColorSpace;
+				texture.wrapS = THREE.RepeatWrapping;
+				texture.wrapT = THREE.RepeatWrapping;
+				texture.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
+				this.images.set(id, texture);
+				for (const v of this.variantMaterials.values()) {
+					if (v.image !== id) continue;
+					v.material.map = texture;
+					v.material.needsUpdate = true;
+				}
+				for (const group of this.surfaceGroups) if (group.image === id && !this.surfaces.children.some((c) => c.userData.image === id)) this.addSurfaceMesh(group);
+				this.render();
+			},
+			undefined,
+			() => URL.revokeObjectURL(url),
+		);
 	}
 
 	private applyBand(): void {
@@ -569,8 +744,12 @@ export class MapRenderer {
 		this.renderer.domElement.removeEventListener("keyup", this.onKey);
 		this.geometry = null;
 		this.layers = [];
+		this.loader.dispose();
 		this.buildParts();
+		this.buildSurfaces();
 		this.buildMarks();
+		for (const texture of this.images.values()) texture.dispose();
+		this.images.clear();
 		for (const s of this.shapes) s.dispose();
 		for (const m of [...Object.values(this.materials.color), ...Object.values(this.materials.depth)]) m.dispose();
 		this.outlineMaterial.dispose();

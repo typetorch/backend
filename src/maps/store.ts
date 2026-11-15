@@ -14,7 +14,8 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { downloadBinaryOutput, OpenCloudError, runLuauTask } from "../opencloud.ts";
-import { type Bounds, mapBlob, parseExport, summarize, type Vec3 } from "./format.ts";
+import { noteImageIds } from "../images/store.ts";
+import { type Bounds, mapBlob, parseExport, parseTextures, RECORD_BYTES, summarize, textureImages, type Vec3 } from "./format.ts";
 import { pickMaps } from "./match.ts";
 import { exportScript, mapKey } from "./script.ts";
 
@@ -57,6 +58,16 @@ export interface StoredMap {
 	bytes: number;
 	/** Other models with the same name (not used). */
 	alternatives: string[];
+	/** Its Decals, Textures and MaterialVariant parts (plans/36 phase 5; absent: none, or exported before textures). */
+	textures?: MapTextureCounts;
+}
+
+export interface MapTextureCounts {
+	decals: number;
+	textures: number;
+	variantParts: number;
+	/** Distinct image Content strings (surfaces and color maps). */
+	images: number;
 }
 
 export interface ExportRecord {
@@ -111,6 +122,8 @@ export interface MapStoreOptions {
 	base?: string;
 	pollMs?: number;
 	retryDelayMs?: number;
+	/** Where the textures' image ids go (default: the module's noteImageIds). */
+	noteImages?: (ids: readonly string[]) => void;
 }
 
 export interface ExportInput {
@@ -119,8 +132,19 @@ export interface ExportInput {
 	placeId: number;
 	names: string[];
 	by: string;
-	/** Told when the export ends (the audit's system entry). */
+	/** Told when the export ends (the audit's system entry, then the animation pass). */
 	onDone?: (outcome: "ok" | "failed", details: Record<string, unknown>) => void;
+}
+
+/** A texture section's counts, and its image ids handed to the image store (fire and forget). */
+function textureCounts(textures: Uint8Array, parts: number, note: (ids: readonly string[]) => void): MapTextureCounts | undefined {
+	if (!textures.byteLength) return undefined;
+	const t = parseTextures(textures, parts);
+	const images = textureImages(t);
+	note(images);
+	let decals = 0;
+	for (const s of t.surfaces) if (s.kind === "decal") decals++;
+	return { decals, textures: t.surfaces.length - decals, variantParts: t.variantParts.size, images: images.length };
 }
 
 export class MapStore {
@@ -292,8 +316,8 @@ export class MapStore {
 			const entries = parseExport(bytes);
 			const picks = pickMaps(names, entries, this.index.overrides);
 			mkdirSync(this.geometryDir, { recursive: true });
-			const store = (records: Uint8Array) => {
-				const blob = mapBlob(records);
+			const store = (records: Uint8Array, textures: Uint8Array) => {
+				const blob = mapBlob(records, textures);
 				const hash = createHash("sha256").update(blob).digest("hex");
 				const file = join(this.geometryDir, `${hash}.ttmp`);
 				if (!existsSync(file)) {
@@ -301,7 +325,8 @@ export class MapStore {
 					writeFileSync(tmp, blob, { mode: 0o600 });
 					renameSync(tmp, file);
 				}
-				return { hash, bytes: blob.byteLength };
+				const counts = textureCounts(textures, records.byteLength / RECORD_BYTES, this.options.noteImages ?? noteImageIds);
+				return { hash, bytes: blob.byteLength, ...(counts ? { textures: counts } : {}) };
 			};
 			const maps: StoredMap[] = picks.maps.map((p) => ({
 				name: p.name,
@@ -309,11 +334,11 @@ export class MapStore {
 				via: p.entry.via === "override" ? "override" : "name",
 				path: p.entry.path,
 				...summarize(p.entry.records),
-				...store(p.entry.records),
 				alternatives: p.alternatives.slice(0, 10),
+				...store(p.entry.records, p.entry.textures),
 			}));
 			const lobby = entries.find((e) => e.kind === "lobby");
-			if (lobby && lobby.parts > 0) maps.push({ name: LOBBY, kind: "lobby", via: "lobby", path: lobby.path, ...summarize(lobby.records), ...store(lobby.records), alternatives: [] });
+			if (lobby && lobby.parts > 0) maps.push({ name: LOBBY, kind: "lobby", via: "lobby", path: lobby.path, ...summarize(lobby.records), alternatives: [], ...store(lobby.records, lobby.textures) });
 			const fromPath = /\/versions\/(\d+)\//.exec(task.path ?? "")?.[1];
 			const placeVersion = summary.placeVersion ?? (fromPath ? Number(fromPath) : null);
 			const record: ExportRecord = {

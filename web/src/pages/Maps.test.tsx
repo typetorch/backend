@@ -109,7 +109,7 @@ beforeEach(() => {
 		vi.fn(async (input: string, init?: RequestInit) => {
 			const url = String(input);
 			calls.push({ url, method: init?.method ?? "GET", ...(init?.body ? { body: String(init.body) } : {}) });
-			const geo = /^\/api\/v1\/maps\/([^/]+)\/geometry$/.exec(url);
+			const geo = /^\/api\/v1\/maps\/([^/]+)\/geometry\?v=2$/.exec(url);
 			if (geo) return new Response(GEOMETRY[decodeURIComponent(geo[1] as string)] as Uint8Array<ArrayBuffer>);
 			if (url === "/api/v1/maps") return Response.json(view);
 			if (url === "/api/v1/maps/export") {
@@ -181,7 +181,7 @@ describe("the Maps page", () => {
 		await waitFor(() => expect(scene().dataset.parts).toBe("2"), { timeout: 8000 });
 		fireEvent.click(screen.getByRole("button", { name: /parking_garage/ }));
 		await waitFor(() => expect(scene().dataset.parts).toBe("3"), { timeout: 8000 });
-		expect(calls.some((c) => c.url === "/api/v1/maps/parking_garage/geometry")).toBe(true);
+		expect(calls.some((c) => c.url === "/api/v1/maps/parking_garage/geometry?v=2")).toBe(true);
 		expect(screen.getByText(/Not aligned/)).toBeTruthy();
 		expect(screen.getByText(/Suggested offset: 600, 0, 0/)).toBeTruthy();
 		fireEvent.click(screen.getByRole("button", { name: "Use this offset" }));

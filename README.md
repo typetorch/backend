@@ -46,7 +46,8 @@ is the same command.
 - [Remote debug](#remote-debug) (read a live game server from the explorer; [debug bundles and offline history](#debug-bundles-and-offline-history); [Roblox server logs](#roblox-server-logs))
 - [Experience notifications](#experience-notifications) (intents from the game, the planner, the sender, signed launch data)
 - [Live events](#live-events) (scheduled live value changes, signed by the CLI; each event's lift report)
-- [Maps](#maps) (map geometry exported from the place, no Studio: the 2D minimap and the 3D map)
+- [Maps](#maps) (map geometry exported from the place, no Studio: the 2D minimap and the 3D map, with textures)
+  - [Images and animation clips](#images-and-animation-clips) (Roblox images and KeyframeSequences for textured maps and replays)
 - [Privacy](#privacy)
 - [Run it on a VPS without Docker](#run-it-on-a-vps-without-docker)
 - [Load tests](#load-tests)
@@ -642,7 +643,10 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /v1/experiments` | admin, web | the experiment overrides from `data/settings.json` (`active`, `weights`, `variant` per experiment; nothing else from the file): `{ source: "settings-file" \| "none" \| "unreadable", experiments }` |
 | `GET /v1/place` | admin, web | the game's name, live players and icon for the explorer's sidebar card, looked up by the server |
 | `GET /v1/maps`, `GET /v1/maps/<name>/geometry` | admin, web | the exported [maps](#maps) (bounds, part counts, place version, out of date, alignment) and one map's geometry (binary, with an ETag) |
-| `POST /v1/maps/export`, `PUT` / `DELETE /v1/maps/<name>/override` | admin | export the maps (a read-only Luau Execution task, audited `maps.export`; its end `maps.export.done`), a map's manual model path / offset (audited `maps.override.*`) |
+| `POST /v1/maps/export`, `PUT` / `DELETE /v1/maps/<name>/override` | admin | export the maps (a read-only Luau Execution task, audited `maps.export`; its end `maps.export.done`; then the animation pass), a map's manual model path / offset (audited `maps.override.*`) |
+| `GET /v1/images`, `GET /v1/images/<assetId>` | admin, web | [images](#images-and-animation-clips) for textured maps and replays: the store's numbers; one image (200 PNG / WebP, cached a year; 202 `{ state: "pending" }` while resolving; 404 `{ state: "blocked" \| "error" \| "unknown" }`) |
+| `GET /v1/anims`, `GET /v1/anims/<animationId>` | admin, web | [animation clips](#images-and-animation-clips): the store's numbers and the last pass; one clip (200 JSON; 404 `{ state: "pending" \| "failed" }` until exported); the id as digits or a url-encoded `rbxassetid://` |
+| `POST /v1/anims/export` | admin | runs just the animation pass (a read-only Luau Execution task, audited `anims.export`; its end `anims.export.done`) |
 | `GET /v1/roblox/products` | admin, web | game pass and developer product names, Robux prices and icons for the explorer's product tooltips, looked up by the server |
 | `GET /v1/live` | admin, web | Server-Sent Events of the event bus |
 | `GET /v1/fleet/servers`, `servers/<jobId>/metrics`, `reports`, `alerts`, `marks`, `stream` | admin, web | fleet reads (a server's TPS / memory history too; `marks`: releases, kernel publishes and backup refreshes for the charts) |
@@ -2598,10 +2602,11 @@ offset, override?, alignment: {state, samples, inside, suggestedOffset?} }], nam
 `GET /v1/maps/<name>/geometry` (the name in any spelling, or `(lobby)`): the map's binary with `ETag: "<sha256>"`
 (`If-None-Match` answers 304).
 
-**The format** (`src/maps/format.ts`; little-endian). The task's output is `TTMX`: magic `TTMX`, version u16 (1), entry
+**The format** (`src/maps/format.ts`; little-endian). The task's output is `TTMX`: magic `TTMX`, version u16 (1, or 2 with textures), entry
 count u16, then per entry kind u8 (0 map, 1 lobby), via u8 (0 name, 1 override, 2 lobby), the instance name (u8 length
 + UTF-8), the map name it was found for (u8 + UTF-8), its path (u16 + UTF-8), the part count u32 and the parts. A stored
-map is `TTMP`: magic, version u16 (1), record size u16 (48), part count u32, reserved u32, then the parts. One part is 48
+map is `TTMP`: magic, version u16 (1, or 2 with textures), record size u16 (48), part count u32, texture section bytes
+u32 (0 in version 1), then the parts (and in version 2 the texture section, below). One part is 48
 bytes:
 
 | Offset | Field | Type |
@@ -2636,8 +2641,84 @@ outline instead. A test game's hedge maze map (581 parts): drawn by default 267 
 markers.
 
 **The view in the URL** (`web/src/lib/map-view.ts`, both pages): `map`, `mode=3d`, `draw=points`, `cell`, `band`
-(`f2` = floor 2, `10..40` a free range), `decor=1`, `markers=1`, `hide` (layers off). Switching maps keeps all of it; a
-floor applies to the new map's floor of that number, and a free range that doesn't fit the new map's heights resets.
+(`f2` = floor 2, `10..40` a free range), `decor=1`, `markers=1`, `hide` (layers off), `tex=0` (textures off). Switching
+maps keeps all of it; a floor applies to the new map's floor of that number, and a free range that doesn't fit the new
+map's heights resets.
+
+**Textures** (plans/36 phase 5; the **Textures** toggle, on by default). The export also reads each part's **Decals** and
+**Textures** (its children: face, image, Color3, transparency, StudsPerTileU / V, OffsetStudsU / V, ZIndex) and its
+**MaterialVariant** (by name, or MaterialService's override for its material: the variant's name and StudsPerTile), as
+image ids only; the pixels come from the [images route](#images-and-animation-clips), and every id is queued there at the
+export. The explorer draws a Decal as a quad on its face, a Texture tiled on it (one instanced mesh per distinct image,
+so a map with 1,000+ parts and hundreds of decals stays a few dozen draw calls), and a MaterialVariant's ColorMap tiled
+over its parts when it has one; until an image arrives (202) the part keeps its plain colour, a 404 keeps it plain. Built-in
+Materials get a light procedural pattern in the shader (brick courses, planks, grass speckle, diamond plate, a fine grain
+for concrete and stone; none for plastic, neon, glass). Faces: a block's six, a wedge's slope / back / bottom, a corner
+wedge's bottom; a decal on a ball or cylinder isn't drawn; meshes and unions get their decals only when they are drawn.
+Not checked against Studio: which way a Top / Bottom decal faces (its top towards the part's front here).
+A test game (2026-11-15, place version 3635): 1,521 decals and textures and 1,296 MaterialVariant parts over 6 maps and the
+lobby, 29 distinct images, the export 5 s. **MaterialVariant ColorMaps can't be read in a Luau Execution task**
+(`ColorMap`, `ColorMapContent` and the other maps need the Plugin capability), so variant parts show their base
+material's look; the format carries the ColorMap for when that changes.
+
+The stored format gains a version 2 (below): a map with textures is stored as `TTMP` version 2 with its texture section
+after the records. `GET /v1/maps/<name>/geometry` serves version 1 (the records only, the header an explorer from before
+textures reads) unless asked `?v=2`, so an open tab from before the deploy keeps working; a map without textures stays
+version 1 byte for byte.
+
+**Texture section** (version 2; `src/maps/format.ts`, little-endian): strings u16, each u16 length + UTF-8 (Content strings
+as the place has them, e.g. `rbxassetid://123`); variants u16, each 12 bytes: name u16 (string), color map u16 (string,
+65535 = none), base material u16, flags u8 (1: the material's override), 0 u8, studs per tile f32; surfaces u32, each 32
+bytes: part u32, kind u8 (0 Decal, 1 Texture), face u8 (`Enum.NormalId`: 0 Right, 1 Top, 2 Back, 3 Left, 4 Bottom, 5
+Front), image u16 (string), color r, g, b u8, transparency x 255 u8, studs per tile U, V f32, offset U, V f32, ZIndex
+i16, 0 u16; variant parts u32, each 6 bytes: part u32, variant u16. The task's `TTMX` output is version 2 too: each
+entry's records are followed by u32 bytes + its texture section.
+
+### Images and animation clips
+
+Plans/36 (extended recording): what the textured maps and the replays draw, fetched once per game and kept on the data disk.
+
+**Images** (`src/images/store.ts`; `GET /v1/images/<assetId>`, every signed-in role). From Roblox's **public thumbnails
+API**, no key and nothing in the game: `thumbnails.roblox.com/v1/assets?assetIds=<up to 100>&size=700x700&format=Png`.
+One resolver loop per backend: at most one call a second, 100 ids a call; `Pending` (and `InReview`) retried with a
+backoff (3 s doubling, at most a minute, 10 tries), a 429 / 5xx / no answer backs the whole loop off (Retry-After, else 2 s
+doubling up to 5 min). A `Completed` id's image is downloaded once from its CDN URL (https on `*.rbxcdn.com` only, no
+redirects, at most 4 MB, the type sniffed from the bytes: PNG, WebP or JPEG) and stored as `<data dir>/images/<id>.png`;
+an asset id's pixels never change, so it is never fetched again and the route serves it with
+`Cache-Control: private, max-age=31536000, immutable`. `Blocked`, `Error` and ids the API never answers for are kept as
+404 states (`<data dir>/images/index.json`, at most 50,000 remembered) and asked again only when something asks for them
+after a week (blocked) or a day. The queue holds at most 5,000 ids. Ids come from the route (an unknown id is queued,
+202), the map export's textures, and the replay decoders through `noteImageIds(ids)` (`src/images/store.ts`, which also
+exports `assetIdOf(content)`: `rbxassetid://123`, `123`, `http(s)://www.roblox.com/asset/?id=123`, `rbxthumb://type=Asset&id=123`).
+Image and clip reads are capped at 1,200 a minute per address. A test (2026-11-15): a test game's decal ids answer
+`Pending` first and `Completed` a few seconds later; 700 px PNGs with transparency, aspect kept (350 x 700).
+
+**Animation clips** (`src/anims/`; `GET /v1/anims/<id>`, every signed-in role). The replay decoders note every animation id
+the recordings play (`noteAnimationIds(ids)`, `src/anims/store.ts`; a GET of an unknown id notes it too). The
+**animation pass** loads the ids not exported yet (at most 300 a pass, oldest first) plus Roblox's default R6
+animations (idle 180435571 and 180435792, walk / run 180426354, jump 125750702, fall 180436148, climb 180436334, sit
+178130996, toolnone 182393478) in a read-only Luau Execution task: `KeyframeSequenceProvider:GetKeyframeSequenceAsync`
+in a pcall, 8 at a time, 120 s of loading then the rest skipped for the next pass; every Keyframe's Poses (nested), their
+CFrame as a quaternion and a position, easing and weight (`TTAN`, `src/anims/format.ts`). It runs right after every
+successful map export and on its own through `POST /v1/anims/export` (owners, audited; 409 while one runs, 429 within 30
+s of the last); it needs the map export's key and scope. Each clip is stored as `<data dir>/anims/clips/<id>.json`
+(never exported again); a failed load is kept with its error and tried again a day later. The clip:
+
+```json
+{ "id": "180426354", "length": 0.667, "looped": true, "priority": "Core", "rig": "R6",
+  "keyframes": [{ "t": 0, "poses": { "Torso": [0, 0, 0, 1], "Left Leg": [0.1, 0, 0, 0.995] },
+                  "positions": { "Torso": [0, 0.1, 0] }, "easing": { "Left Leg": ["Cubic", "InOut"] } }],
+  "joints": { "Torso": "RootJoint", "Head": "Neck", "Left Arm": "Left Shoulder", "Right Arm": "Right Shoulder",
+              "Left Leg": "Left Hip", "Right Leg": "Right Hip" },
+  "exportedAt": 1763200000000 }
+```
+
+A pose's name is the Motor6D's Part1 (Roblox's KeyframeSequence convention); `joints` names the Motor6D for the poses a
+standard R6 or R15 rig has (R15: `LowerTorso` Root, `UpperTorso` Waist, `Head` Neck, `LeftUpperArm` LeftShoulder,
+`LeftLowerArm` LeftElbow, `LeftHand` LeftWrist, `LeftUpperLeg` LeftHip, `LeftLowerLeg` LeftKnee, `LeftFoot` LeftAnkle, and
+the right side). Weight-0 poses are left out; `positions` only where not zero, `easing` only where not Linear. A test game
+(2026-11-15, place version 3635): all 8 default R6 animations and 3 of the game's own (group-owned) animations loaded in
+one 6 s task, 117 KB.
 
 ## Player feedback
 

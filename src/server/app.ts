@@ -166,6 +166,9 @@ import { AFTER_DAYS_MAX, WEEKS_MAX, buildLiftReport, planLiftWindows, type LiftR
 import { getDataStoreEntry } from "../opencloud.ts";
 import { MapStore } from "../maps/store.ts";
 import { MapsRoutes } from "./maps.ts";
+import { AnimStore, animStore, installAnimStore } from "../anims/store.ts";
+import { ImageStore, imageStore, installImageStore } from "../images/store.ts";
+import { handleAssets, isAssetsPath, startAnimPass } from "./assets.ts";
 import type { MapPositionsResult } from "../queries/maps.ts";
 import type { LiveEventLiftResult } from "../queries/live-event-lift.ts";
 import { GeoIpUpdater } from "./geoip.ts";
@@ -178,7 +181,7 @@ import { randomBytes } from "node:crypto";
 export interface AppOptions {
 	clock?: () => number;
 	log?: (line: string) => void;
-	/** Don't start the loader / nightly / sweep timers (tests drive them). */
+	/** Don't start the loader / nightly / sweep timers, nor the image resolver's (tests drive them). */
 	manualJobs?: boolean;
 	/** The fetch for outgoing calls: Open Cloud, the alert webhook, Roblox sign-in, Roblox profiles. */
 	fetch?: typeof fetch;
@@ -191,7 +194,7 @@ export interface AppOptions {
 	reportSleep?: (ms: number) => Promise<void>;
 	/** Reads the data disk's free and total bytes (server/disk.ts; tests pass a fake). */
 	diskUsage?: (path: string) => DiskUsage | null;
-	/** The map export's waits (tests pass fast ones; maps/store.ts). */
+	/** The map export's waits (tests pass fast ones; maps/store.ts); the animation pass uses the same. */
 	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
 	/** The migration job's knobs (tests: small pages, no waits; server/migrate.ts). */
 	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries" | "basin">>;
@@ -234,6 +237,10 @@ export interface App {
 	readonly backups: Backups;
 	/** Exported map geometry and the export (plans/33; maps/store.ts). */
 	readonly maps: MapStore;
+	/** Roblox images for the textured maps and replays (plans/36 phase 5; images/store.ts). */
+	readonly images: ImageStore;
+	/** Animation clips for the replays (plans/36 "The clips"; anims/store.ts). */
+	readonly anims: AnimStore;
 	/** The data disk's free space and its warning level (server/disk.ts). */
 	readonly disk: DiskWatch;
 	/** Plans/25: remote debug (watches, commands, answers in memory). Undefined without the fleet part. */
@@ -734,20 +741,37 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const robloxPlace = new RobloxPlace({ clock, ...(options.fetch ? { fetch: options.fetch } : {}) });
 	const placeLimiter = new RateLimiter(PROFILE_PER_MINUTE, clock);
 	// Plans/33: exported map geometry (data/maps) and the read-only Luau Execution export (OPENCLOUD_API_KEY).
-	const maps = new MapStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...options.mapExport });
+
+	// Plans/36: images from Roblox's public thumbnails API (data/images) and animation clips (data/anims, the animation
+	// pass after each map export). The modules' noteImageIds / noteAnimationIds reach these stores.
+	const images = new ImageStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.manualJobs ? { auto: false } : {}) });
+	const anims = new AnimStore({ dataDir: config.dataDir, clock, log, ...(options.fetch ? { fetch: options.fetch } : {}), ...options.mapExport });
+	installImageStore(images);
+	installAnimStore(anims);
+	const maps = new MapStore({ dataDir: config.dataDir, clock, log, noteImages: (ids) => images.note(ids), ...(options.fetch ? { fetch: options.fetch } : {}), ...options.mapExport });
+	const assetsLimiter = new RateLimiter(1200, clock);
+	const animPassDone = (outcome: "ok" | "failed", details: Record<string, unknown>) => auditNow({ actor: { kind: "system", label: "animation pass" }, role: "none", via: "none", ip: "", action: "anims.export.done", outcome, details });
+	const mapsPlaceId = async (): Promise<number | null> => {
+		if (config.universeId) {
+			const { place } = await robloxPlace.get({ universeId: config.universeId });
+			if (place.placeId) return place.placeId;
+		}
+		return fleet ? await fleet.latestPlaceId() : null;
+	};
 	const mapsRoutes = new MapsRoutes({
 		store: maps,
 		clock,
 		log,
+		afterExport: (input) => {
+			try {
+				startAnimPass(anims, input, { auditDone: animPassDone });
+			} catch (error) {
+				log(`anims: no pass after the map export (${String((error as Error)?.message ?? error).slice(0, 160)})`);
+			}
+		},
 		...(options.fetch ? { fetch: options.fetch } : {}),
 		openCloud: () => (config.openCloudKey && config.universeId ? { apiKey: config.openCloudKey, universeId: config.universeId } : null),
-		placeId: async () => {
-			if (config.universeId) {
-				const { place } = await robloxPlace.get({ universeId: config.universeId });
-				if (place.placeId) return place.placeId;
-			}
-			return fleet ? await fleet.latestPlaceId() : null;
-		},
+		placeId: mapsPlaceId,
 		fleetPlaceVersion: async (placeId, since) => (fleet ? await fleet.latestPlaceVersion(placeId, since) : null),
 		positions: async (days) => {
 			if (!config.parts.has("analytics") || !warehouse) return null;
@@ -3169,6 +3193,22 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 					auditDone: (outcome, details) => auditNow({ actor: { kind: "system", label: "map export" }, role: "none", via: "none", ip: "", action: "maps.export.done", outcome, details }),
 				});
 			}
+			if (isAssetsPath(path)) {
+				return handleAssets(
+					req,
+					path,
+					ip,
+					{
+						manage: () => {
+							const admin = manage();
+							return admin instanceof Response ? admin : actorOf(admin).who;
+						},
+						note: (n) => noteAudit(req, n),
+						auditDone: animPassDone,
+					},
+					{ images, anims, limiter: assetsLimiter, openCloud: () => (config.openCloudKey && config.universeId ? { apiKey: config.openCloudKey, universeId: config.universeId } : null), placeId: mapsPlaceId },
+				);
+			}
 			if (path === "/v1/roblox/products") return method === "GET" ? productInfo(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/analytics/acquisition") return method === "GET" ? acquisition(url, ip) : json(405, { error: "GET only" });
 			if (path === "/v1/roblox/demographics") return method === "GET" ? robloxDemographics(url, ip) : json(405, { error: "GET only" });
@@ -3542,6 +3582,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		live.stop();
 		remoteDebug?.stop();
 		geoip.stop();
+		images.stop();
+		anims.stop();
+		if (imageStore() === images) installImageStore(null);
+		if (animStore() === anims) installAnimStore(null);
 		const drainUntil = Date.now() + STOP_DRAIN_MS;
 		while (inflight > 0 && Date.now() < drainUntil) await new Promise((done) => setTimeout(done, 20));
 		await served.stop();
@@ -3590,6 +3634,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		audit,
 		backups,
 		maps,
+		images,
+		anims,
 		disk,
 		backupTick,
 		diskTick,
