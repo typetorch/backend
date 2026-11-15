@@ -8,7 +8,8 @@
  *   game      POST /v1/fleet/results                        { j, results: [{ id, ok, json?, error?, ms?, redacted? }] }
  *   explorer  GET  /v1/fleet/servers/<job>/commands/<id>   the answer (only for whoever queued it)
  *
- * v1 is READ-ONLY: the op table below is the allow-list (the kernel and the framework keep their own). Results can hold
+ * v1 is READ-ONLY: the op table below is the allow-list (the kernel and the framework keep their own). Plans/34 adds
+ * game-defined ops (`game.<name>`), accepted only for a job that declared them (read-only is the game's promise). Results can hold
  * player names, logs and state: they live in MEMORY only (never on disk, the bus, /v1/live or a log line) and are
  * dropped a few minutes after they arrive. Every queued command is audit-logged (who, op, job, an args summary; never a
  * result, never a player's UserId).
@@ -152,13 +153,42 @@ export const OPS: Record<string, { check(args: Args): Args; summary(args: Args):
 	},
 };
 
-/** Checks an op and its args; returns the args to send. Throws RemoteDebugInputError. */
-export function checkCommand(op: unknown, args: unknown): { op: string; args: Args } {
-	if (typeof op !== "string" || !Object.hasOwn(OPS, op)) throw new RemoteDebugInputError(`unknown op ${JSON.stringify(String(op).slice(0, 40))}: v1 is read-only (${Object.keys(OPS).join(", ")})`);
+/** Plans/34: a game-defined command's args at most (JSON). */
+export const GAME_ARGS_MAX = 2 * 1024;
+/** Plans/34: game-defined ops are `game.<name>`, the name as the game declared it. */
+const GAME_OP = /^game\.([a-z][a-z0-9_]{0,31})$/;
+
+/** The op is a game-defined one (`game.<name>`): its name, else undefined. */
+export function gameCommandName(op: unknown): string | undefined {
+	return typeof op === "string" ? GAME_OP.exec(op)?.[1] : undefined;
+}
+
+/**
+ * Checks an op and its args; returns the args to send. Throws RemoteDebugInputError. A game-defined op (`game.<name>`)
+ * passes only when `declared(name)` says the server declared it (plans/34); its args are any JSON object of at most
+ * GAME_ARGS_MAX bytes (the game checks them).
+ */
+export function checkCommand(op: unknown, args: unknown, declared: (name: string) => boolean = () => false): { op: string; args: Args } {
+	const game = gameCommandName(op);
+	if (game !== undefined) {
+		if (!declared(game)) throw new RemoteDebugInputError(`${op} is not declared by this server (its game registers the commands it answers; see the Game tab)`);
+		if (args !== undefined && args !== null && !isRecord(args)) throw new RemoteDebugInputError("args must be an object");
+		const raw = (args ?? {}) as Args;
+		if (JSON.stringify(raw).length > GAME_ARGS_MAX) throw new RemoteDebugInputError(`args over ${GAME_ARGS_MAX} bytes`);
+		return { op: op as string, args: raw };
+	}
+	if (typeof op !== "string" || !Object.hasOwn(OPS, op)) throw new RemoteDebugInputError(`unknown op ${JSON.stringify(String(op).slice(0, 40))}: v1 is read-only (${Object.keys(OPS).join(", ")}, or a game.<name> the server declared)`);
 	if (args !== undefined && args !== null && !isRecord(args)) throw new RemoteDebugInputError("args must be an object");
 	const raw = (args ?? {}) as Args;
 	if (JSON.stringify(raw).length > ARGS_MAX) throw new RemoteDebugInputError(`args over ${ARGS_MAX} bytes`);
 	return { op, args: OPS[op].check(raw) };
+}
+
+/** The audit's view of a command's args: the allow-list's summary, or for a game-defined op only how many args (never their values). */
+function auditSummary(op: string, args: Args): string {
+	if (Object.hasOwn(OPS, op)) return OPS[op].summary(args);
+	const n = Object.keys(args).length;
+	return `game-defined${n ? `, ${n} arg${n === 1 ? "" : "s"}` : ""}`;
 }
 
 export type CommandState = "queued" | "sent" | "done" | "failed" | "expired";
@@ -230,6 +260,8 @@ export interface RemoteDebugOptions {
 	log?: (line: string) => void;
 	/** Random ids (tests pass a counter). */
 	newId?: () => string;
+	/** Plans/34: whether `job` declared the game command `name` (live-debug.ts hasCommand); none = no game.* op passes. */
+	gameCommand?: (job: string, name: string) => boolean;
 }
 
 interface Waiter {
@@ -298,7 +330,7 @@ export class RemoteDebugHub {
 	 * "not_watched" (409: watch first), "busy" (429: PENDING_MAX waiting).
 	 */
 	enqueue(job: string, op: unknown, args: unknown, caller: Caller, ip = ""): CommandView | "not_watched" | "busy" {
-		const checked = checkCommand(op, args);
+		const checked = checkCommand(op, args, (name) => this.options.gameCommand?.(job, name) ?? false);
 		this.sweep();
 		if (!this.isWatched(job)) return "not_watched";
 		if (this.pending(job).length >= PENDING_MAX) return "busy";
@@ -321,7 +353,7 @@ export class RemoteDebugHub {
 		// A command means the page is open: the watch (and so the kernel's poll) lasts WATCH_MS from now at least.
 		const watched = this.watches.get(job);
 		if (watched) watched.until = Math.max(watched.until, now + WATCH_MS);
-		this.audit({ at: now, who: command.owner, ip, op: command.op, job, args: OPS[command.op].summary(command.args), id: command.id });
+		this.audit({ at: now, who: command.owner, ip, op: command.op, job, args: auditSummary(command.op, command.args), id: command.id });
 		this.trim();
 		// A held poll answers at once.
 		const waiter = this.waiters.get(job);

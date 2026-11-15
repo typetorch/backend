@@ -104,6 +104,11 @@ export interface ServerInfo {
 	 * unknown (no database, not looked up yet, or a private address).
 	 */
 	location?: ServerLocation | null;
+	/**
+	 * Fleet API only, plans/34: the game's custom column values from its latest heartbeat (`cv`: name -> string, number,
+	 * bool or null); null when the game declares none. The Fleet page's Columns button shows them (GET /v1/fleet/columns).
+	 */
+	cv?: Record<string, string | number | boolean | null> | null;
 }
 
 /** A server's location (city level at best). */

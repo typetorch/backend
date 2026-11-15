@@ -37,6 +37,9 @@ export const WAKE_SHOWN_MS = 30_000;
 /** One publish at most (no retry: a publish that went through twice would deliver twice; the heartbeat is the backup). */
 export const WAKE_TIMEOUT_MS = 10_000;
 
+/** Plans/34: at most one live map wake (`{"k":"lm"}`, every server) this often. */
+export const LIVE_MAP_WAKE_GAP_MS = 30_000;
+
 /** What `wake` did: published now, one went out for this job lately, the global cap stopped it, or wake is off. */
 export type WakeResult = "sent" | "recent" | "limited" | "off";
 
@@ -57,6 +60,11 @@ export function wakeMessage(job: string): string {
 	return JSON.stringify({ k: "rd", j: job });
 }
 
+/** Plans/34: the live map wake, `{"k":"lm"}`: every server that hears it posts its positions (kernels before 0.6.0 ignore it). */
+export function liveMapWakeMessage(): string {
+	return JSON.stringify({ k: "lm" });
+}
+
 export class RemoteDebugWaker {
 	/** Both the key and the universe are set. */
 	readonly enabled: boolean;
@@ -68,6 +76,7 @@ export class RemoteDebugWaker {
 	private readonly sentAt: number[] = [];
 	private readonly inflight = new Set<Promise<void>>();
 	private limitLoggedAt = -Infinity;
+	private liveMapAt = -Infinity;
 
 	constructor(private readonly options: RemoteDebugWakerOptions = {}) {
 		this.clock = options.clock ?? Date.now;
@@ -94,20 +103,47 @@ export class RemoteDebugWaker {
 			this.stats.recent++;
 			return "recent";
 		}
-		if (this.sentAt.length >= WAKE_PER_MINUTE) {
-			this.stats.limited++;
-			if (now - this.limitLoggedAt >= 60_000) {
-				this.limitLoggedAt = now;
-				this.options.log?.(`remote debug wake: ${WAKE_PER_MINUTE} wakes went out in the last minute; the next watched servers start polling at their heartbeat`);
-			}
-			return "limited";
-		}
+		if (this.capped(now)) return "limited";
 		this.sentAt.push(now);
 		const entry = { at: now, failed: false };
 		this.jobs.set(job, entry);
-		const running: Promise<void> = this.publish(job, entry).finally(() => this.inflight.delete(running));
-		this.inflight.add(running);
+		this.start(wakeMessage(job), `for ${job}`, entry);
 		return "sent";
+	}
+
+	/**
+	 * Plans/34: the /live page's watch started: one `{"k":"lm"}` wake to every server, at most one per
+	 * LIVE_MAP_WAKE_GAP_MS, inside the same WAKE_PER_MINUTE cap. Fire and forget like `wake`.
+	 */
+	wakeLiveMap(): WakeResult {
+		if (!this.enabled) return "off";
+		const now = this.clock();
+		this.prune(now);
+		if (now - this.liveMapAt < LIVE_MAP_WAKE_GAP_MS) {
+			this.stats.recent++;
+			return "recent";
+		}
+		if (this.capped(now)) return "limited";
+		this.sentAt.push(now);
+		this.liveMapAt = now;
+		this.start(liveMapWakeMessage(), "for the live map", { failed: false });
+		return "sent";
+	}
+
+	/** The WAKE_PER_MINUTE cap is reached (counted and logged once a minute). */
+	private capped(now: number): boolean {
+		if (this.sentAt.length < WAKE_PER_MINUTE) return false;
+		this.stats.limited++;
+		if (now - this.limitLoggedAt >= 60_000) {
+			this.limitLoggedAt = now;
+			this.options.log?.(`remote debug wake: ${WAKE_PER_MINUTE} wakes went out in the last minute; the next watched servers start polling at their heartbeat`);
+		}
+		return true;
+	}
+
+	private start(message: string, what: string, entry: { failed: boolean }): void {
+		const running: Promise<void> = this.publish(message, what, entry).finally(() => this.inflight.delete(running));
+		this.inflight.add(running);
 	}
 
 	/** A wake went out for `job` lately and didn't fail: the server should be polling in a moment. */
@@ -121,14 +157,14 @@ export class RemoteDebugWaker {
 		while (this.inflight.size) await Promise.allSettled([...this.inflight]);
 	}
 
-	private async publish(job: string, entry: { failed: boolean }): Promise<void> {
+	private async publish(message: string, what: string, entry: { failed: boolean }): Promise<void> {
 		const apiKey = this.options.apiKey as string;
 		try {
 			await publishMessage({
 				apiKey,
 				universeId: this.options.universeId as number,
 				topic: WAKE_TOPIC,
-				message: wakeMessage(job),
+				message,
 				timeoutMs: WAKE_TIMEOUT_MS,
 				...(this.options.fetch ? { fetch: this.options.fetch } : {}),
 				...(this.options.base ? { base: this.options.base } : {}),
@@ -143,7 +179,7 @@ export class RemoteDebugWaker {
 				.join("<redacted>")
 				.replace(/[\u0000-\u001f\u007f]/g, " ")
 				.slice(0, 300);
-			this.options.log?.(`remote debug wake for ${job} failed (the server starts polling at its next heartbeat): ${text}`);
+			this.options.log?.(`remote debug wake ${what} failed (the server starts polling at its next heartbeat): ${text}`);
 		}
 	}
 
