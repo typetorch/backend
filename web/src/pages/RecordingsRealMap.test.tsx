@@ -146,7 +146,7 @@ beforeEach(() => {
 		vi.fn(async (input: string) => {
 			const url = String(input);
 			if (url === "/api/v1/maps") return Response.json(viewWith(maps));
-			if (/\/geometry$/.test(url)) return new Response(ttmp([{ pos: [810, -1, 10], size: [60, 2, 60] }, { pos: [800, 10, 10], size: [2, 20, 60], flags: 12, t: 1 }]) as Uint8Array<ArrayBuffer>);
+			if (/\/geometry(\?v=2)?$/.test(url)) return new Response(ttmp([{ pos: [810, -1, 10], size: [60, 2, 60] }, { pos: [800, 10, 10], size: [2, 20, 60], flags: 12, t: 1 }]) as Uint8Array<ArrayBuffer>);
 			return new Response("{}", { status: 404 });
 		}),
 	);
