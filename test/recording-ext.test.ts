@@ -259,6 +259,9 @@ describe("tt-ext-1 decoding", () => {
 		const x = decodeTtExt1([c.row(0, T0)], T0, { ...EXT_LIMITS, poses: 5 });
 		expect(x.poses).toHaveLength(5);
 		expect(x.truncated).toBe(true);
+		const big = decodeTtExt1([c.row(0, T0), c.row(1, T0 + 10_000)], T0, { ...EXT_LIMITS, bytes: c.finish().length + 10 });
+		expect(big.truncated).toBe(true);
+		expect(big.poses).toHaveLength(20);
 	});
 
 	test("rows of other codecs are ignored; no rows: an empty timeline", () => {

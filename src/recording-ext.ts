@@ -488,10 +488,12 @@ export interface ExtLimits {
 	uiNodes: number;
 	uiChanges: number;
 	views: number;
+	/** Packed bytes decoded per session (the decode is synchronous: this bounds its time). */
+	bytes: number;
 }
 
 /** Caps on one session's timeline (a replay response stays a few MB at most). */
-export const EXT_LIMITS: ExtLimits = { poses: 150_000, moves: 200_000, entities: 4000, anims: 20_000, uiNodes: 20_000, uiChanges: 150_000, views: 20_000 };
+export const EXT_LIMITS: ExtLimits = { poses: 150_000, moves: 200_000, entities: 4000, anims: 20_000, uiNodes: 20_000, uiChanges: 150_000, views: 20_000, bytes: 16 * 1024 * 1024 };
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
@@ -877,8 +879,14 @@ export function decodeTtExt1(rows: readonly ChunkRow[], origin = 0, limits: ExtL
 	const b = new TimelineBuilder(origin, limits);
 	b.out.chunks = chunks.length;
 	let expected = chunks[0]?.chunk ?? 0;
+	let bytes = 0;
 	for (const row of chunks) {
 		if (row.chunk < expected) continue; // a duplicate row
+		bytes += Math.floor((row.data.length * 3) / 4);
+		if (bytes > limits.bytes) {
+			b.out.truncated = true;
+			break;
+		}
 		if (row.chunk > expected) b.gap(row.chunk - expected);
 		expected = row.chunk + 1;
 		let chunk: ExtChunk;
