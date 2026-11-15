@@ -7,16 +7,18 @@
  *     world cells or points. Heights: the cell's recorded average (recording layers carry it), else the floor under the
  *     cell from the geometry, else the renderer's floor. A 2D click picks the cell under it.
  *   - Replay: the path as a path layer, the current position as a point, the camera's direction as a cone.
- * The switches (Points / Heatmap, 2D / 3D, the cell size) live in the URL (lib/map-view.ts).
+ * The switches (Points / Heatmap, 2D / 3D, the cell size) and the height band (All, floors, a from / to range, and in a
+ * replay "Follow player", its default: roofs above the player are cut away) live in the URL (lib/map-view.ts).
  */
 import { useQuery } from "@tanstack/react-query";
 import { Box, Map as MapIcon } from "lucide-react";
-import { lazy, Suspense, useMemo } from "react";
+import { lazy, Suspense, useEffect, useMemo } from "react";
 import { LoadingBlock } from "@/components/common";
 import { ToggleChip } from "@/components/ToggleChip";
+import { BandControls } from "@/components/maps/BandControls";
 import { usePageParams } from "@/lib/hooks";
-import { mapViewPatch, readMapView, type MapViewState } from "@/lib/map-view";
-import { CELL_SIZES, exportFor, floorUnder, MAPS_KEY, mapsApi, recordingLayer, ROOT_HEIGHT, type CellSize, type MapGeometry, type MapInfo, type MapLayer } from "@/lib/maps";
+import { bandFits, bandParam, mapViewPatch, readMapView, resolveBand, type BandChoice, type MapViewState } from "@/lib/map-view";
+import { CELL_SIZES, detectFloors, exportFor, floorUnder, MAPS_KEY, mapsApi, recordingLayer, ROOT_HEIGHT, type CellSize, type MapGeometry, type MapInfo, type MapLayer } from "@/lib/maps";
 import type { RecFrame, RecMapLayer } from "@/lib/types";
 import { layerColor, layerName } from "./map";
 import type { ReplayScene } from "./ReplayPlayer";
@@ -96,16 +98,57 @@ export function ViewSwitches({ real, draw = true, cell, autoCell }: { real: bool
 	);
 }
 
-/** The scene on the real map, once its geometry loads (an error falls back to `fallback`). */
-function Scene({ info, layers, onPick, label, fallback }: { info: MapInfo; layers: MapLayer[]; onPick?: (p: { x: number; z: number }) => void; label: string; fallback: React.ReactNode }) {
-	const [state] = useMapView();
+/**
+ * The band the URL asks for on this page: a replay (`feetY` given, null while the player's height is unknown) follows
+ * the player unless the URL names a band (`band=all` for everything); elsewhere "player" means all.
+ */
+export function bandChoiceFor(raw: string | null, choice: BandChoice, replay: boolean): BandChoice {
+	if (replay) return raw === null ? { kind: "player" } : choice;
+	return choice.kind === "player" ? { kind: "all" } : choice;
+}
+
+/** The feet height to follow: the lowest root height of the last 1.5 s played (a jump doesn't pull the cut up). */
+export function followFeet(scene: ReplayScene): number | null {
+	const passed = scene.passed;
+	const last = passed[passed.length - 1];
+	if (!last) return scene.pose?.y === null || scene.pose?.y === undefined ? null : scene.pose.y - ROOT_HEIGHT;
+	const since = (last.t ?? 0) - 1500;
+	let low = Number.POSITIVE_INFINITY;
+	for (let i = passed.length - 1; i >= 0; i--) {
+		const p = passed[i] as (typeof passed)[number];
+		if ((p.t ?? 0) < since) break;
+		if (Number.isFinite(p.y)) low = Math.min(low, p.y);
+	}
+	return Number.isFinite(low) ? low - ROOT_HEIGHT : null;
+}
+
+/** The scene on the real map, once its geometry loads (an error falls back to `fallback`), with its height controls. */
+function Scene({ info, layers, onPick, label, fallback, feetY }: { info: MapInfo; layers: MapLayer[]; onPick?: (p: { x: number; z: number }) => void; label: string; fallback: React.ReactNode; feetY?: number | null }) {
+	const [params, setParams] = usePageParams();
+	const state = readMapView(params);
 	const geometry = useMapGeometry(info);
+	const replay = feetY !== undefined;
+	const floors = useMemo(() => (geometry.data ? detectFloors(geometry.data, info.offset[1]) : []), [geometry.data, info.offset]);
+	const lo = info.bounds ? Math.floor(info.bounds.min[1] + info.offset[1]) : 0;
+	const hi = info.bounds ? Math.ceil(info.bounds.max[1] + info.offset[1]) : 100;
+	const choice = bandChoiceFor(params.get("band"), state.band, replay);
+	const band = resolveBand(choice, floors, lo, hi, feetY);
+	// A free range from another map that doesn't fit this one's heights: back to the default.
+	const misfit = choice.kind === "range" && !bandFits(choice, lo, hi);
+	useEffect(() => {
+		if (misfit) setParams({ band: null });
+	}, [misfit, setParams]);
+	// In a replay "All" has to be said out loud (absent = follow the player).
+	const setBand = (b: BandChoice) => setParams({ band: b.kind === "all" ? (replay ? "all" : null) : b.kind === "player" ? null : bandParam(b) });
 	if (geometry.error) return <>{fallback}</>;
 	return (
-		<div className="h-[min(70vh,44rem)] min-h-80" data-testid="real-map" data-map={info.name}>
-			<Suspense fallback={<LoadingBlock rows={6} />}>
-				<MapScene geometry={geometry.data ?? null} bounds={info.bounds} mode={state.mode} layers={layers} offset={info.offset} label={label} {...(onPick ? { onPick } : {})} />
-			</Suspense>
+		<div className="space-y-2">
+			<BandControls choice={choice} band={band} floors={floors} lo={lo} hi={hi} follow={replay} onChange={setBand} className="max-w-xl" />
+			<div className="h-[min(70vh,44rem)] min-h-80" data-testid="real-map" data-map={info.name} data-band={band ? band.join("..") : "all"}>
+				<Suspense fallback={<LoadingBlock rows={6} />}>
+					<MapScene geometry={geometry.data ?? null} bounds={info.bounds} mode={state.mode} layers={layers} offset={info.offset} band={band} label={label} {...(onPick ? { onPick } : {})} />
+				</Suspense>
+			</div>
 		</div>
 	);
 }
@@ -171,5 +214,7 @@ export function replayLayers(scene: ReplayScene): MapLayer[] {
 
 export function RealReplayMap({ info, scene, label, fallback }: { info: MapInfo; scene: ReplayScene; label: string; fallback: React.ReactNode }) {
 	const layers = useMemo(() => replayLayers(scene), [scene]);
-	return <Scene info={info} layers={layers} label={label} fallback={fallback} />;
+	const feet = followFeet(scene);
+	// Whole studs: the cut moves a stud at a time, not on every tick's sway.
+	return <Scene info={info} layers={layers} label={label} fallback={fallback} feetY={feet === null ? null : Math.round(feet)} />;
 }

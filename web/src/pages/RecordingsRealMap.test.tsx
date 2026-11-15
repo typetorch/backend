@@ -18,12 +18,13 @@ import Recordings from "./Recordings";
 vi.setConfig({ testTimeout: 20_000 });
 
 vi.mock("@/components/maps/MapScene", () => ({
-	default: (props: { geometry: { count: number } | null; mode: string; layers: MapLayer[]; label?: string; onPick?: (p: { x: number; z: number }) => void }) => (
+	default: (props: { geometry: { count: number } | null; mode: string; layers: MapLayer[]; label?: string; band?: [number, number] | null; onPick?: (p: { x: number; z: number }) => void }) => (
 		<div
 			data-testid="scene"
 			aria-label={props.label}
 			data-parts={props.geometry?.count ?? "none"}
 			data-mode={props.mode}
+			data-band={props.band ? props.band.join("..") : "all"}
 			data-layers={props.layers.map((l) => l.id).join(",")}
 			data-cells={JSON.stringify(props.layers.map((l) => l.cells ?? []))}
 			data-points={props.layers.map((l) => l.points?.length ?? 0).join(",")}
@@ -233,6 +234,37 @@ describe("Recordings on the real map", () => {
 		// The replay keeps the page's 2D / 3D.
 		fireEvent.click(screen.getByRole("button", { name: /3D/ }));
 		expect(scene().dataset.mode).toBe("3d");
+	});
+
+	it("the height band: the layers default to every height, the slider and floors cut it; a replay follows the player", async () => {
+		mount("/recordings?layers=path");
+		await waitFor(() => expect(scene().dataset.parts).toBe("2"), { timeout: 8000 });
+		expect(scene().dataset.band).toBe("all");
+		expect(screen.queryByRole("button", { name: "Follow player" })).toBeNull();
+		fireEvent.change(screen.getByLabelText("Band top"), { target: { value: "12" } });
+		await waitFor(() => expect(scene().dataset.band).toBe("-2..12"));
+		expect(location).toContain("band=-2..12");
+		fireEvent.click(within(screen.getByRole("group", { name: "Floors" })).getByRole("button", { name: "All" }));
+		await waitFor(() => expect(scene().dataset.band).toBe("all"));
+		expect(location).not.toContain("band=");
+
+		// The replay: Follow player by default (feet = the lowest root height of the last 1.5 s - 3, cut 9 studs above).
+		fireEvent.click(screen.getByRole("button", { name: "pick" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Replay s1" }));
+		await screen.findByTestId("replay-clock");
+		await waitFor(() => expect(scene().dataset.layers).toBe("replay-all,replay-passed,replay-cone,replay-dot"), { timeout: 8000 });
+		expect(screen.getByRole("button", { name: "Follow player" }).getAttribute("aria-pressed")).toBe("true");
+		expect(scene().dataset.band).toBe("-2..9");
+		fireEvent.change(screen.getByLabelText("Replay position"), { target: { value: "2900" } });
+		// Samples 14..29 (t 1400..2900): lowest root 4.4, feet 1.4 -> 1.
+		await waitFor(() => expect(scene().dataset.band).toBe("-2..10"));
+		// All, said out loud in a replay.
+		fireEvent.click(within(screen.getByRole("group", { name: "Floors" })).getByRole("button", { name: "All" }));
+		await waitFor(() => expect(scene().dataset.band).toBe("all"));
+		expect(location).toContain("band=all");
+		fireEvent.click(screen.getByRole("button", { name: "Follow player" }));
+		await waitFor(() => expect(scene().dataset.band).toBe("-2..10"));
+		expect(location).not.toContain("band=");
 	});
 
 	it("a picked cell is dropped when the cell size changes (its column and row belong to the old grid)", async () => {

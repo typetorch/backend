@@ -1,6 +1,6 @@
 /** The map view in the URL (lib/map-view.ts): read, write, and the Y band across maps. */
 import { describe, expect, test } from "vitest";
-import { bandFits, mapViewPatch, readBand, readMapView, resolveBand } from "./map-view";
+import { bandFits, followBand, mapViewPatch, readBand, readMapView, resolveBand } from "./map-view";
 
 const floors = [
 	{ y: 0, band: [-2, 14] as [number, number], area: 1000 },
@@ -50,5 +50,15 @@ describe("the map view in the URL", () => {
 		expect(resolveBand({ kind: "range", lo: 0, hi: 30 }, floors, -2, 60)).toEqual([0, 30]);
 		expect(resolveBand({ kind: "range", lo: 0, hi: 90 }, floors, -2, 60)).toBeNull();
 		expect(bandFits({ lo: 0, hi: 30 }, -21, 26)).toBe(false);
+	});
+
+	test("following the player: band=player, the map's bottom to 9 studs over their feet; unknown feet = all", () => {
+		expect(readBand("player")).toEqual({ kind: "player" });
+		expect(mapViewPatch({ band: { kind: "player" } }).band).toBe("player");
+		expect(followBand(16, -2)).toEqual([-2, 25]);
+		expect(followBand(-10, -2)).toEqual([-11, -1]);
+		expect(resolveBand({ kind: "player" }, floors, -2, 60, 16)).toEqual([-2, 25]);
+		expect(resolveBand({ kind: "player" }, floors, -2, 60, null)).toBeNull();
+		expect(resolveBand({ kind: "player" }, floors, -2, 60)).toBeNull();
 	});
 });
