@@ -6,6 +6,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { SlidersHorizontal } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Link, useLocation } from "react-router";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChangeChip, InfoTip } from "@/components/ChangeChip";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
@@ -21,10 +22,11 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
+import { withFilters } from "@/lib/commands";
 import { barMax, change, estimatePercentile, loadBenchmarks, saveBenchmarks, type Benchmark, type BenchmarkKey, type Benchmarks } from "@/lib/benchmarks";
 import { isoDate, type FilterState } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum, fmtPct } from "@/lib/format";
-import { groupLabel } from "@/lib/perf";
+import { DEVICE_COLORS, groupLabel } from "@/lib/perf";
 import { useAnalytics, useFilters, useParam } from "@/lib/hooks";
 import type { BenchmarkPeriod, Filters, RealtimeResult, Retention, TrendValues } from "@/lib/types";
 
@@ -439,13 +441,24 @@ function RealtimeRow({ label, info, value, current, previous, lowerIsBetter = fa
 
 function Realtime({ filters }: { filters: Filters }) {
 	const { state } = useFilters();
+	const { search } = useLocation();
 	const hours = realtimeHours(state);
 	const span = windowLabel(hours);
 	const short = hours < 48 || hours % 24 !== 0 ? `${hours} h` : `${hours / 24} d`;
 	const q = useAnalytics("realtime", { hours, ccuDays: Math.min(30, Math.max(7, Math.ceil((hours * 2) / 24))) }, { filters });
 	const live = useQuery({ queryKey: ["fleet", "servers", filters.branch ?? ""], queryFn: ({ signal }) => api.fleetServers(typeof filters.branch === "string" ? filters.branch : undefined, signal), refetchInterval: 30_000 });
 	return (
-		<Section title="Realtime" description={`Last ${span} vs the ${span} before. Follows the filter bar's date range.`}>
+		<Section
+			title="Realtime"
+			description={`Last ${span} vs the ${span} before. Follows the filter bar's date range.`}
+			actions={
+				<Button asChild variant="outline" size="sm">
+					<Link to={withFilters("/session-time", search)} title="Session time by time step and device">
+						Explore session time
+					</Link>
+				</Button>
+			}
+		>
 			<QueryState query={q} loadingRows={5}>
 				{(r) => {
 					const now = live.data?.players ?? r.ccu.now;
@@ -509,7 +522,7 @@ function Realtime({ filters }: { filters: Filters }) {
 							/>
 							<RealtimeRow
 								label="Session time"
-								info="Average length of the sessions that started in the window and are over (no event for 10 minutes; first to last event; Studio play tests left out). Running sessions count in Playtime."
+								info="Average length of the sessions that ended in the window, full length (first to last event, even when they started before it): counted when they end, as Creator Hub's Session time chart does. A session ends with a leave row or after 10 minutes without events; Studio play tests left out. Running sessions count in Playtime. Explore splits it by device and time step."
 								value={r.current.avgSessionMinutes === null ? "n/a" : fmtMinutes(r.current.avgSessionMinutes)}
 								current={r.current.avgSessionMinutes}
 								previous={r.previous.avgSessionMinutes}
@@ -547,15 +560,6 @@ function Realtime({ filters }: { filters: Filters }) {
 }
 
 // Concurrent players by device ----------------------------------------------------------------------------------------
-
-const DEVICE_COLORS: Record<string, string> = {
-	desktop: "var(--chart-1)",
-	phone: "var(--chart-2)",
-	tablet: "var(--chart-3)",
-	console: "var(--chart-4)",
-	vr: "var(--chart-5)",
-	unknown: "var(--chart-7)",
-};
 
 /** The device rows for one hour's map: names in order, 0 when absent. */
 export function deviceRows(series: RealtimeResult["devices"]["series"], names: string[], pick: "avg" | "peak", hours: number) {

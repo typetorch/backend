@@ -505,7 +505,10 @@ export interface RecMapLayer {
 
 export interface RecordingLayersResult {
 	mapKey: string;
-	maps: { map: string; samples: number; sessions: number; events: number }[];
+	/** `confirmed`: samples whose analytics zone named the map. */
+	maps: { map: string; samples: number; confirmed?: number; sessions: number; events: number }[];
+	/** Samples with any analytics zone (absent from older backends). */
+	zoned?: number;
 	map: string | null;
 	frame: RecFrame | null;
 	background: RecCell[];
@@ -810,12 +813,17 @@ export interface BenchmarksResult {
 }
 
 export interface RealtimeWindow {
+	/** Sessions that started in the window (players, newPlayers, running and playtime go by start too). */
 	sessions: number;
 	players: number;
 	newPlayers: number;
 	running: number;
 	playtimeMinutes: number;
 	playtimePerPlayer: number | null;
+	/**
+	 * Average length of the sessions that ended in the window (a leave row, or no event for 10 minutes), first to last
+	 * event, the start may be before the window: counted when they end, as Creator Hub's Session time chart does.
+	 */
 	avgSessionMinutes: number | null;
 	clientErrors: number;
 	errorsPerSession: number | null;
@@ -830,6 +838,57 @@ export interface RealtimeResult {
 	ccu: { now: number; series: { hour: string; avg: number; peak: number }[]; currentAvg: number; previousAvg: number; currentPeak: number; previousPeak: number };
 	/** Concurrent players by device class, from sessions: live now, and per hour the average and peak minute. */
 	devices: { now: Record<string, number>; names: string[]; series: { hour: string; avg: Record<string, number>; peak: Record<string, number> }[] };
+}
+
+// Session time explorer (query session-time) -------------------------------------------------------------------------
+
+export interface SessionTimeDevice {
+	sessions: number;
+	avgMinutes: number | null;
+	playtimeMinutes: number;
+}
+
+export interface SessionTimeBucket {
+	/** Bucket start (unix ms and ISO). */
+	t: number;
+	time: string;
+	sessions: number;
+	/** Weighted average length of the sessions counted in the bucket; null when empty. */
+	avgMinutes: number | null;
+	/** The unweighted mean of the device averages (unknown left out); null when empty. */
+	robloxTotal: number | null;
+	playtimeMinutes: number;
+	players: number;
+	playtimePerPlayer: number | null;
+	byDevice: Record<string, SessionTimeDevice>;
+}
+
+export interface SessionTimeSummary {
+	sessions: number;
+	players: number;
+	avgMinutes: number | null;
+	medianMinutes: number | null;
+	/** Mean over non-empty buckets of robloxTotal (Creator Hub's headline). */
+	robloxHeadline: number | null;
+	/** Mean over non-empty buckets of the weighted average. */
+	weightedMinuteMean: number | null;
+	playtimeMinutes: number;
+	playtimePerPlayer: number | null;
+	running: number;
+}
+
+export interface SessionTimeResult {
+	from: string;
+	to: string;
+	bucketMinutes: number;
+	mergeGapMinutes: number;
+	by: "end" | "start";
+	devices: string[];
+	buckets: SessionTimeBucket[];
+	summary: SessionTimeSummary;
+	previous: SessionTimeSummary;
+	histogram: { label: string; fromSeconds: number; toSeconds: number | null; count: number }[];
+	truncated: boolean;
 }
 
 export interface TrendValues {
@@ -1306,6 +1365,7 @@ export interface QueryResults {
 	benchmarks: BenchmarksResult;
 	realtime: RealtimeResult;
 	trends: TrendsResult;
+	"session-time": SessionTimeResult;
 	"perf-client": PerfSeriesResult;
 	"perf-server": PerfSeriesResult;
 	"perf-compare": PerfCompareResult;

@@ -194,11 +194,16 @@ describe("the Maps page", () => {
 	test("2D / 3D, the layer toggles, dots or heat cells", async () => {
 		wrap(OWNER);
 		await waitFor(() => expect(scene().dataset.layers).toBe("ev:custom:down,ev:custom:loot"), { timeout: 8000 });
-		expect(scene().dataset.mode).toBe("2d");
+		// 3D by default (user 2026-11-15); 2D on the switch
+		expect(scene().dataset.mode).toBe("3d");
 		expect(scene().dataset.cells).toBe("2,1");
 		expect(scene().dataset.points).toBe("0,0");
+		fireEvent.click(screen.getByRole("button", { name: /2D/ }));
+		expect(scene().dataset.mode).toBe("2d");
+		expect(location).toContain("mode=2d");
 		fireEvent.click(screen.getByRole("button", { name: /3D/ }));
 		expect(scene().dataset.mode).toBe("3d");
+		expect(location).not.toContain("mode=");
 		fireEvent.click(screen.getByRole("button", { name: /down \(5\)/ }));
 		expect(scene().dataset.layers).toBe("ev:custom:loot");
 		fireEvent.click(screen.getByRole("button", { name: /down \(5\)/ }));
@@ -267,11 +272,11 @@ describe("the Maps page", () => {
 		cleanup();
 		view = { ...VIEW, maps: [...VIEW.maps, map({ name: "Low", hash: "d".repeat(64), bounds: { min: [0, -1, 0], max: [10, 5, 10] } })] };
 		GEOMETRY.Low = ttmp([{ pos: [0, 0, 0], size: [4, 1, 4] }]);
-		wrap(OWNER, "/maps?mode=3d&band=10..20&map=Low");
+		wrap(OWNER, "/maps?mode=2d&band=10..20&map=Low");
 		await waitFor(() => expect(scene().dataset.parts).toBe("1"), { timeout: 8000 });
 		await waitFor(() => expect(location).not.toContain("band="), { timeout: 8000 });
 		expect(scene().dataset.band).toBe("all");
-		expect(location).toContain("mode=3d");
+		expect(location).toContain("mode=2d");
 	});
 
 	test("a floor choice carries to the next map's floor of the same number", async () => {
@@ -296,5 +301,17 @@ describe("the Maps page", () => {
 		expect(screen.getByTestId("alignment-source").textContent).toMatch(/recorded positions on this map \(recordings/);
 		const asked = (api.query as unknown as { mock: { calls: [string, unknown, { map?: string; layers?: string[] }][] } }).mock.calls.filter((c) => c[0] === "recording-layers");
 		expect(asked[0]?.[2]).toEqual({ map: "hedgemaze", layers: [] });
+	});
+
+	test("recordings never in the map's zone (a tutorial area while the server ran it): no offset suggested from them", async () => {
+		// 2026-11-15, gnome: every round map's samples were newcomers in the TutorialYard (x -4500), and Use this offset moved the maps there
+		view = { ...VIEW, maps: [map({ name: "HedgeMaze", bounds: { min: [641, -2, -157], max: [998, 58, 157] }, alignment: { state: "unknown", samples: 0, inside: 0 } })], names: [{ name: "hedgemaze", events: 9081 }] };
+		GEOMETRY.HedgeMaze = ttmp([{ pos: [800, -1, 0], size: [396, 2, 396] }]);
+		const background: [number, number, number][] = [];
+		for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) background.push([c, r, 50]);
+		recordings = { mapKey: "map", maps: [{ map: "hedgemaze", samples: 800, confirmed: 0, sessions: 40, events: 0 }], zoned: 5000, map: "hedgemaze", frame: { minX: -4600, minZ: -100, maxX: -4408, maxZ: 92, cell: 48, cols: 4, rows: 4 }, background, layers: [], catalog: [], sampling: {}, notes: [] };
+		wrap(OWNER);
+		await waitFor(() => expect(screen.getByTestId("alignment-unconfirmed")).toBeTruthy(), { timeout: 8000 });
+		expect(screen.queryByRole("button", { name: "Use this offset" })).toBeNull();
 	});
 });

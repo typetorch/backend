@@ -175,7 +175,7 @@ export function liveLayers(dots: readonly LiveDot[], markers: readonly MapLayer[
 	return out;
 }
 
-/** The dot nearest (x, z) within PICK_STUDS (2D), or null. */
+/** The dot nearest (x, z) within PICK_STUDS (a 2D point, or a 3D pick: MapRenderer.pickAt), or null. */
 export function nearestDot(dots: readonly LiveDot[], x: number, z: number, within = PICK_STUDS): LiveDot | null {
 	let best: LiveDot | null = null;
 	let bestD = within;

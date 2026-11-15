@@ -317,7 +317,7 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
  * The map's alignment: the backend's (positioned events, last 30 days) when it has enough of them, else the recordings'
  * positions on that map (the recording-layers query's silhouette, the filter bar's range) through the same check.
  */
-export function useAlignment(map: MapInfo, view: Pick<MapsView, "names">): { alignment: MapInfo["alignment"]; source: "events" | "recordings"; loading: boolean } {
+export function useAlignment(map: MapInfo, view: Pick<MapsView, "names">): { alignment: MapInfo["alignment"]; source: "events" | "recordings"; loading: boolean; unconfirmed: boolean } {
 	const server = map.alignment;
 	const needed = map.kind === "map" && server.state === "unknown";
 	const guess = view.names.find((n) => nameKey(n.name) === nameKey(map.name))?.name ?? map.name;
@@ -325,14 +325,19 @@ export function useAlignment(map: MapInfo, view: Pick<MapsView, "names">): { ali
 	const recorded = first.data?.maps.find((m) => nameKey(m.map) === nameKey(map.name))?.map;
 	const second = useAnalytics("recording-layers", { map: recorded, layers: [] }, { enabled: needed && recorded !== undefined && recorded !== guess });
 	const data = recorded !== undefined && recorded !== guess ? second.data : first.data;
-	const computed = useMemo(() => (data?.frame ? alignmentOf(map.bounds, recordingSamples(data.frame, data.background), map.offset) : null), [data, map.bounds, map.offset]);
-	if (!needed || !computed || computed.state === "unknown") return { alignment: server, source: "events", loading: needed && (first.isLoading || second.isLoading) };
-	return { alignment: computed, source: "recordings", loading: false };
+	// The game names its places by analytics zone, yet no recorded sample stood in this map's zone: the samples were placed on it only
+	// because the server ran it (2026-11-15, gnome: every round map's samples were newcomers in the TutorialYard and the lobby, and
+	// "Use this offset" moved all five maps onto the yard). They say nothing about where the map is: no suggestion from them.
+	const stat = data?.maps.find((m) => nameKey(m.map) === nameKey(map.name));
+	const unconfirmed = (data?.zoned ?? 0) > 0 && stat !== undefined && stat.confirmed === 0;
+	const computed = useMemo(() => (data?.frame && !unconfirmed ? alignmentOf(map.bounds, recordingSamples(data.frame, data.background), map.offset) : null), [data, map.bounds, map.offset, unconfirmed]);
+	if (!needed || !computed || computed.state === "unknown") return { alignment: server, source: "events", loading: needed && (first.isLoading || second.isLoading), unconfirmed };
+	return { alignment: computed, source: "recordings", loading: false, unconfirmed: false };
 }
 
 function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; canEdit: boolean }) {
 	const client = useQueryClient();
-	const { alignment: a, source, loading } = useAlignment(map, view);
+	const { alignment: a, source, loading, unconfirmed } = useAlignment(map, view);
 	const [path, setPath] = useState(map.override?.path ?? "");
 	const [offset, setOffset] = useState<string[]>(map.offset.map(String));
 	const save = useMutation({
@@ -355,6 +360,11 @@ function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; c
 					{loading ? " Checking the recordings…" : ""}
 					{map.offset.some((v) => v !== 0) ? ` Offset ${map.offset.join(", ")} applied.` : ""}
 				</p>
+				{unconfirmed ? (
+					<p className="text-xs text-muted-foreground" data-testid="alignment-unconfirmed">
+						The recordings never show a player inside this map's zone (their samples were only credited to it because the server ran it: a lobby or tutorial area), so they can't tell where the map is. No offset is suggested from them.
+					</p>
+				) : null}
 				{a.state === "off" && a.suggestedOffset ? (
 					<div className="space-y-1">
 						<p>Suggested offset: {a.suggestedOffset.join(", ")}</p>

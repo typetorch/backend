@@ -60,9 +60,9 @@ const day = (t: number) => Math.floor(t / DAY);
 const players = (from: number, to: number) => fx.events.filter((e) => e.pid && e.sid && e.t >= from && e.t < to);
 
 function sessions(rows: EventRow[]) {
-	const out = new Map<string, { pid: string; t0: number; t1: number; isnew: boolean; src: string }>();
+	const out = new Map<string, { sid: string; pid: string; t0: number; t1: number; isnew: boolean; src: string }>();
 	for (const e of rows) {
-		const s = out.get(e.sid as string) ?? { pid: e.pid as string, t0: e.t, t1: e.t, isnew: false, src: "unknown" };
+		const s = out.get(e.sid as string) ?? { sid: e.sid as string, pid: e.pid as string, t0: e.t, t1: e.t, isnew: false, src: "unknown" };
 		s.t0 = Math.min(s.t0, e.t);
 		s.t1 = Math.max(s.t1, e.t);
 		s.isnew ||= e.newp === true;
@@ -157,7 +157,10 @@ describe("realtime", () => {
 		const mid = NOW - 24 * HOUR;
 		const all = sessions(players(NOW - 48 * HOUR, NOW));
 		const cur = all.filter((s) => s.t0 >= mid);
-		const ended = cur.filter((s) => s.t1 < ENDED);
+		// Session time: the sessions that ended in the window (a leave row, or quiet for 10 minutes), full length, whenever they started.
+		const leftSids = new Set(fx.events.filter((e) => e.sid && e.kind === "session" && e.name === "leave").map((e) => e.sid));
+		const ended = sessions(players(NOW - 48 * HOUR - 12 * HOUR, NOW)).filter((s) => s.t1 >= mid && (leftSids.has(s.sid) || s.t1 < ENDED));
+		expect(ended.length).toBeGreaterThan(0);
 		expect(r.current.sessions).toBe(cur.length);
 		expect(r.current.avgSessionMinutes).toBeCloseTo(ended.reduce((sum, s) => sum + s.t1 - s.t0, 0) / ended.length / 60_000, 2);
 		const pids = new Set(cur.map((s) => s.pid));

@@ -64,8 +64,9 @@ export default function MapScene({ geometry, bounds, mode, layers = [], offset =
 	const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
 		const start = down.current;
 		down.current = null;
-		if (!onPick || !start || mode !== "2d" || Math.hypot(e.clientX - start.x, e.clientY - start.y) > CLICK_PX) return;
-		const at = renderer.current?.worldAt(e.clientX, e.clientY);
+		// a click, not a drag (2D pans, 3D turns): 3D picks the dot / heat cell under the pointer (MapRenderer.pickAt)
+		if (!onPick || !start || Math.hypot(e.clientX - start.x, e.clientY - start.y) > CLICK_PX) return;
+		const at = renderer.current?.pickAt(e.clientX, e.clientY);
 		if (at) onPick(at);
 	};
 
@@ -84,9 +85,9 @@ export default function MapScene({ geometry, bounds, mode, layers = [], offset =
 				onPointerMove={(e) => {
 					const at = renderer.current?.worldAt(e.clientX, e.clientY) ?? null;
 					setCursor(at);
-					if (onHover) {
+					if (onHover && e.buttons === 0) {
 						const rect = e.currentTarget.getBoundingClientRect();
-						onHover(at, { left: e.clientX - rect.left, top: e.clientY - rect.top });
+						onHover(mode === "2d" ? at : (renderer.current?.pickAt(e.clientX, e.clientY) ?? null), { left: e.clientX - rect.left, top: e.clientY - rect.top });
 					}
 				}}
 				onPointerLeave={() => {
@@ -96,7 +97,7 @@ export default function MapScene({ geometry, bounds, mode, layers = [], offset =
 			/>
 			{failed ? <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-muted-foreground">{failed}</div> : null}
 			<div className="pointer-events-none absolute bottom-2 left-2 rounded bg-background/80 px-2 py-1 text-xs text-muted-foreground tabular-nums">
-				{mode === "2d" ? (cursor ? `x ${Math.round(cursor.x)}, z ${Math.round(cursor.z)} · drag to pan, wheel to zoom` : "drag to pan, wheel to zoom · north up") : "drag to turn, right drag to pan, wheel to zoom · click, then W A S D Q E to fly"}
+				{mode === "2d" ? (cursor ? `x ${Math.round(cursor.x)}, z ${Math.round(cursor.z)} · drag to pan, wheel to zoom` : "drag to pan, wheel to zoom · north up") : `drag to turn, right drag to pan, wheel to zoom · click, then W A S D Q E to fly${onPick ? " · click a dot or a cell to pick it" : ""}`}
 			</div>
 			<button type="button" className="absolute top-2 right-2 rounded border bg-background/80 px-2 py-1 text-xs hover:bg-background" onClick={() => renderer.current?.fit()}>
 				Fit
