@@ -5,7 +5,7 @@
  */
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
-import { partMaterials, SEE_THROUGH, shapeGeometries } from "./map-renderer";
+import { partMaterials, patchMaterial, SEE_THROUGH, shapeGeometries } from "./map-renderer";
 
 describe("shapes", () => {
 	it("every triangle faces out of its shape (normal away from the shape's center)", () => {
@@ -59,5 +59,43 @@ describe("part materials", () => {
 		expect(shader.fragmentShader).toContain("if (!gl_FrontFacing) { outgoingLight = diffuseColor.rgb * 1.000; diffuseColor.a = mix(diffuseColor.a, 1.0, 0.500); }");
 		expect(m.color.marker.customProgramCacheKey()).toContain("1.0, 0.000");
 		expect(m.color.solid.customProgramCacheKey()).toContain("* 0.450");
+	});
+});
+
+describe("texture shader patches (plans/36 phase 5)", () => {
+	const lambert = () => ({ vertexShader: THREE.ShaderLib.lambert.vertexShader, fragmentShader: THREE.ShaderLib.lambert.fragmentShader, uniforms: {} as Record<string, { value: unknown }> }) as unknown as THREE.WebGLProgramParametersWithUniforms;
+
+	it("the solids' look: an instance attribute per part's Material, a uniform to switch it, the cap kept", () => {
+		const look = { value: 1 };
+		const m = partMaterials([], look);
+		const shader = lambert();
+		m.color.solid.onBeforeCompile(shader, {} as THREE.WebGLRenderer);
+		expect(shader.vertexShader).toContain("attribute float ttMaterial;");
+		expect(shader.vertexShader).toContain("vTTMaterial = ttMaterial;");
+		expect(shader.fragmentShader).toContain("float ttLook(float material, vec3 p, vec3 n)");
+		expect(shader.fragmentShader).toContain("diffuseColor.rgb *= mix(1.0, ttLook(vTTMaterial, vTTLocal, vTTNormal), ttLookOn);");
+		expect(shader.fragmentShader).toContain("if (!gl_FrontFacing)");
+		expect(shader.uniforms.ttLookOn).toBe(look);
+		// The see-through looks don't read the attribute (their meshes share the plain shapes).
+		const wall = lambert();
+		m.color.wall.onBeforeCompile(wall, {} as THREE.WebGLRenderer);
+		expect(wall.vertexShader).not.toContain("ttMaterial");
+		expect(m.color.solid.customProgramCacheKey()).not.toBe(partMaterials([]).color.solid.customProgramCacheKey());
+	});
+
+	it("a MaterialVariant tiles its map over the part in studs; a Decal / Texture quad places its map per instance", () => {
+		const tile = { value: 8 };
+		const variant = patchMaterial(new THREE.MeshLambertMaterial(), { tile });
+		const v = lambert();
+		variant.onBeforeCompile(v, {} as THREE.WebGLRenderer);
+		expect(v.vertexShader).toContain("vMapUv = ttPlane(vTTLocal, normal) / max(ttStudsPerTile, 0.01);");
+		expect(v.uniforms.ttStudsPerTile).toBe(tile);
+		const surface = patchMaterial(new THREE.MeshLambertMaterial(), { surface: true });
+		const s = lambert();
+		surface.onBeforeCompile(s, {} as THREE.WebGLRenderer);
+		expect(s.vertexShader).toContain("attribute vec4 ttUv;");
+		expect(s.vertexShader).toContain("vMapUv = vec2(uv.x * ttUv.x + ttUv.z, 1.0 - ((1.0 - uv.y) * ttUv.y + ttUv.w));");
+		expect(s.fragmentShader).toContain("diffuseColor *= vTTTint;");
+		expect(new Set([variant.customProgramCacheKey(), surface.customProgramCacheKey()]).size).toBe(2);
 	});
 });

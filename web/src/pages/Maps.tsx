@@ -229,7 +229,7 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 						<ErrorState error={geometry.error} />
 					) : (
 						<Suspense fallback={<LoadingBlock rows={6} />}>
-							<MapScene geometry={geometry.data ?? null} bounds={map.bounds} mode={mode} layers={shown} offset={map.offset} band={band} decorative={state.decorative} markers={state.markers} label={`Map ${map.name}`} />
+							<MapScene geometry={geometry.data ?? null} bounds={map.bounds} mode={mode} layers={shown} offset={map.offset} band={band} decorative={state.decorative} markers={state.markers} textures={state.textures} label={`Map ${map.name}`} />
 						</Suspense>
 					)}
 				</div>
@@ -257,6 +257,9 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 							</label>
 							<label className="flex items-center gap-2">
 								<input type="checkbox" checked={state.markers} onChange={(e) => set({ markers: e.target.checked })} /> Markers and triggers{kinds ? ` (${fmtInt(kinds.marker)})` : ""}
+							</label>
+							<label className="flex items-center gap-2">
+								<input type="checkbox" checked={state.textures} onChange={(e) => set({ textures: e.target.checked })} /> Textures{map.textures ? ` (${fmtInt(map.textures.decals + map.textures.textures)} decals and textures, ${fmtInt(map.textures.images)} images)` : ""}
 							</label>
 							<p className="text-xs text-muted-foreground" data-testid="draw-rule">
 								Drawn: every part that collides ({kinds ? `${fmtInt(kinds.collide)}, ${fmtInt(kinds.collideInvisible)} of them invisible walls, see-through` : "invisible walls see-through"}) and small visible decoration

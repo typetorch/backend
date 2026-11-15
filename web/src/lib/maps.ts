@@ -8,6 +8,7 @@
  * replays) to the same MapScene props.
  */
 import { ApiError, CSRF_HEADER } from "./api";
+import { decodeTextures, type MapTextures } from "./map-textures";
 
 // The API ---------------------------------------------------------------------------------------------------------------
 
@@ -32,6 +33,8 @@ export interface MapInfo {
 	hash: string;
 	bytes: number;
 	alternatives: string[];
+	/** Its Decals, Textures and MaterialVariant parts (absent: none, or exported before textures). */
+	textures?: { decals: number; textures: number; variantParts: number; images: number };
 	offset: Vec3;
 	override?: MapOverride;
 	alignment: { state: AlignmentState; samples: number; inside: number; suggestedOffset?: Vec3 };
@@ -123,7 +126,8 @@ export const mapsApi = {
 	/** One map's geometry, decoded. `hash` only keys the cache (the server answers by name, with the hash as its ETag). */
 	async geometry(name: string, signal?: AbortSignal): Promise<MapGeometry> {
 		const path = `/v1/maps/${encodeURIComponent(name)}/geometry`;
-		const response = await fetch(`/api${path}`, { credentials: "same-origin", ...(signal ? { signal } : {}) });
+		// v=2: the texture section too (plans/36 phase 5); a backend from before textures ignores it.
+		const response = await fetch(`/api${path}?v=2`, { credentials: "same-origin", ...(signal ? { signal } : {}) });
 		if (!response.ok) {
 			let message = `HTTP ${response.status}`;
 			try {
@@ -156,17 +160,21 @@ export interface MapGeometry {
 	material: Uint16Array;
 	shape: Uint8Array;
 	flags: Uint8Array;
+	/** Decals, Textures and MaterialVariants (version 2; null: none). */
+	textures: MapTextures | null;
 }
 
+/** Reads `TTMP` version 1 (parts) or 2 (parts, then the texture section). */
 export function decodeGeometry(bytes: Uint8Array): MapGeometry {
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const magic = String.fromCharCode(...bytes.subarray(0, 4));
 	if (bytes.byteLength < HEADER_BYTES || magic !== "TTMP") throw new Error("not map geometry (no TTMP header)");
 	const version = view.getUint16(4, true);
 	const size = view.getUint16(6, true);
-	if (version !== 1 || size !== RECORD_BYTES) throw new Error(`map geometry version ${version} (this explorer reads 1)`);
+	if ((version !== 1 && version !== 2) || size !== RECORD_BYTES) throw new Error(`map geometry version ${version} (this explorer reads 1 and 2)`);
 	const count = view.getUint32(8, true);
-	if (bytes.byteLength !== HEADER_BYTES + count * RECORD_BYTES) throw new Error("map geometry is cut short");
+	const extra = version === 2 ? view.getUint32(12, true) : 0;
+	if (bytes.byteLength !== HEADER_BYTES + count * RECORD_BYTES + extra) throw new Error("map geometry is cut short");
 	const g: MapGeometry = {
 		count,
 		position: new Float32Array(count * 3),
@@ -177,7 +185,16 @@ export function decodeGeometry(bytes: Uint8Array): MapGeometry {
 		material: new Uint16Array(count),
 		shape: new Uint8Array(count),
 		flags: new Uint8Array(count),
+		textures: null,
 	};
+	if (extra) {
+		try {
+			g.textures = decodeTextures(bytes.subarray(HEADER_BYTES + count * RECORD_BYTES), count);
+		} catch {
+			// A bad texture section: the parts still draw, plain.
+			g.textures = null;
+		}
+	}
 	for (let i = 0; i < count; i++) {
 		const o = HEADER_BYTES + i * RECORD_BYTES;
 		for (let a = 0; a < 3; a++) {
