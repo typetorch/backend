@@ -32,7 +32,7 @@ is the same command.
 - [Deploy on Coolify](#deploy-on-coolify)
 - [Audit log](#audit-log)
 - [Backups and restore](#backups-and-restore) ([Disk space](#disk-space))
-- [Move to another server](#move-to-another-server) (the export API, the migration job, the runbook)
+- [Move to another server](#move-to-another-server) (the export API, the migration job, the runbook; [to Basin and back](#move-analytics-to-basin-and-back))
 - [The event bus](#the-event-bus)
 - [Error logs](#error-logs)
 - [The explorer](#the-explorer)
@@ -149,6 +149,7 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_IP_PER_MINUTE`, `TYPETORCH_JOB_PER_MINUTE` | `6000`, `60` | Ingest rate limits per address and per JobId. |
 | `TYPETORCH_BUSY_BYTES`, `TYPETORCH_BUSY_REQUESTS` | 512 MB, `256` | [The busy 503](#limits-and-the-busy-503): ingest answers `503` + `Retry-After` while `raw/incoming` holds more than this many bytes, or more than this many ingest requests are in flight (`0` = off). Also on the Settings page. |
 | `TYPETORCH_MIGRATE_ROWS_PER_SECOND` | `20000` | The [migration job](#move-to-another-server)'s default rows per second (a `start` may name its own). |
+| `CLOUDFLARE_ACCOUNT_ID`, `BASIN_BUCKET`, `BASIN_SQL_TOKEN`, `BASIN_NAMESPACE` | unset, `typetorch` | Optional Basin SQL read settings (the `TT_BASIN_*` names work too): with them a [move to Basin](#move-analytics-to-basin-and-back) compares each day's row count in Basin. Never logged or returned. |
 | `TYPETORCH_NEW_JOBS_PER_MINUTE` | `2000` | Never-seen JobIds per minute the fleet API lets in, and (counted on their own) the error logs. |
 | `TYPETORCH_SQLITE` | `<data dir>/fleet.sqlite` | The SQLite file (fleet, identities, error logs). |
 | `TYPETORCH_GEOIP`, `TYPETORCH_GEOIP_ASN` | `dbip` in production (`NODE_ENV=production`, as in the image), else `off` | [Game server locations](#game-server-addresses-and-locations): `dbip` downloads DB-IP's free City Lite and ASN Lite databases into `<data dir>/geoip/` and refreshes them monthly; a path uses that City `.mmdb` file as it is (e.g. MaxMind GeoLite2, kept fresh by `geoipupdate`; `TYPETORCH_GEOIP_ASN` names an ASN one); `off` shows no locations. Lookups never leave the server. |
@@ -659,7 +660,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `POST /v1/admin/backups/download` | admin | a tar of a fresh backup, streamed (without the webhook URL and `instance.key`) |
 | `GET /v1/admin/stats?window=1m\|5m\|15m\|1h` | admin | the server's own metrics for the explorer's **Backend stats** page: requests, DuckDB statements, rows in and loaded, SQLite reads and writes per second (the last 10 s), request latency p50 / p90 / p99, memory, CPU and event loop lag, per second for 2 minutes and per minute for an hour, and per route group over `window` (default `5m`); `ingest: { busy, inflight, lastBusyAt }` (busy 503s since the start, ingest requests in flight) |
 | `GET /v1/admin/export/manifest`, `rows`, `hash` (`GET` or `POST`), `fleet`, `erased` | admin token only (a Bearer: not a session, not the web role) | the [export API](#the-export-api-every-backend): what a new server pulls when it [moves](#move-to-another-server); read-only, one at a time, 120 a minute |
-| `GET /v1/admin/migrate`, `POST /v1/admin/migrate` | admin | the [migration job](#the-migration-job-the-new-server): its status and per-day report; `start` / `pause` / `resume` / `cancel` (audited as `migrate.<action>`, never with the token) |
+| `GET /v1/admin/migrate`, `POST /v1/admin/migrate` | admin | the [migration job](#the-migration-job-the-new-server): its status and per-day report; `start` (from a server, from Basin, to Basin) / `pause` / `resume` / `cancel` / `resolve` (audited as `migrate.<action>`, never with a token) |
 | `GET` / `PUT /v1/notify/config`, `GET /v1/notify/status`, `PUT /v1/notify/keys`, `POST /v1/notify/test`, `POST /v1/notify/send` | admin | [experience notifications](#experience-notifications): the pushed config, the queue and switches (never a key), the signing keys, a test send (bypasses the caps), a one-off send |
 | `GET /v1/notify/user?uid=\|pid=\|name=` | admin | one player's notifications: consent (prompt checks / shown / closed, inferred state and when, mute), every send with its open and play, the intents |
 | `GET /v1/notify/recent?limit=&kind=` | admin | the newest sends of everyone (1..500, default 100), with the cached name, the player's opt-in state and the send's params |
@@ -912,23 +913,29 @@ sorted copy of a day's live rows, a page on its way out) are in `<data dir>/expo
 
 ```json
 { "action": "start", "from": { "kind": "backend", "url": "https://old.example.com", "token": "<old admin token>" }, "rowsPerSecond": 20000 }
+{ "action": "start", "from": { "kind": "basin", "accountId": "<32 hex>", "bucket": "<R2 bucket>", "token": "<BASIN_SQL_TOKEN>", "namespace": "typetorch" } }
+{ "action": "start", "to": { "kind": "basin", "events": "https://<id>.ingest.cloudflare.com", "recordings": "https://<id>.ingest.cloudflare.com", "token": "<BASIN_SEND_TOKEN>" } }
 { "action": "pause" }  { "action": "resume" }  { "action": "cancel" }
+{ "action": "resolve", "page": "<page id>", "choice": "resend" | "skip" }
 ```
+
+The Basin directions are described in [Move analytics to Basin and back](#move-analytics-to-basin-and-back).
 
 Every answer, and `GET /v1/admin/migrate`, is the status:
 
 ```json
 { "state": "idle|running|paused|waiting|done|failed|cancelled|needs_decision",
-  "direction": "from-backend", "source": { "kind": "backend", "url": "https://old.example.com" },
+  "direction": "from-backend|from-basin|to-basin",
+  "source": { "kind": "backend", "url": "https://old.example.com" } | { "kind": "basin", "bucket": "...", "namespace": "typetorch" } | { "kind": "local" },
+  "target": { "kind": "basin", "events": "...", "recordings": "..." },   (to-basin only)
   "startedAt": 0, "finishedAt": null, "rowsPerSecond": 20000, "rowsDone": 0, "rowsTotal": 0,
   "steps": [{ "name": "erased|identities|fleet|events|recordings|live|rollups|verify", "state": "pending|running|done|failed", "done": 0, "total": 0, "note": "" }],
-  "days": [{ "table": "events", "day": "2026-11-14", "state": "pending|importing|match|missing|differs|duplicates", "rowsSource": 0, "rowsTarget": 0, "note": "" }],
-  "waitingFor": null, "decision": null, "error": null }
+  "days": [{ "table": "events", "day": "2026-11-14", "state": "pending|importing|match|missing|differs|duplicates|sent", "rowsSource": 0, "rowsTarget": 0, "note": "" }],
+  "waitingFor": null, "decision": null | { "page", "table", "day", "rows", "why", "question" }, "error": null }
 ```
 
-`from.url` is https (plain http only on this machine: the token would cross the network in clear); redirects are refused.
-`from: { kind: "basin" }` and `to: { kind: "basin" }` (plans/35 B) answer `501 { error: "not built yet" }`. One job at a
-time: a second `start` while one runs, waits or is paused is `409`. `resume` also restarts a `failed` job from where it
+`from.url` (and a Basin stream URL) is https (plain http only on this machine: the token would cross the network in
+clear); redirects are refused. One job at a time: a second `start` while one runs, waits or is paused is `409`. `resume` also restarts a `failed` job from where it
 stopped. `cancel` keeps what was already imported (the old server is never touched either way). `start` again after
 `done` (same old server) takes what changed since: day files merge without duplicates, the SQLite tables go on from their
 cursors.
@@ -965,6 +972,82 @@ to be started again.
 **Visible.** The Settings page's **Migration** card (progress per step, the days still to go, the per-day report, pause /
 resume / cancel, a start form), a banner on the analytics pages ("History before <day> still importing", so a half-empty
 chart doesn't read as a traffic drop; owners only), and `typetorch backend migrate status`.
+
+## Move analytics to Basin and back
+
+Plans/35 B, on the same job: the analytics history (events and recordings) moves between this server's day files and
+Cloudflare Basin, row by row, checked per day. The fleet API (heartbeats, deploys, error logs, identities, settings) stays
+on the server either way: a Basin game still has a backend for it. Nothing is deleted on either side; Basin can't delete.
+
+**Why no row is lost or doubled at the switch.** The game sends each row to one sink: the one its signed record names
+when it flushes (game servers follow a new record within 5-55 s, and their queued rows go to the new sink). So the rows on
+the server and the rows in Basin never overlap, and the job moves *every* row the source holds, not a time range: rows
+the game sent just before the switch are on the old side only and come over with the rest.
+
+### To Basin (empty a server into Basin)
+
+1. Set up Basin ([Cloudflare Basin setup](#cloudflare-basin-setup)): the two streams, the tables, a send token.
+2. **Switch the sink first:** `typetorch backend setup --analytics basin --events <stream url> --recordings <stream url>`
+   (the send token as `BASIN_SEND_TOKEN` in the game repo's `.env`). The record keeps `backend` = this server for the
+   fleet API. From a minute later the game's analytics go to Basin; what was in flight still reaches this server.
+3. Optional, for the count check: set `CLOUDFLARE_ACCOUNT_ID`, `BASIN_BUCKET` and `BASIN_SQL_TOKEN` (and `BASIN_NAMESPACE`
+   if not `typetorch`) on this server (Coolify env) and redeploy.
+4. `typetorch backend migrate --to-basin` (the record's Basin streams unless `--events` / `--recordings`; it runs on the
+   record's `backend.url`, this server). The job **waits until this server has received no analytics row for 10 minutes**
+   and everything received is loaded (state `waiting`, saying so), so a forgotten step 2 never sends a half day.
+5. Watch `typetorch backend migrate status`. A page cut off mid-send stops it in `needs_decision` (below):
+   `typetorch backend migrate resolve <page> resend|skip`.
+6. When every day is `match` (or `sent` without read settings): keep a [backup](#backups-and-restore); the analytics part
+   can then be turned off (`TYPETORCH_PARTS=fleet`), the data folder stays.
+
+How it sends: newest day first. Each day is first copied to a stable snapshot (`<data dir>/migrate/basin/`: the day file and
+the day's live rows, erased players left out, exact duplicates collapsed as the nightly export does, sorted by every column, so
+a crash rebuilds the same file), then posted to the table's stream as JSON arrays of at most 4 MB (Basin takes 5 MB) and
+10,000 rows, the contract columns only (Basin has no `rt`), `Authorization: Bearer <send token>`. Basin can't dedupe or delete,
+so every page is written down as `sending` (with its id) **before** the POST and `sent` after the 2xx. A page still `sending`
+when the job starts again (the server stopped mid-send), or a POST that got no answer at all (a timeout: Basin may have taken
+it), puts the job in `needs_decision` with `decision: { page, table, day, rows, why }`; `resolve` with `resend` sends it again
+(nothing lost; Basin may hold it twice, and verify says so) or `skip` (nothing doubled; its rows may be missing, and verify
+says so). `429` and `5xx` are retried with backoff (Basin took nothing), as is a connection that never opened; any other
+`4xx` stops the job with the page back to unsent. Rows that reach this server after their day was sent (a game server on an
+old record) go in a later part of that day (rows with a newer `rt`; the `live` step). `erased`, `identities`, `fleet` and
+`rollups` are done as "not applicable". A second `start` to the same streams goes on where the last one stopped (days sent
+stay sent); to other streams it starts over.
+
+### From Basin (bring a Basin game's history to a server)
+
+1. The server up with the analytics part (`TYPETORCH_PARTS=analytics,fleet`, the default).
+2. **Switch the sink first:** `typetorch backend setup --analytics duckdb`. The game's analytics go to this server within a
+   minute.
+3. `typetorch backend migrate --from-basin` (`CLOUDFLARE_ACCOUNT_ID`, `BASIN_BUCKET`, `BASIN_SQL_TOKEN`, `BASIN_NAMESPACE`
+   from the game repo's `.env`; the token needs Basin SQL read, Basin Catalog read and R2 storage read). It runs on the record's
+   `backend.url`.
+4. When every day is `match`: the Basin tables can stay as a backup or go (the job only reads them).
+
+How it reads: through the Basin SQL API (no DuckDB extension, nothing downloaded). Basin SQL caps a query at 10,000 rows,
+has no OFFSET, and bills what it scans, so: one per-day count query per table (it reads `t` only); a day over five pages of
+rows is cut into time windows of about five pages (an hour histogram, a minute histogram for a big hour); inside a window,
+pages of 10,000 events (250 recording chunks) go by keyset: `ORDER BY t, h` where `h` is the md5 of every column, from the
+last `(t, h)` on, skipping the copies of the last row already taken, so exact duplicates in Basin are counted, never lost or
+read twice at a page edge (a row with more copies than a page is counted in one query). Basin rows have no `rt`: each gets
+the time this server received it, the import, as the ingest path stamps every row (a row that came twice keeps the first).
+Pages are staged and merged into the day files by the same late-row merge as a move from a server; this server's erased
+players are left out of every imported row. The `live` step waits for Basin's roll delay (10 minutes from the start: rows
+sent just before the switch become readable late); `verify` counts every day in Basin again and imports a day that grew once
+more. `erased`, `identities` and `fleet` are done as "not applicable".
+
+### What is verified
+
+| Direction | Checked per day | Not checked |
+|---|---|---|
+| From Basin | The rows read equal Basin's `COUNT(*)` for the day (counted again at the end); every row read is in the day file afterwards (an anti-join on the contract columns, without erased players); a day before this server's own rows began holds no more rows than Basin has. `match`, `missing`, `differs` (rows Basin holds that don't fit the row format are not imported and make the day `differs`). | A hash against Basin (Basin SQL can't compute DuckDB's `hash()`). Exact duplicates in Basin collapse here; the note counts the rows not kept (duplicates or erased players). |
+| To Basin, with read settings | Basin's `COUNT(*)` for the day, minus what Basin held of that day before the job sent anything, against the rows sent (polled every 30 s until it is reached or 10 minutes after the last send): `match`, `missing <n>`, `duplicates` (more rows than were sent, e.g. a resent page). Days from the start day on (the game sends to Basin too) and days Basin already had rows of are checked as a superset. | Row contents in Basin (counts only); which rows are missing or doubled. |
+| To Basin, without read settings | Each page's 2xx. The day ends `sent`. | Anything in Basin. |
+
+**Costs.** Basin SQL bills the bytes each query scans, with a 10 MB minimum per query (check Cloudflare's current price).
+From Basin: two count queries, a histogram per big day, and about one page query per 10,000 events (250 recording chunks),
+each scanning its window from the cursor on: every row is scanned a few times. `rowsPerSecond` paces it. To Basin: Pipelines
+bills what it takes in; with read settings, the verify step adds two count queries per check (they read `t` only).
 
 ## The event bus
 

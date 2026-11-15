@@ -23,6 +23,16 @@ function status(over: Partial<MigrateStatus>): MigrateStatus {
 	};
 }
 
+describe("Basin directions", () => {
+	it("from Basin: the banner names Basin; to Basin: no banner (nothing here is missing); a sent day is done", () => {
+		const days = [day("2026-11-01", "pending"), day("2026-11-02", "sent")];
+		expect(historyBannerText(status({ direction: "from-basin", source: { kind: "basin", bucket: "b", namespace: "typetorch" }, days: [day("2026-11-01", "pending")] }))).toBe("History is still importing from Basin");
+		expect(historyBannerText(status({ direction: "to-basin", source: { kind: "local" }, days }))).toBeNull();
+		expect(daysLeft(days)).toBe(1);
+		expect(sourceHost({ source: { kind: "local" } })).toBe("the old server");
+	});
+});
+
 describe("historyBannerText", () => {
 	it("names the oldest events day already done while older ones still import", () => {
 		const s = status({ days: [day("2026-11-01", "pending"), day("2026-11-02", "importing"), day("2026-11-04", "match"), day("2026-11-03", "differs"), day("2026-10-01", "match", "recordings")] });

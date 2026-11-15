@@ -15,11 +15,11 @@
  * computes the same number over its copy. Rows of erased players are left out of every answer.
  */
 import type { DuckDBConnection } from "@duckdb/node-api";
-import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { createGzip } from "node:zlib";
-import { dayFiles, dayNumber, dayString, pathLit, storedColumns } from "../duckdb/layout.ts";
+import { dayFiles, dayNumber, dayString, fieldsOf, pathLit, storedColumns } from "../duckdb/layout.ts";
 import type { FleetDb } from "../fleet/db.ts";
 import { DAY_MS, lit } from "../sql/dialect.ts";
 import { readRows } from "../store/duckdb.ts";
@@ -101,16 +101,101 @@ export async function dayStat(w: Warehouse, table: ExportTable, day: number, exc
 }
 
 /** The rows of `table` of `day` that are not in this server's copy of the day (contract columns, so a duplicate's receive time doesn't count). */
-export async function missingRows(w: Warehouse, table: ExportTable, day: number, pageFile: string, readColumns: string, contract: string): Promise<number> {
+export async function missingRows(w: Warehouse, table: ExportTable, day: number, pageFiles: string | string[], readColumns: string, contract: string): Promise<number> {
+	const list = (Array.isArray(pageFiles) ? pageFiles : [pageFiles]).filter((f) => existsSync(f) && statSync(f).size > 0);
+	if (!list.length) return 0;
 	return w.read(async (c) => {
 		const file = dayFilePath(w, table, day);
 		const inDay = `t >= ${day * DAY_MS} AND t < ${(day + 1) * DAY_MS}`;
 		const here = [`SELECT ${contract} FROM live.${table} WHERE ${inDay}`, ...(file ? [`SELECT ${contract} FROM read_parquet(${pathLit(file)})`] : [])].join(" UNION ALL ");
 		const rows = await readRows(
 			c,
-			`SELECT COUNT(*) AS n FROM (SELECT ${contract} FROM read_json([${pathLit(pageFile)}], format = 'newline_delimited', columns = ${readColumns}) r WHERE ${inDay} AND ${notErased} EXCEPT SELECT * FROM (${here}))`,
+			`SELECT COUNT(*) AS n FROM (SELECT ${contract} FROM read_json([${list.map(pathLit).join(", ")}], format = 'newline_delimited', columns = ${readColumns}) r WHERE ${inDay} AND ${notErased} EXCEPT SELECT * FROM (${here}))`,
 		);
 		return Number(rows[0]?.n ?? 0);
+	}, EXPORT_TIMEOUT_MS);
+}
+
+/**
+ * Plans/35 B (to Basin): a stable copy of one day as this server holds it (the day file and the day's live rows, without
+ * erased players; with `newerThan`, only rows received after it), exact duplicates collapsed as the nightly export does,
+ * sorted by every column, written to `out` (a temp file, renamed). The same rows always give the same file in the same
+ * order, so a page (a range of its row numbers) can be rebuilt after a crash. Returns its rows, hash and newest `rt`.
+ */
+export async function snapshotDay(w: Warehouse, table: ExportTable, day: number, out: string, newerThan?: number): Promise<{ rows: number; hash: string; maxRt: number | null }> {
+	return w.read(async (c) => {
+		const file = dayFilePath(w, table, day);
+		const inDay = `t >= ${day * DAY_MS} AND t < ${(day + 1) * DAY_MS}`;
+		const newer = newerThan === undefined ? "" : ` AND rt > ${Math.floor(newerThan)}`;
+		const parts = [`SELECT ${quoted(table)} FROM live.${table} WHERE ${inDay} AND ${notErased}${newer}`];
+		if (file) parts.push(`SELECT ${quoted(table)} FROM read_parquet(${pathLit(file)}) WHERE ${notErased}${newer}`);
+		const contract = fieldsOf(table)
+			.map((f) => `"${f.name}"`)
+			.join(", ");
+		const tmp = `${out}.tmp`;
+		rmSync(tmp, { force: true });
+		await c.run(`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${parts.join(" UNION ALL ")}) x GROUP BY ALL ORDER BY ALL) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd)`);
+		const row = (await readRows(c, `SELECT COUNT(*) AS n, CAST(COALESCE(bit_xor(hash(${quoted(table)})), 0) AS VARCHAR) AS h, MAX(rt) AS rt FROM read_parquet(${pathLit(tmp)})`))[0];
+		renameSync(tmp, out);
+		return { rows: Number(row?.n ?? 0), hash: String(row?.h ?? "0"), maxRt: row?.rt === null || row?.rt === undefined ? null : Number(row.rt) };
+	}, EXPORT_TIMEOUT_MS);
+}
+
+/** Rows of a snapshot (snapshotDay) from row `from`, at most `count`, in its order, as plain objects of the stored columns. */
+export async function snapshotRows(w: Warehouse, table: ExportTable, path: string, from: number, count: number): Promise<Record<string, unknown>[]> {
+	return w.read(
+		(c) => readRows(c, `SELECT ${quoted(table)} FROM read_parquet(${pathLit(path)}, file_row_number = true) WHERE file_row_number >= ${Math.floor(from)} AND file_row_number < ${Math.floor(from + count)} ORDER BY file_row_number`),
+		EXPORT_TIMEOUT_MS,
+	);
+}
+
+/** Rows and hash of a snapshot file (a check that a rebuilt snapshot holds the same rows). */
+export async function snapshotStat(w: Warehouse, table: ExportTable, path: string): Promise<{ rows: number; hash: string }> {
+	return w.read((c) => statOf(c, table, `read_parquet(${pathLit(path)})`, "TRUE"), EXPORT_TIMEOUT_MS);
+}
+
+/** Rows of a day (day file and live rows, without erased players) received after `newerThan` (rt). */
+export async function newerRows(w: Warehouse, table: ExportTable, day: number, newerThan: number): Promise<number> {
+	return w.read(async (c) => {
+		const file = dayFilePath(w, table, day);
+		const inDay = `t >= ${day * DAY_MS} AND t < ${(day + 1) * DAY_MS}`;
+		const where = `${notErased} AND rt > ${Math.floor(newerThan)}`;
+		let n = (await statOf(c, table, `live.${table}`, `${inDay} AND ${where}`)).rows;
+		if (file) n += (await statOf(c, table, `read_parquet(${pathLit(file)})`, where)).rows;
+		return n;
+	}, EXPORT_TIMEOUT_MS);
+}
+
+/** The newest receive time (`rt`) of this server's rows: the live tables and the day files of the last two days. */
+export async function newestRt(w: Warehouse, now: number): Promise<number | null> {
+	return w.read(async (c) => {
+		let newest: number | null = null;
+		const today = Math.floor(now / DAY_MS);
+		for (const table of EXPORT_TABLES) {
+			const sources = [`SELECT MAX(rt) AS rt FROM live.${table}`];
+			for (const day of [today, today - 1]) {
+				const file = dayFilePath(w, table, day);
+				if (file) sources.push(`SELECT MAX(rt) AS rt FROM read_parquet(${pathLit(file)})`);
+			}
+			const row = (await readRows(c, `SELECT MAX(rt) AS rt FROM (${sources.join(" UNION ALL ")}) x`))[0];
+			if (row?.rt !== null && row?.rt !== undefined) newest = Math.max(newest ?? 0, Number(row.rt));
+		}
+		return newest;
+	}, EXPORT_TIMEOUT_MS);
+}
+
+/** The days this server holds rows of (day files and live rows), with an estimate of their rows (before dedupe). */
+export async function localDays(w: Warehouse, table: ExportTable): Promise<{ day: number; rows: number }[]> {
+	return w.read(async (c) => {
+		const days = new Map<number, number>();
+		for (const file of dayFiles(table === "events" ? w.layout.events : w.layout.recordings)) {
+			const n = Number((await readRows(c, `SELECT COUNT(*) AS n FROM read_parquet(${pathLit(file.path)})`))[0]?.n ?? 0);
+			if (n) days.set(file.day, n);
+		}
+		for (const row of await readRows(c, `SELECT CAST(floor(t / ${DAY_MS}.0) AS BIGINT) AS day, COUNT(*) AS n FROM live.${table} WHERE ${notErased} GROUP BY ALL`)) {
+			days.set(Number(row.day), (days.get(Number(row.day)) ?? 0) + Number(row.n));
+		}
+		return [...days.entries()].map(([day, rows]) => ({ day, rows })).sort((a, b) => a.day - b.day);
 	}, EXPORT_TIMEOUT_MS);
 }
 

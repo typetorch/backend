@@ -193,7 +193,7 @@ export interface AppOptions {
 	/** The map export's waits (tests pass fast ones; maps/store.ts). */
 	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
 	/** The migration job's knobs (tests: small pages, no waits; server/migrate.ts). */
-	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries">>;
+	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries" | "basin">>;
 }
 
 /**
@@ -410,7 +410,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		clock,
 		log,
 		keepDays: () => runtime.get("auditKeepDays"),
-		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, ...(migration?.secrets() ?? [])],
+		secrets: () => [config.adminToken, ...config.apiKeys, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, config.basinRead?.token, ...(migration?.secrets() ?? [])],
 	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	// Scheduled live events (live-events.ts): the schedule the owner signs with the CLI, and each event's lift report.
@@ -630,6 +630,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		defaultRowsPerSecond: config.migrateRowsPerSecond,
 		loadSeconds: config.loadSeconds,
 		keepDays: () => runtime.get("keepDays"),
+		...(config.basinRead ? { basinRead: config.basinRead } : {}),
 		...(options.fetch ? { fetch: options.fetch } : {}),
 		...(options.migrate ?? {}),
 		clock,
@@ -2717,7 +2718,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		try {
 			origin = from ? new URL(from).origin : undefined;
 		} catch {}
-		noteAudit(req, { action: `migrate.${action}`, details: { ...(origin ? { from: origin } : {}), ...(isRecordLike(body.from) && typeof body.from.kind === "string" ? { kind: body.from.kind.slice(0, 16) } : {}) } });
+		noteAudit(req, {
+			action: `migrate.${action}`,
+			details: {
+				...(origin ? { from: origin } : {}),
+				...(isRecordLike(body.from) && typeof body.from.kind === "string" ? { kind: body.from.kind.slice(0, 16) } : {}),
+				...(isRecordLike(body.to) && typeof body.to.kind === "string" ? { to: body.to.kind.slice(0, 16) } : {}),
+				...(action === "resolve" && typeof body.page === "string" ? { page: body.page.slice(0, 200), choice: String(body.choice).slice(0, 8) } : {}),
+			},
+		});
 		try {
 			return json(200, await migrator.act(body));
 		} catch (error) {

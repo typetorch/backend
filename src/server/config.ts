@@ -144,6 +144,12 @@ export interface ServerConfig {
 	busyRequests: number;
 	/** Plans/35 A: the migration job's default rows per second (TYPETORCH_MIGRATE_ROWS_PER_SECOND, default 20000). */
 	migrateRowsPerSecond: number;
+	/**
+	 * Plans/35 B: Basin SQL read settings, so a move to Basin can check its per-day counts there: CLOUDFLARE_ACCOUNT_ID,
+	 * BASIN_BUCKET, BASIN_SQL_TOKEN, BASIN_NAMESPACE (default typetorch); the TT_BASIN_* names of the local store work too.
+	 * Set = all three of the first; never logged or returned.
+	 */
+	basinRead?: { accountId: string; bucket: string; token: string; namespace: string };
 	// DuckDB
 	memoryLimit: string;
 	threads: number;
@@ -292,6 +298,25 @@ function flag(env: Record<string, string | undefined>, name: string, fallback = 
 	if (TRUE.includes(v)) return true;
 	if (FALSE.includes(v)) return false;
 	throw new Error(`${name} is on or off (1/0, true/false, yes/no, on/off)`);
+}
+
+/** Plans/35 B: the Basin SQL read settings (ServerConfig.basinRead); a value that doesn't fit is a warning, never echoed. */
+function basinReadOf(env: Record<string, string | undefined>, warnings: string[]): ServerConfig["basinRead"] {
+	const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+	const bucket = env.BASIN_BUCKET ?? env.TT_BASIN_BUCKET;
+	const token = env.BASIN_SQL_TOKEN ?? env.TT_BASIN_SQL_TOKEN ?? env.WRANGLER_BASIN_SQL_AUTH_TOKEN;
+	const namespace = env.BASIN_NAMESPACE ?? env.TT_BASIN_NAMESPACE ?? "typetorch";
+	if (!accountId && !bucket && !token) return undefined;
+	const problems: string[] = [];
+	if (!accountId || !/^[a-f0-9]{32}$/i.test(accountId)) problems.push("CLOUDFLARE_ACCOUNT_ID (32 hex characters)");
+	if (!bucket || !/^[a-z0-9][a-z0-9-]{1,62}$/.test(bucket)) problems.push("BASIN_BUCKET (an R2 bucket name)");
+	if (!token || !/^[\x21-\x7e]{20,4096}$/.test(token)) problems.push("BASIN_SQL_TOKEN (an API token)");
+	if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(namespace)) problems.push("BASIN_NAMESPACE (letters, digits, _)");
+	if (problems.length) {
+		warnings.push(`Basin read settings are incomplete or malformed (${problems.join(", ")}): a move to Basin won't compare counts there`);
+		return undefined;
+	}
+	return { accountId: accountId as string, bucket: bucket as string, token: token as string, namespace };
 }
 
 function secret(env: Record<string, string | undefined>, name: string, required: boolean): string | undefined {
@@ -605,6 +630,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		config.universeId = u;
 	}
 	if (env.TYPETORCH_ALERT_WEBHOOK_URL) config.alertWebhookUrl = env.TYPETORCH_ALERT_WEBHOOK_URL;
+	const basinRead = basinReadOf(env, warnings);
+	if (basinRead) config.basinRead = basinRead;
 	if (format) config.alertWebhookFormat = format as "discord" | "slack" | "json";
 	return config;
 }

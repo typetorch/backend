@@ -119,6 +119,25 @@ describe("MigrationCard", () => {
 		expect((await screen.findByTestId("migrate-state")).textContent).toBe("Running");
 	});
 
+	it("a move to Basin cut off mid-send: the page, Resend and Skip post resolve", async () => {
+		const decision = { page: "events:2026-11-03:0:200", table: "events" as const, day: "2026-11-03", rows: 100, why: "the server stopped while this page was being sent" };
+		vi.spyOn(api, "migrateStatus").mockResolvedValue({ ...running, state: "needs_decision", direction: "to-basin", source: { kind: "local" }, target: { kind: "basin", events: "https://e.example", recordings: "https://r.example" }, decision });
+		const resolve = vi.spyOn(api, "migrateResolve").mockResolvedValue({ ...running, direction: "to-basin", source: { kind: "local" } });
+		mount();
+		expect(await screen.findByText("A page needs a decision")).toBeTruthy();
+		expect(screen.getByText("from this server to Basin")).toBeTruthy();
+		expect(screen.getByText("events:2026-11-03:0:200")).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+		await waitFor(() => expect(resolve).toHaveBeenCalledWith("events:2026-11-03:0:200", "skip"));
+		expect((await screen.findByTestId("migrate-state")).textContent).toBe("Running");
+	});
+
+	it("from Basin: names the bucket and namespace", async () => {
+		vi.spyOn(api, "migrateStatus").mockResolvedValue({ ...running, direction: "from-basin", source: { kind: "basin", bucket: "typetorch-analytics", namespace: "typetorch" } });
+		mount();
+		expect(await screen.findByText("typetorch-analytics / typetorch")).toBeTruthy();
+	});
+
 	it("shows nothing on an older server (404) or a read-only session (403)", async () => {
 		const spy = vi.spyOn(api, "migrateStatus").mockRejectedValue(new ApiError(404, "not found", "/v1/admin/migrate"));
 		const { container } = mount();

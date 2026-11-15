@@ -316,6 +316,8 @@ export function createApi(options: ApiOptions = {}) {
 		migrateStatus: (signal?: AbortSignal) => get<MigrateStatus>("/v1/admin/migrate", signal),
 		/** Pause, resume or cancel the running move; answers the new status (409 when the action doesn't apply). */
 		migrateAction: (action: MigrateAction, signal?: AbortSignal) => post<MigrateStatus>("/v1/admin/migrate", { action }, signal),
+		/** A page cut off mid-send to Basin: send it again or leave it out; answers the new status. */
+		migrateResolve: (page: string, choice: "resend" | "skip", signal?: AbortSignal) => post<MigrateStatus>("/v1/admin/migrate", { action: "resolve", page, choice }, signal),
 		/** Starts a move from the old server; the token goes in the body once and is never sent back. */
 		migrateStart: (input: MigrateStartInput, signal?: AbortSignal) => post<MigrateStatus>("/v1/admin/migrate", { action: "start", ...input }, signal),
 		/** Backups (owners only): the schedule, the last outcome, the local backups. */

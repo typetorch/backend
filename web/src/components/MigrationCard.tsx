@@ -8,7 +8,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRightLeft, Ban, CircleAlert, Pause, Play } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { EmptyState, ErrorState, JsonBlock, LoadingBlock, Section, ShareBar } from "@/components/common";
+import { EmptyState, ErrorState, LoadingBlock, Section, ShareBar } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api, ApiError } from "@/lib/api";
 import { fmtAgo, fmtInt, fmtPct, fmtTime, plural } from "@/lib/format";
 import { daysLeft, MIGRATE_KEY, migrateActions, migratePollMs } from "@/lib/migrate";
-import type { MigrateAction, MigrateDay, MigrateState, MigrateStatus, MigrateStep } from "@/lib/types";
+import type { MigrateAction, MigrateDay, MigrateDecision, MigrateState, MigrateStatus, MigrateStep } from "@/lib/types";
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 
@@ -63,8 +63,9 @@ const DAY_VARIANT: Record<MigrateDay["state"], BadgeVariant> = {
 	missing: "destructive",
 	differs: "destructive",
 	duplicates: "destructive",
+	sent: "outline",
 };
-const DAY_ORDER = ["pending", "importing", "match", "missing", "differs", "duplicates"] as const;
+const DAY_ORDER = ["pending", "importing", "match", "missing", "differs", "duplicates", "sent"] as const;
 
 const DAY_COLUMNS: DataColumn<MigrateDay>[] = [
 	{ id: "table", header: "Table", type: "enum", accessor: (d) => d.table },
@@ -217,6 +218,55 @@ function Controls({ s }: { s: MigrateStatus }) {
 	);
 }
 
+/** Where the rows go: "from <old url>", "from Basin (bucket)", "to Basin". */
+function Route({ s }: { s: MigrateStatus }) {
+	const source = s.source;
+	if (s.direction === "to-basin") return <span className="min-w-0 text-muted-foreground">from this server to Basin</span>;
+	if (source?.kind === "basin")
+		return (
+			<span className="min-w-0 text-muted-foreground">
+				from Basin <span className="font-mono break-all text-foreground">{`${source.bucket} / ${source.namespace}`}</span>
+			</span>
+		);
+	if (source?.kind === "backend")
+		return (
+			<span className="min-w-0 text-muted-foreground">
+				from <span className="font-mono break-all text-foreground">{source.url}</span>
+			</span>
+		);
+	return null;
+}
+
+/** A page cut off mid-send to Basin: Basin can't dedupe or delete, so the owner picks (resend may double it, skip may lose it). */
+function DecisionBlock({ decision }: { decision: MigrateDecision }) {
+	const client = useQueryClient();
+	const resolve = useMutation({
+		mutationFn: (choice: "resend" | "skip") => api.migrateResolve(decision.page, choice),
+		onSuccess: (status) => client.setQueryData(MIGRATE_KEY, status),
+	});
+	return (
+		<Alert>
+			<CircleAlert />
+			<AlertTitle>A page needs a decision</AlertTitle>
+			<AlertDescription>
+				<p className="break-words">
+					{fmtInt(decision.rows)} rows of {decision.table} {decision.day} (page <span className="font-mono">{decision.page}</span>): {decision.why}.
+				</p>
+				<p className="text-xs">Resend: Basin may then hold these rows twice. Skip: they may be missing in Basin. The verify step reports either.</p>
+				<div className="flex flex-wrap items-center gap-2 pt-1">
+					<Button size="sm" disabled={resolve.isPending} onClick={() => resolve.mutate("resend")}>
+						{resolve.isPending && resolve.variables === "resend" ? "Resending" : "Resend"}
+					</Button>
+					<Button variant="outline" size="sm" disabled={resolve.isPending} onClick={() => resolve.mutate("skip")}>
+						{resolve.isPending && resolve.variables === "skip" ? "Skipping" : "Skip"}
+					</Button>
+					{resolve.isError ? <span className="text-xs text-destructive">{actionError(resolve.error)}</span> : null}
+				</div>
+			</AlertDescription>
+		</Alert>
+	);
+}
+
 export function MigrationBody({ s }: { s: MigrateStatus }) {
 	if (s.state === "idle" && !s.days.length) return <StartForm />;
 	const share = s.rowsTotal > 0 ? s.rowsDone / s.rowsTotal : 0;
@@ -227,11 +277,7 @@ export function MigrationBody({ s }: { s: MigrateStatus }) {
 				<Badge variant={STATE_VARIANT[s.state] ?? "outline"} data-testid="migrate-state">
 					{STATE_TEXT[s.state] ?? s.state}
 				</Badge>
-				{s.source ? (
-					<span className="min-w-0 text-muted-foreground">
-						from <span className="font-mono break-all text-foreground">{s.source.url}</span>
-					</span>
-				) : null}
+				<Route s={s} />
 				{s.startedAt ? <span className="text-xs text-muted-foreground" title={fmtTime(s.startedAt)}>started {fmtAgo(s.startedAt)}</span> : null}
 				{s.finishedAt ? <span className="text-xs text-muted-foreground" title={fmtTime(s.finishedAt)}>finished {fmtAgo(s.finishedAt)}</span> : null}
 			</div>
@@ -259,12 +305,7 @@ export function MigrationBody({ s }: { s: MigrateStatus }) {
 					</AlertDescription>
 				</Alert>
 			) : null}
-			{s.state === "needs_decision" && s.decision ? (
-				<div className="space-y-1">
-					<p className="text-sm">The move needs a decision before it goes on:</p>
-					<JsonBlock value={s.decision} className="max-h-48" />
-				</div>
-			) : null}
+			{s.state === "needs_decision" && s.decision ? <DecisionBlock decision={s.decision} /> : null}
 			<Controls s={s} />
 			<StepsTable steps={s.steps} />
 			<DataTable
@@ -301,7 +342,7 @@ export function MigrationCard() {
 	const q = useMigrateStatus({ poll: true });
 	if (q.isError && migrateHidden(q.error)) return null;
 	return (
-		<Section title="Migration" description="Moving this backend's history from another server, day by day, with a row count check per day.">
+		<Section title="Migration" description="Moving analytics history from another server or Basin to this one, or from this one to Basin, day by day, with a row count check per day.">
 			{q.data ? <MigrationBody s={q.data} /> : q.isError ? <ErrorState error={q.error} /> : <LoadingBlock rows={2} />}
 		</Section>
 	);

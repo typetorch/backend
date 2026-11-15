@@ -2642,7 +2642,8 @@ export interface IngestPressure {
 
 export type MigrateState = "idle" | "running" | "paused" | "waiting" | "done" | "failed" | "cancelled" | "needs_decision";
 export type MigrateStepName = "erased" | "identities" | "fleet" | "events" | "recordings" | "live" | "rollups" | "verify";
-export type MigrateDayState = "pending" | "importing" | "match" | "missing" | "differs" | "duplicates";
+/** `sent`: moved to Basin, not counted there (no Basin read settings on this server). */
+export type MigrateDayState = "pending" | "importing" | "match" | "missing" | "differs" | "duplicates" | "sent";
 
 export interface MigrateStep {
 	name: MigrateStepName;
@@ -2666,7 +2667,10 @@ export interface MigrateDay {
 export interface MigrateStatus {
 	state: MigrateState;
 	direction: "from-backend" | "from-basin" | "to-basin" | null;
-	source: { kind: "backend"; url: string } | null;
+	/** An old server, Basin (its bucket and namespace), or this server (a move to Basin). */
+	source: { kind: "backend"; url: string } | { kind: "basin"; bucket: string; namespace: string } | { kind: "local" } | null;
+	/** A move to Basin: the streams the rows go to. */
+	target?: { kind: "basin"; events: string; recordings: string };
 	startedAt: number | null;
 	finishedAt: number | null;
 	rowsPerSecond: number;
@@ -2675,8 +2679,18 @@ export interface MigrateStatus {
 	steps: MigrateStep[];
 	days: MigrateDay[];
 	waitingFor: string | null;
-	decision: null | Record<string, unknown>;
+	/** A move to Basin: a page cut off mid-send waits for resolve (resend or skip). */
+	decision: null | MigrateDecision;
 	error: string | null;
+}
+
+export interface MigrateDecision {
+	page: string;
+	table: "events" | "recordings";
+	day: string;
+	rows: number;
+	why: string;
+	question?: string;
 }
 
 export type MigrateAction = "pause" | "resume" | "cancel";
