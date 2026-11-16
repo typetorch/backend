@@ -44,11 +44,35 @@ describe("Mobile app sessions", () => {
 		await waitFor(() => expect(screen.queryByText("Pixel 9")).toBeNull());
 	});
 
-	it("says so when no phone is signed in", async () => {
+	it("revokes every session after a confirmation, and only then", async () => {
+		vi.spyOn(api, "mobileTokens").mockResolvedValue(list);
+		const all = vi.spyOn(api, "revokeAllMobileTokens").mockResolvedValue({ ok: true, revoked: 2, lifetimeDays: 60, tokens: [] });
+		mount();
+		expect(await screen.findByText("Pixel 9")).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "Revoke all" }));
+		const dialog = screen.getByRole("alertdialog", { name: "Revoke all 2 mobile app sessions?" });
+		expect(dialog.textContent).toContain("signs out at once");
+		expect(all).not.toHaveBeenCalled();
+		// Cancel closes it without revoking.
+		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+		expect(screen.queryByRole("alertdialog")).toBeNull();
+		expect(all).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole("button", { name: "Revoke all" }));
+		const confirm = screen.getAllByRole("button", { name: "Revoke all" }).find((b) => screen.getByRole("alertdialog").contains(b)) as HTMLElement;
+		fireEvent.click(confirm);
+		await waitFor(() => expect(all).toHaveBeenCalledTimes(1));
+		expect(await screen.findByText("Revoked 2 mobile app sessions.")).toBeTruthy();
+		await waitFor(() => expect(screen.queryByText("Pixel 9")).toBeNull());
+		expect(screen.queryByRole("alertdialog")).toBeNull();
+		expect(screen.getByText(/No phone is signed in/)).toBeTruthy();
+	});
+
+	it("says so when no phone is signed in (and offers no Revoke all)", async () => {
 		vi.spyOn(api, "mobileTokens").mockResolvedValue({ tokens: [], lifetimeDays: 45 });
 		mount();
 		expect(await screen.findByText(/No phone is signed in/)).toBeTruthy();
 		expect(screen.getByText(/lasts 45 days/)).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Revoke all" })).toBeNull();
 	});
 
 	it("formats who and when", () => {

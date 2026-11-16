@@ -344,6 +344,8 @@ export function createApi(options: ApiOptions = {}) {
 		/** The mobile app's tokens (owners: every one; a viewer: their own). No hash, no secret. */
 		mobileTokens: (signal?: AbortSignal) => get<MobileTokenList>("/v1/auth/mobile/tokens", signal),
 		revokeMobileToken: (id: string, signal?: AbortSignal) => request<MobileTokenList & { ok: boolean }>(`/v1/auth/mobile/tokens/${encodeURIComponent(id)}`, { method: "DELETE", ...(signal ? { signal } : {}) }),
+		/** Every mobile app token revoked at once (owners): every phone signs out. Audited. */
+		revokeAllMobileTokens: (signal?: AbortSignal) => request<MobileTokenList & { ok: boolean; revoked: number }>("/v1/auth/mobile/tokens/revoke-all", { method: "POST", ...(signal ? { signal } : {}) }),
 		/** Sign in with typetorch.dev: the browsers trusted for full admin (owners only). */
 		devices: (signal?: AbortSignal) => get<{ devices: BlessedDevice[] }>("/v1/admin/devices", signal).then((r) => r.devices),
 		revokeDevice: (id: string, signal?: AbortSignal) =>
