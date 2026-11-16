@@ -605,6 +605,10 @@ describe("explorer lookups", () => {
 		if (p) {
 			expect(p.events).toBe(mine.length);
 			expect(p.sessions).toBe(new Set(mine.map((e) => e.sid)).size);
+			// The latest session's first row.
+			const starts = new Map<string, number>();
+			for (const e of mine) starts.set(e.sid as string, Math.min(starts.get(e.sid as string) ?? Infinity, e.t as number));
+			expect(p.lastSessionStart).toBe(new Date(Math.max(...starts.values())).toISOString());
 		}
 		const found = await store.query("players", {}, { search: "p000", limit: 1000 });
 		expect(found.players.map((x) => x.pid).every((pid) => pid.includes("p000"))).toBe(true);

@@ -59,6 +59,8 @@ export interface PlayerSummary {
 	robux: number;
 	/** Their first-ever session is in the range. */
 	newInRange: boolean;
+	/** When their latest session in the range started (for a player in a server now: the current session). */
+	lastSessionStart: string;
 	/** The UserId, when the analytics server knows it (identity rows; added by the server, not the query). */
 	uid?: number;
 }
@@ -86,7 +88,7 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 			out.search = input.search;
 		}
 		if (input.pids !== undefined) {
-			if (!Array.isArray(input.pids) || input.pids.length > 50) throw new Error("pids must be a list of at most 50 pids");
+			if (!Array.isArray(input.pids) || input.pids.length > 200) throw new Error("pids must be a list of at most 200 pids");
 			if (input.pids.length) out.pids = input.pids.map((p) => checkPid(p));
 		}
 		return out;
@@ -108,10 +110,10 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 				`pr AS (SELECT DISTINCT e.pid AS pid, e.sid AS sid, e.t AS t, e.name AS name, e.props AS props, e.src AS esrc FROM ${table} e ` +
 				`WHERE ${playerRows(f, ctx, search)} AND e.kind = 'purchase'), ` +
 				`pu AS (SELECT pid, SUM(COALESCE(${robux}, 0)) AS robux FROM pr WHERE ${SERVER_PURCHASE} GROUP BY pid), ` +
-				`s AS (SELECT sid, MIN(pid) AS pid, MAX(t) - MIN(t) AS len FROM ev GROUP BY sid), ` +
-				`sp AS (SELECT pid, COUNT(*) AS sessions, SUM(len) AS playtime_ms FROM s GROUP BY pid), ` +
+				`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS start_t, MAX(t) - MIN(t) AS len FROM ev GROUP BY sid), ` +
+				`sp AS (SELECT pid, COUNT(*) AS sessions, SUM(len) AS playtime_ms, MAX(start_t) AS last_start FROM s GROUP BY pid), ` +
 				`p AS (SELECT pid, MIN(t) AS first_t, MAX(t) AS last_t, COUNT(*) AS events, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew FROM ev GROUP BY pid) ` +
-				`SELECT p.pid AS pid, p.first_t AS first_t, p.last_t AS last_t, p.events AS events, p.isnew AS isnew, sp.sessions AS sessions, sp.playtime_ms AS playtime_ms, COALESCE(pu.robux, 0) AS robux ` +
+				`SELECT p.pid AS pid, p.first_t AS first_t, p.last_t AS last_t, p.events AS events, p.isnew AS isnew, sp.sessions AS sessions, sp.playtime_ms AS playtime_ms, sp.last_start AS last_start, COALESCE(pu.robux, 0) AS robux ` +
 				`FROM p JOIN sp ON sp.pid = p.pid LEFT JOIN pu ON pu.pid = p.pid ORDER BY ${order} ${ctx.dialect.limit(o.limit)}`,
 		};
 	},
@@ -125,6 +127,7 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 			playtimeMinutes: round(num(r.playtime_ms) / 60_000, 1),
 			robux: round(num(r.robux), 2),
 			newInRange: num(r.isnew) === 1,
+			lastSessionStart: iso(num(r.last_start)),
 		})),
 	}),
 });
