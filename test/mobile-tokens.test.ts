@@ -211,8 +211,8 @@ describe("mobile app tokens", () => {
 		expect(parseMobileDevRedirects("on")).toEqual({ privateNetwork: true, hosts: [] });
 		expect(parseMobileDevRedirects("On, Abc.exp.direct ,10.1.2.3:19000")).toEqual({ privateNetwork: true, hosts: ["abc.exp.direct", "10.1.2.3:19000"] });
 		for (const bad of ["exp://abc.exp.direct", "a b", "host:99999", "*.exp.direct", "host/path", "user@host"]) expect(() => parseMobileDevRedirects(bad)).toThrow("TYPETORCH_MOBILE_DEV_REDIRECTS");
-		for (const yes of ["127.0.0.1", "127.9.9.9", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.0.1", "localhost", "[::1]", "[fd12:3456::1]"]) expect({ yes, ok: isPrivateNetworkHost(yes) }).toEqual({ yes, ok: true });
-		for (const no of ["8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.0.1", "010.0.0.1", "10.0.0.1.nip.io", "example.com", "[2001:db8::1]", "0x7f.1", ""]) expect({ no, ok: isPrivateNetworkHost(no) }).toEqual({ no, ok: false });
+		for (const yes of ["127.0.0.1", "127.9.9.9", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.0.1", "localhost", "[::1]", "[fd12:3456::1]", "[fc00::1]", "[fdff::]"]) expect({ yes, ok: isPrivateNetworkHost(yes) }).toEqual({ yes, ok: true });
+		for (const no of ["8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.0.1", "010.0.0.1", "10.0.0.1.nip.io", "example.com", "[2001:db8::1]", "[fc::1]", "[fd1::1]", "[f::1]", "[fe80::1]", "0x7f.1", ""]) expect({ no, ok: isPrivateNetworkHost(no) }).toEqual({ no, ok: false });
 		expect(mobileDevRedirectAllowed({ privateNetwork: false, hosts: ["abc.exp.direct"] }, "abc.exp.direct:8081", "abc.exp.direct")).toBe(true);
 		expect(mobileDevRedirectAllowed({ privateNetwork: false, hosts: ["abc.exp.direct:443"] }, "abc.exp.direct:8081", "abc.exp.direct")).toBe(false);
 		expect(mobileDevRedirectAllowed(false, "10.0.0.1", "10.0.0.1")).toBe(false);
@@ -652,6 +652,29 @@ describe("mobile app tokens", () => {
 		// New sign-ins work again afterwards.
 		expect((await h.call("/v1/auth/mobile/token", tokenPost({ device: "after" }, bearer(ADMIN)))).status).toBe(200);
 	});
+
+	test("revoke all also drops sign-ins on their way: a code not yet redeemed, a browser not yet past the consent page", async () => {
+		// A code from before revoke all (a phished sign-in partway through).
+		const coded = await signIn();
+		// A browser signed in but still on the consent page.
+		const waiting = await browserLogin();
+		expect(waiting.cb.headers.get("location")).toBe("/auth/mobile/consent");
+		const page = await h.call("/auth/mobile/consent", { ip: waiting.ip, headers: { cookie: waiting.mobile } });
+		expect(page.status).toBe(200);
+		const form = /name="form" value="([^"]+)"/.exec(await page.text())?.[1] as string;
+		expect((await h.call("/v1/auth/mobile/tokens/revoke-all", { method: "POST", headers: bearer(ADMIN) })).status).toBe(200);
+		const late = await redeem(coded.code, coded.p.verifier);
+		expect(late.status).toBe(400);
+		expect(await asJson(late)).toMatchObject({ error: "invalid_grant" });
+		const allow = await h.call("/auth/mobile/consent", { method: "POST", ip: waiting.ip, body: new URLSearchParams({ form, decision: "allow" }).toString(), headers: { "content-type": "application/x-www-form-urlencoded", cookie: waiting.mobile, origin: "http://backend.test" } });
+		expect(allow.status).toBe(400);
+		expect(allow.headers.get("location")).toBeNull();
+		expect(await allow.text()).toContain("This sign-in expired");
+		expect((await asJson(await h.call("/v1/auth/mobile/tokens", { headers: bearer(ADMIN) }))).tokens).toEqual([]);
+		// A sign-in started afterwards works.
+		const fresh = await signIn();
+		expect((await redeem(fresh.code, fresh.p.verifier)).status).toBe(200);
+	});
 });
 
 describe("mobile app tokens: the admin token changing, and restarts", () => {
@@ -785,6 +808,54 @@ describe("mobile app tokens: the store's caps", () => {
 		await store.revoke(c.record.id, "revoked on the Settings page");
 		await expect(pending).rejects.toMatchObject({ status: 401 });
 		expect(store.size).toBe(0);
+		// The table keeps the revoke's reason, not the refresh's claim, and nothing in it is live.
+		expect(await real.first<{ revoke_reason: string }>("SELECT revoke_reason FROM mobile_tokens WHERE id = ?", [c.record.id])).toMatchObject({ revoke_reason: "revoked on the Settings page" });
+		expect(await real.all("SELECT id FROM mobile_tokens WHERE revoked_at IS NULL")).toEqual([]);
+		await db.close();
+	});
+
+	test("refresh across two processes sharing the table (a rolling-deploy handover): exactly one wins", async () => {
+		const now = T0;
+		const db = await openSqlite(join(dir, "two.sqlite"));
+		const a = await MobileTokens.open(db, { days: 60, clock: () => now });
+		const user = { kind: "roblox" as const, userId: 9, name: "N" };
+		const parent = await a.mint({ user, role: "web", device: "p" });
+		const b = await MobileTokens.open(db, { days: 60, clock: () => now });
+		expect(b.resolve(parent.token, "x")?.id).toBe(parent.record.id);
+		const results = await Promise.allSettled([a.refresh(parent.record.id), b.refresh(parent.record.id)]);
+		const ok = results.filter((r) => r.status === "fulfilled");
+		expect(ok).toHaveLength(1);
+		const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+		expect(lost.reason).toMatchObject({ status: 409, code: "mobile_refresh_in_progress" });
+		const live = await db.all<{ id: string }>("SELECT id FROM mobile_tokens WHERE revoked_at IS NULL");
+		const child = (ok[0] as PromiseFulfilledResult<Awaited<ReturnType<MobileTokens["refresh"]>>>).value;
+		expect(live.map((r) => r.id)).toEqual([child.record.id]);
+		expect(await db.first("SELECT revoke_reason FROM mobile_tokens WHERE id = ?", [parent.record.id])).toMatchObject({ revoke_reason: "refreshed" });
+		// Neither process honours the parent any more.
+		expect(a.resolve(parent.token, "x")).toBeUndefined();
+		expect(b.resolve(parent.token, "x")).toBeUndefined();
+		await db.close();
+	});
+
+	test("revoke all refuses a mint or a refresh whose row was still being written", async () => {
+		let now = T0;
+		const db = await openSqlite(join(dir, "gen.sqlite"));
+		const store = await MobileTokens.open(db, { days: 60, clock: () => now });
+		const user = { kind: "roblox" as const, userId: 6, name: "G" };
+		const parent = await store.mint({ user, role: "web", device: "p" });
+		now += 1000;
+		const minting = store.mint({ user, role: "web", device: "q" });
+		const refreshing = store.refresh(parent.record.id);
+		expect(await store.revokeAll("every token revoked on the Settings page")).toBeGreaterThanOrEqual(1);
+		const [m, r] = await Promise.allSettled([minting, refreshing]);
+		expect(m).toMatchObject({ status: "rejected", reason: { status: 401, code: "mobile_revoked_all" } });
+		expect(r).toMatchObject({ status: "rejected", reason: { status: 401 } });
+		expect(store.size).toBe(0);
+		expect(await db.all("SELECT id FROM mobile_tokens WHERE revoked_at IS NULL")).toEqual([]);
+		expect(await db.first("SELECT revoke_reason FROM mobile_tokens WHERE id = ?", [parent.record.id])).toMatchObject({ revoke_reason: "every token revoked on the Settings page" });
+		// Mints after it work.
+		const after = await store.mint({ user, role: "web", device: "r" });
+		expect(store.resolve(after.token, "x")?.id).toBe(after.record.id);
 		await db.close();
 	});
 

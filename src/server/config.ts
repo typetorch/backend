@@ -375,7 +375,7 @@ export function isPrivateNetworkHost(hostname: string): boolean {
 		return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 	}
 	// IPv6 unique local addresses (fc00::/7).
-	return /^\[f[cd][0-9a-f]{0,2}:[0-9a-f:.]*\]$/.test(h);
+	return /^\[f[cd][0-9a-f]{2}:[0-9a-f:.]*\]$/.test(h);
 }
 
 /** Whether an Expo Go redirect's host (`host[:port]` as URL.host gives it) is allowed by TYPETORCH_MOBILE_DEV_REDIRECTS. */

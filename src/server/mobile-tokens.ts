@@ -224,6 +224,12 @@ export class MobileTokens {
 	private readonly dead = new Map<string, DeadToken>();
 	/** Tokens a refresh has claimed and not finished (a second refresh of one gets 409). Bounded by `active`. */
 	private readonly refreshing = new Set<string>();
+	/**
+	 * Bumped by revokeAll: a mint that started before it (its INSERT still running) revokes the token it made instead of
+	 * handing it out, so "Revoke all" leaves nothing live behind it.
+	 */
+	private generation = 0;
+	private generationReason = "revoked";
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
 	private readonly perUser: number;
@@ -270,7 +276,8 @@ export class MobileTokens {
 			this.active.set(row.id, record);
 		}
 		for (const [id, t] of this.active) {
-			if (seen.has(id)) continue;
+			// A refresh in flight has claimed its row in the table (revoked_at set): it finishes or gives the claim back.
+			if (seen.has(id) || this.refreshing.has(id)) continue;
 			this.active.delete(id);
 			const row = await this.db.first<Row>("SELECT revoked_at, revoke_reason FROM mobile_tokens WHERE id = ?", [id]);
 			this.bury(t, row && row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired", row && row.revoked_at !== null ? Number(row.revoked_at) : now);
@@ -291,8 +298,10 @@ export class MobileTokens {
 	}
 
 	/** A new token: returns the token string (shown once) and its record. Revokes the user's oldest past the per-user cap. */
-	async mint(input: MintInput, replacing?: string, chain?: { signedIn: number; family: string; expires: number }): Promise<{ token: string; record: MobileTokenRecord }> {
+	async mint(input: MintInput, replacing?: string, chain?: { signedIn: number; family: string; expires: number; generation: number }): Promise<{ token: string; record: MobileTokenRecord }> {
 		const now = this.clock();
+		// Before the first await (a refresh's, before its own): a revokeAll from here on refuses this mint.
+		const generation = chain?.generation ?? this.generation;
 		this.sweep(now);
 		const mine = [...this.active.values()].filter((t) => t.id !== replacing && sameUser(t.user, input.user));
 		const others = this.active.size - (replacing && this.active.has(replacing) ? 1 : 0);
@@ -345,15 +354,27 @@ export class MobileTokens {
 				record.family,
 			],
 		);
+		if (generation !== this.generation) {
+			// Every token was revoked while this one was being written: it goes too, never handed out.
+			const why = this.generationReason;
+			record.revoked = this.clock();
+			record.revokeReason = why;
+			this.bury(record, why, record.revoked);
+			await this.db.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE id = ? AND revoked_at IS NULL", [record.revoked, why, id]);
+			throw new MobileTokenError("every mobile app token was just revoked: sign in again", 401, "mobile_revoked_all");
+		}
 		this.active.set(id, record);
 		return { token, record };
 	}
 
 	/**
 	 * Refreshes an active token: a new one in its family, with a fresh expiry (never past the family's
-	 * TYPETORCH_MOBILE_TOKEN_MAX_DAYS), and the old one revoked ("refreshed"). The old token is claimed before the first
-	 * await, so a parallel refresh of it gets 409 and only one new token is made; a failed mint gives the claim back. Throws
-	 * MobileTokenError: 401 not active, 409 already being refreshed, 403 `mobile_signin_too_old` (sign in again), 429 caps.
+	 * TYPETORCH_MOBILE_TOKEN_MAX_DAYS), and the old one revoked ("refreshed"). The old token is claimed twice before
+	 * anything is made: in memory before the first await (a parallel refresh in this process gets 409), then in the table
+	 * with a conditional UPDATE (a rolling deploy's other process sharing the SQLite file: only the UPDATE that changes
+	 * the row wins, the other gets 409), so one sign-in never has two live tokens. A failed mint gives both claims back.
+	 * Throws MobileTokenError: 401 not active, 409 already being refreshed, 403 `mobile_signin_too_old` (sign in again),
+	 * 429 caps.
 	 */
 	async refresh(id: string): Promise<{ token: string; record: MobileTokenRecord; replaced: MobileTokenRecord }> {
 		const now = this.clock();
@@ -365,24 +386,58 @@ export class MobileTokens {
 		// Past the family's maximum (or once a token already lives to it: a refresh can't move it) the phone signs in again.
 		if (now >= cap || parent.expires >= cap) throw new MobileTokenError(`this sign-in is ${Math.round(this.maxMs / DAY)} days old: sign in again`, 403, "mobile_signin_too_old");
 		this.refreshing.add(id);
+		const generation = this.generation;
 		let made: { token: string; record: MobileTokenRecord };
 		try {
-			const u = parent.user;
-			made = await this.mint(
-				{ user: u, role: parent.role, device: parent.device, ...(parent.adminTokenHash ? { adminTokenHash: parent.adminTokenHash } : {}), ...(parent.blessedDevice ? { blessedDevice: parent.blessedDevice } : {}) },
-				id,
-				{ signedIn: parent.signedIn, family: parent.family, expires },
-			);
+			const claimed = await this.db.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE id = ? AND revoked_at IS NULL", [now, MOBILE_REFRESHED, id]);
+			if (claimed.changes !== 1) {
+				// Another process refreshed or revoked it: this one stops honouring it too.
+				const row = await this.db.first<Row>("SELECT revoked_at, revoke_reason FROM mobile_tokens WHERE id = ?", [id]);
+				const reason = row && row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "revoked";
+				const live = this.active.get(id);
+				if (live) {
+					this.active.delete(id);
+					this.bury(live, reason, row && row.revoked_at !== null ? Number(row.revoked_at) : now);
+				}
+				if (reason === MOBILE_REFRESHED) throw new MobileTokenError("this token is already being refreshed: use the new one", 409, "mobile_refresh_in_progress");
+				throw new MobileTokenError("a mobile app token is required (Authorization: Bearer ttm_...)", 401);
+			}
+			try {
+				const u = parent.user;
+				made = await this.mint(
+					{ user: u, role: parent.role, device: parent.device, ...(parent.adminTokenHash ? { adminTokenHash: parent.adminTokenHash } : {}), ...(parent.blessedDevice ? { blessedDevice: parent.blessedDevice } : {}) },
+					id,
+					{ signedIn: parent.signedIn, family: parent.family, expires, generation },
+				);
+			} catch (error) {
+				await this.releaseClaim(id, now);
+				throw error;
+			}
 		} finally {
 			this.refreshing.delete(id);
 		}
 		// Revoked while the new one was being made (Settings, a role check, revoke all): the new one goes too.
 		if (!this.active.has(id)) {
+			await this.releaseClaim(id, now);
 			await this.revoke(made.record.id, "the token it replaced was revoked");
 			throw new MobileTokenError("a mobile app token is required (Authorization: Bearer ttm_...)", 401);
 		}
-		await this.revoke(id, MOBILE_REFRESHED);
+		// The table already says "refreshed" (the claim): only memory is left.
+		this.takeOut((t) => t.id === id, MOBILE_REFRESHED);
 		return { ...made, replaced: parent };
+	}
+
+	/**
+	 * Gives a refresh's table claim back: the row is live again when the token still is in memory, else it keeps the
+	 * reason it was revoked for meanwhile (that revoke's own UPDATE found the row already claimed). Only touches the
+	 * claim this refresh wrote.
+	 */
+	private async releaseClaim(id: string, claimedAt: number): Promise<void> {
+		const still = this.active.has(id);
+		const reason = still ? null : (this.dead.get(id)?.reason ?? "revoked");
+		await this.db
+			.run(`UPDATE mobile_tokens SET revoked_at = ${still ? "NULL" : "revoked_at"}, revoke_reason = ? WHERE id = ? AND revoked_at = ? AND revoke_reason = ?`, [reason, id, claimedAt, MOBILE_REFRESHED])
+			.catch((e) => this.log(`mobile tokens: could not give a refresh claim back (${(e as Error).message.slice(0, 120)})`));
 	}
 
 	/**
@@ -488,9 +543,12 @@ export class MobileTokens {
 
 	/**
 	 * Revokes every active token (the Settings page's "Revoke all"): the ones in memory at once, then every row the table
-	 * still has live (also those another process made during a rolling deploy). Returns how many.
+	 * still has live (also those another process made during a rolling deploy). A mint still writing its row when this
+	 * runs revokes what it made (the generation check). Returns how many.
 	 */
 	async revokeAll(reason: string): Promise<number> {
+		this.generation++;
+		this.generationReason = reason.slice(0, 80);
 		const taken = this.takeOut(() => true, reason);
 		const now = this.clock();
 		const r = await this.db.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE revoked_at IS NULL AND expires_at > ?", [now, reason.slice(0, 80), now]);

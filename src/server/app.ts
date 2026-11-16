@@ -2828,6 +2828,10 @@ ${goesTo}
 		if (path === "/v1/auth/mobile/tokens/revoke-all") {
 			if (req.method !== "POST") return json(405, { error: "POST only" });
 			if (p.role !== "admin") return json(403, { error: READ_ONLY });
+			// Sign-ins on their way go too: a one-time code not yet redeemed, a browser signed in but not past the consent page
+			// (a phished sign-in partway through gets nothing). A mint already writing its row is refused by the store.
+			mobileCodes.clear();
+			mobilePending.clear();
 			const revoked = await mobileTokens.revokeAll("every token revoked on the Settings page");
 			noteAudit(req, { action: "mobile.token.revoke-all", outcome: "ok", details: { revoked } });
 			log(`mobile app tokens: all ${revoked} revoked by ${actorOf(p as Principal & { role: "admin" }).who}`);

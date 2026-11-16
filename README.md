@@ -617,7 +617,7 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   posts, and a foreign `Origin` or `Sec-Fetch-Site: cross-site` is still refused).
 - **`redirect_uri`.** `typetorch://...` only (no fragment, no user or password); Expo Go's `exp://` and `exps://` only on a
   host `TYPETORCH_MOBILE_DEV_REDIRECTS` allows: `on` = loopback and private-network IP addresses (127/8, 10/8, 172.16/12,
-  192.168/16, `localhost`, `::1`, `fc00::/7`), anything else (an Expo tunnel such as `abc-anon-8081.exp.direct`) must be
+  192.168/16, `localhost`, `::1`, `fc00::/7`: a first group of exactly four hex digits `fcXX` or `fdXX`), anything else (an Expo tunnel such as `abc-anon-8081.exp.direct`) must be
   listed as `host[:port]`. An Expo Go address can name anyone's development server, so it is off in production (a
   startup warning while it is set with a public `TYPETORCH_PUBLIC_URL`), a sign-in through one never gets the admin role
   (an owner gets web), and the consent page names the Expo Go host. A bad `redirect_uri` gets an error page, never a
@@ -627,14 +627,17 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   while that is off. A named API key (`ttk_...`) never makes one (`403`).
 - **Renew, sign out, revoke.** `POST /v1/auth/mobile/refresh` (with the token) gives a new token with a fresh expiry and
   revokes the old one (the app calls it when fewer than 15 days remain). The old token is claimed before anything else
-  runs: a parallel refresh of it gets `409 { code: "mobile_refresh_in_progress" }`, so one sign-in never has two live
-  tokens. The new token keeps the sign-in's time: none outlives `TYPETORCH_MOBILE_TOKEN_MAX_DAYS` (180) after the
+  runs, in memory and then in the table (a conditional `UPDATE` only one caller can win, so the two processes of a
+  rolling-deploy handover sharing the SQLite file can't both refresh it): a parallel refresh of it gets
+  `409 { code: "mobile_refresh_in_progress" }`, so one sign-in never has two live tokens. The new token keeps the sign-in's time: none outlives `TYPETORCH_MOBILE_TOKEN_MAX_DAYS` (180) after the
   sign-in, and past that a refresh answers `403 { code: "mobile_signin_too_old" }` (sign in again). Refreshes are limited
   per sign-in (6 a minute). **Reuse detection:** a refreshed token presented again more than 10 s after its refresh (any
   route) revokes every live token of its sign-in (one of the two holders is not the app; audited). `POST
   /v1/auth/mobile/logout` revokes the caller's token. `GET /v1/auth/mobile/tokens` lists them (owners: all; a viewer:
   their own; `?all=1` adds revoked and expired ones), `DELETE /v1/auth/mobile/tokens/<id>` revokes one (owners: any; a
-  viewer: their own), `POST /v1/auth/mobile/tokens/revoke-all` (owners) revokes every one (every phone signs out); the
+  viewer: their own), `POST /v1/auth/mobile/tokens/revoke-all` (owners) revokes every one (every phone signs out) and
+  drops every sign-in on its way (unredeemed codes, browsers not yet past the consent page; a token whose row was still
+  being written is revoked, never handed out); the
   Settings page's **Mobile app sessions** card does all three (Revoke all after a confirmation). Minting, refreshing,
   revoking and the consent are in the [audit log](#audit-log) (`mobile.*`), with the token's id, never the token.
 - **Which game.** `GET /v1/auth/check` carries `game: { universeId, label }` (`TYPETORCH_UNIVERSE_ID`, the
