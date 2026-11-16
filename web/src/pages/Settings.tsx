@@ -10,6 +10,7 @@ import { useState, type ReactNode } from "react";
 import { alertRulesChange, BackendAlertRules, type AlertRulesDraft } from "@/components/BackendAlertRules";
 import { BackupCard } from "@/components/BackupCard";
 import { CentralLoginSection } from "@/components/CentralLoginSection";
+import { MobileSessionsCard } from "@/components/MobileSessionsCard";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -510,6 +511,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 				);
 			})}
 			{data.centralLogin ? <CentralLoginSection info={data.centralLogin} /> : null}
+			<MobileSessionsCard />
 			<BackupCard />
 			<p className="text-xs text-muted-foreground">
 				Environment only (change these on Coolify and redeploy): <span className="font-mono">{data.envOnly.join(", ")}</span>.

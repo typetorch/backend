@@ -1378,6 +1378,26 @@ export interface BlessedDevice {
 	current?: boolean;
 }
 
+/** A mobile app token (GET /v1/auth/mobile/tokens): who, which role, which device; never the token itself. */
+export interface MobileTokenView {
+	id: string;
+	device: string;
+	user: { kind: "token" } | { kind: "roblox"; userId: number; name: string; login?: "typetorch.dev" };
+	role: "admin" | "web";
+	createdAt: string;
+	expiresAt: string;
+	lastUsedAt: string | null;
+	revokedAt?: string;
+	revokeReason?: string;
+	current?: true;
+}
+
+export interface MobileTokenList {
+	tokens: MobileTokenView[];
+	/** TYPETORCH_MOBILE_TOKEN_DAYS. */
+	lifetimeDays: number;
+}
+
 /** The Settings page's read-only line about Sign in with typetorch.dev (set in the environment only). */
 export interface CentralLoginInfo {
 	on: boolean;

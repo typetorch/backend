@@ -13,6 +13,7 @@ import type {
 	BackendStats,
 	BackfillResult,
 	BlessedDevice,
+	MobileTokenList,
 	DebugAuditEntry,
 	DebugBundle,
 	ErrorDetail,
@@ -277,6 +278,9 @@ export function createApi(options: ApiOptions = {}) {
 			const name = /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? "typetorch-backup.tar";
 			return { name, blob: await response.blob() };
 		},
+		/** The mobile app's tokens (owners: every one; a viewer: their own). No hash, no secret. */
+		mobileTokens: (signal?: AbortSignal) => get<MobileTokenList>("/v1/auth/mobile/tokens", signal),
+		revokeMobileToken: (id: string, signal?: AbortSignal) => request<MobileTokenList & { ok: boolean }>(`/v1/auth/mobile/tokens/${encodeURIComponent(id)}`, { method: "DELETE", ...(signal ? { signal } : {}) }),
 		/** Sign in with typetorch.dev: the browsers trusted for full admin (owners only). */
 		devices: (signal?: AbortSignal) => get<{ devices: BlessedDevice[] }>("/v1/admin/devices", signal).then((r) => r.devices),
 		revokeDevice: (id: string, signal?: AbortSignal) =>

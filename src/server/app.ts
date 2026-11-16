@@ -65,6 +65,13 @@
  *   GET  /auth/typetorch/start | callback   the broker login (owners: admin on a blessed device, else web or refused)
  *   POST /auth/device { token }     the admin token once blesses this browser (device cookie)
  *   GET  /auth/bless/challenge, GET /auth/bless?challenge=&sig=   the CLI's link signed by the game's signing key
+ *   Mobile app (README "Mobile app"; mobile-tokens.ts): `ttm_` Bearer tokens with the admin or web role of their sign-in
+ *   GET  /auth/mobile/start?redirect_uri=typetorch://..&state=&code_challenge=&code_challenge_method=S256&device=
+ *                                   the app's sign-in in the phone's browser (through the login above), then
+ *   GET | POST /auth/mobile/consent the consent page; Continue -> redirect_uri?code=&state= (one-time, 60 s)
+ *   POST /v1/auth/mobile/token      { code, code_verifier } or the admin token as Bearer + { device } -> { token, id, expiresAt, role, user }
+ *   POST /v1/auth/mobile/refresh | logout   (a mobile token) a new token, the old one revoked | revoke this one
+ *   GET  /v1/auth/mobile/tokens, DELETE /v1/auth/mobile/tokens/<id>   admin: all; web: its own
  *   GET  /api/typetorch/challenge/<token>   the origin challenge, only while a report is pending
  *   GET  /v1/admin/devices, DELETE /v1/admin/devices/<id>, GET|PUT /v1/access/keys (PUT: admin token only),
  *   POST /v1/central/report         owners only
@@ -1408,6 +1415,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			const mobile = ref ? { mobile: { id: ref.id, expiresAt: new Date(ref.expires).toISOString() } } : {};
 			return json(200, { ok: true, role: principal.role, via: principal.via, ...(user ? { user } : {}), ...mobile, service: "typetorch-backend", version: PACKAGE.version, parts, game: gameInfo(), ...dashboard(), ...untrustedOwner(principal) });
 		}
+		const dead = deadMobile(req);
+		if (dead) return dead;
 		if (bearer(req) !== undefined) failedAuth(ip, "token check", "bearer");
 		return json(401, { error: "sign in required", login: loginOptions(), game: gameInfo(), mobileLogin: mobileLoginPath() !== undefined });
 	}
@@ -1716,6 +1725,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const y = createHash("sha256").update(b).digest();
 		return timingSafeEqual(x, y);
 	};
+	/**
+	 * A real mobile app token that no longer works (revoked, expired): `401 { error, code: "mobile_token_dead", reason }`,
+	 * not counted as a wrong token (the phone signs in again); undefined for anything else.
+	 */
+	function deadMobile(req: Request): Response | undefined {
+		const reason = auth.deadMobileToken(req);
+		return reason ? json(401, { error: "this mobile app token no longer works: sign in again", code: "mobile_token_dead", reason }) : undefined;
+	}
+
 	/** The browser login the app's sign-in goes through: typetorch.dev when it is on, else Sign in with Roblox. */
 	function mobileLoginPath(): string | undefined {
 		if (central) return `${CENTRAL_PATH}/start`;
@@ -1979,6 +1997,8 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		if (blocked) return { response: blocked };
 		const principal = auth.mobilePrincipal(req);
 		if (principal) return { principal };
+		const dead = deadMobile(req);
+		if (dead) return { response: dead };
 		if (bearer(req) !== undefined && !auth.principal(req)) failedAuth(ip, "mobile app token", "bearer");
 		return { response: json(401, { error: "a mobile app token is required (Authorization: Bearer ttm_...)" }) };
 	}
@@ -2345,6 +2365,8 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		// Who called, for the audit entry `handle` writes after the route (a write by this caller is recorded).
 		if (principal && principal.role !== "game") noteAudit(req, { principal });
 		if (!principal) {
+			const dead = deadMobile(req);
+			if (dead) return { response: dead };
 			if (bearer(req) !== undefined) failedAuth(ip, "admin request", "bearer");
 			return { response: json(401, { error: "admin token required" }) };
 		}

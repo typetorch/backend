@@ -28,6 +28,7 @@ export const MOBILE_TOKENS_KEEP_DAYS = 30;
 export const MOBILE_DEVICE_MAX = 64;
 const DAY = 86_400_000;
 const TOUCH_MS = 60_000;
+const DEAD_MAX = 5000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS mobile_tokens (
@@ -177,6 +178,11 @@ export interface MintInput {
 export class MobileTokens {
 	/** The active tokens (not revoked, not expired at the last look), by id. */
 	private readonly active = new Map<string, MobileTokenRecord>();
+	/**
+	 * Tokens that were real and are not any more (revoked, expired), by id: their hash and why, so a phone presenting one
+	 * hears "sign in again" instead of counting toward the wrong-token lockout. Bounded (DEAD_MAX, oldest go first).
+	 */
+	private readonly dead = new Map<string, { hash: string; reason: string }>();
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
 	private readonly perUser: number;
@@ -198,6 +204,8 @@ export class MobileTokens {
 		const store = new MobileTokens(db, options);
 		const rows = await db.all<Row>("SELECT * FROM mobile_tokens WHERE revoked_at IS NULL AND expires_at > ? ORDER BY created_at LIMIT ?", [store.clock(), store.max]);
 		for (const row of rows) store.active.set(row.id, toRecord(row));
+		const dead = await db.all<Row>("SELECT id, hash, revoke_reason, expires_at, revoked_at FROM mobile_tokens WHERE revoked_at IS NOT NULL OR expires_at <= ? ORDER BY created_at LIMIT ?", [store.clock(), DEAD_MAX]);
+		for (const row of dead) store.dead.set(row.id, { hash: row.hash, reason: row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired" });
 		return store;
 	}
 
@@ -280,6 +288,7 @@ export class MobileTokens {
 		const now = this.clock();
 		if (now >= record.expires) {
 			this.active.delete(record.id);
+			this.bury(record, "expired");
 			return undefined;
 		}
 		if (record.user.kind === "token" && record.adminTokenHash !== currentAdminTokenHash) {
@@ -293,6 +302,29 @@ export class MobileTokens {
 		return record;
 	}
 
+	/**
+	 * Why a presented token no longer works (revoked: the reason; or "expired"), when it is a real token that did (the
+	 * secret matches); undefined for anything else, which counts as a wrong token.
+	 */
+	deadReason(token: string): string | undefined {
+		if (token.length > 80) return undefined;
+		const m = MOBILE_TOKEN_PATTERN.exec(token);
+		if (!m) return undefined;
+		const id = m[1] as string;
+		const live = this.active.get(id);
+		const entry = live && this.clock() >= live.expires ? { hash: live.hash, reason: "expired" } : this.dead.get(id);
+		if (!entry) return undefined;
+		const given = createHash("sha256").update(token).digest();
+		const stored = Buffer.from(entry.hash, "hex");
+		return stored.length === given.length && timingSafeEqual(stored, given) ? entry.reason : undefined;
+	}
+
+	private bury(record: MobileTokenRecord, reason: string): void {
+		this.dead.delete(record.id);
+		this.dead.set(record.id, { hash: record.hash, reason });
+		while (this.dead.size > DEAD_MAX) this.dead.delete(this.dead.keys().next().value as string);
+	}
+
 	/** An active token by id (no secret check: for routes that already know the caller). */
 	get(id: string): MobileTokenRecord | undefined {
 		const t = this.active.get(id);
@@ -301,7 +333,9 @@ export class MobileTokens {
 
 	/** Revokes one token; true when it was active. */
 	async revoke(id: string, reason: string): Promise<boolean> {
+		const live = this.active.get(id);
 		const was = this.active.delete(id);
+		if (live) this.bury(live, reason.slice(0, 80));
 		const now = this.clock();
 		const r = await this.db.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE id = ? AND revoked_at IS NULL", [now, reason.slice(0, 80), id]);
 		return was || r.changes > 0;
@@ -359,6 +393,11 @@ export class MobileTokens {
 	}
 
 	private sweep(now: number): void {
-		for (const [id, t] of this.active) if (now >= t.expires) this.active.delete(id);
+		for (const [id, t] of this.active) {
+			if (now >= t.expires) {
+				this.active.delete(id);
+				this.bury(t, "expired");
+			}
+		}
 	}
 }

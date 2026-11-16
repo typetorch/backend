@@ -125,6 +125,28 @@ describe("mobile app tokens", () => {
 		expect((await h.call("/v1/queries", { headers: bearer(fake), ip })).status).toBe(429);
 	});
 
+	test("a revoked or expired token hears 'sign in again' (code mobile_token_dead) and never locks its address out", async () => {
+		const ip = freshIp();
+		const { token, id } = await asJson(await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN))));
+		expect((await h.call(`/v1/auth/mobile/tokens/${id}`, { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
+		for (let i = 0; i < 8; i++) {
+			const res = await h.call("/v1/fleet/servers", { headers: bearer(token), ip });
+			expect(res.status).toBe(401);
+			expect(await asJson(res)).toMatchObject({ code: "mobile_token_dead", reason: "revoked on the Settings page" });
+		}
+		expect((await asJson(await h.call("/v1/auth/check", { headers: bearer(token), ip }))).code).toBe("mobile_token_dead");
+		// The address is not locked out: the admin token still works from it.
+		expect((await h.call("/v1/fleet/servers", { headers: bearer(ADMIN), ip })).status).toBe(200);
+		// A forged secret on that id is a wrong token like any other.
+		const forged = await h.call("/v1/fleet/servers", { headers: bearer(`ttm_${id}_${b64(randomBytes(32))}`), ip });
+		expect((await asJson(forged)).code).toBeUndefined();
+		const was = h.now();
+		const late = await asJson(await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN))));
+		h.setNow(was + 61 * DAY);
+		expect(await asJson(await check(late.token))).toMatchObject({ code: "mobile_token_dead", reason: "expired" });
+		h.setNow(was);
+	});
+
 	test("expiry: refused once the lifetime has passed", async () => {
 		const was = h.now();
 		const { token } = await asJson(await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN))));

@@ -146,6 +146,7 @@ export interface AuthOptions {
 	mobileTokens?: {
 		resolve(token: string, currentAdminTokenHash: string): { id: string; user: SessionUser; role: AccessRole; expires: number } | undefined;
 		revoke(id: string, reason: string): Promise<boolean>;
+		deadReason(token: string): string | undefined;
 	};
 }
 
@@ -218,6 +219,16 @@ export class Auth {
 			return undefined;
 		}
 		return { role: t.role, via: "bearer", user: t.user, mobile: { id: t.id, expires: t.expires } };
+	}
+
+	/**
+	 * Why the request's Bearer, a real mobile app token, no longer works (revoked or expired), or undefined. Such a token is
+	 * refused without counting as a wrong token (the phone just signs in again).
+	 */
+	deadMobileToken(req: Request): string | undefined {
+		const given = bearer(req);
+		if (!given?.startsWith("ttm_") || !this.o.mobileTokens) return undefined;
+		return this.o.mobileTokens.deadReason(given);
 	}
 
 	/**

@@ -27,7 +27,7 @@ is the same command.
 - [Settings](#settings)
 - [Runtime settings (the Settings page)](#runtime-settings-the-settings-page)
 - [Backend alerts](#backend-alerts) (alerts from the backend's own data: errors, players online, ingest, its health, disk)
-- [Security](#security)
+- [Security](#security) ([Mobile app](#mobile-app) tokens)
 - [Routes and roles](#routes-and-roles) ([API docs for agents](#api-docs-for-agents): OpenAPI, Swagger UI, llms.txt)
 - [Deploy on Coolify](#deploy-on-coolify)
 - [Audit log](#audit-log)
@@ -154,6 +154,8 @@ See [Runtime settings](#runtime-settings-the-settings-page).
 | `TYPETORCH_ERRORS_IP_PER_MINUTE` | `1200` | `POST /v1/errors` per address per minute (game servers share egress addresses). |
 | `TYPETORCH_ERROR_ROWS_PER_DAY` | `2000000` | New error count and player rows per UTC day; past it new rows are dropped and counted. |
 | `TYPETORCH_SESSION_IDLE_HOURS`, `TYPETORCH_SESSION_MAX_DAYS` | `12`, `7` | Explorer session lifetime. |
+| `TYPETORCH_MOBILE_TOKEN_DAYS` | `60` | [Mobile app](#mobile-app) token lifetime, kept between 30 and 90 (a warning names the value used). |
+| `TYPETORCH_MOBILE_DEV_REDIRECTS` | `off` | `on` lets the mobile app's sign-in send its code to Expo Go (`exp://`, `exps://`) during development. |
 | `TYPETORCH_LOGIN_MAX_FAILURES`, `TYPETORCH_LOGIN_WINDOW_MINUTES` | `5`, `15` | Failed logins per address before 429. |
 | `TYPETORCH_BUS_MAX_QUEUE`, `TYPETORCH_BUS_MAX_BYTES` | `1000`, 8 MB | What a queued bus subscriber holds before it drops. |
 | `TYPETORCH_LIVE_MAX_CLIENTS` | `20` | Concurrent `GET /v1/live` streams, and the same number of `GET /v1/fleet/stream` streams. |
@@ -513,6 +515,46 @@ To try it locally against a broker on `http://127.0.0.1:8788` (typetorch/dash, `
 (the public URL is then `http://localhost:8787`, which the broker accepts as a loopback origin; the fake Roblox's client
 id and discovery URL come from the broker's `/.well-known/typetorch-login`, nothing to copy).
 
+### Mobile app
+
+The TypeTorch app (an Expo app) signs in to each backend once and keeps a **mobile app token** in the phone's secure store,
+then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer <token>`.
+
+- **The token.** `ttm_<id>_<secret>` (`id`: 10 characters `[0-9a-z]`; `secret`: base64url of 32 random bytes). The server
+  keeps only its SHA-256 (SQLite `mobile_tokens`, compared in constant time), never logs it and shows it once. It lasts
+  `TYPETORCH_MOBILE_TOKEN_DAYS` (60; 30 to 90). It has the role its sign-in gave: **admin** or **web** (read-only), the
+  same gates as a session (it never reaches the admin-token-only routes, `PUT /v1/access` and `PUT /v1/access/keys`). A
+  Roblox user's token is re-checked on every request (admin: still an owner; web: a viewer or an owner) and revoked for
+  good when that fails. One made with the admin token dies when the admin token changes; one an owner made through
+  typetorch.dev on a trusted browser dies when that browser is revoked. 20 active tokens per user (the one used longest
+  ago goes), 2,000 in all; revoked and expired rows are kept 30 days for the list. Wrong tokens count toward the
+  5-failure lockout like any Bearer; the admin allow list applies.
+- **Sign in (browser, PKCE).** The app opens `GET /auth/mobile/start?redirect_uri=typetorch://...&state=&code_challenge=
+  <S256 of the verifier>&code_challenge_method=S256&device=<name>` in the phone's browser. The backend keeps the request
+  for 10 minutes under an `HttpOnly`, `SameSite=Lax` cookie (`tt_mobile`) and sends the browser through its own login:
+  typetorch.dev when that is on, else Sign in with Roblox. The role is exactly what that browser login would give (an
+  owner on a browser that was never trusted gets web, as in the explorer). Instead of an explorer session the browser
+  then shows a consent page ("Sign in to <game> on the TypeTorch app (<device>) as <name>, role <role>?"); Continue
+  redirects to `redirect_uri?code=<one-time, 60 s>&state=`, Cancel to `redirect_uri?error=access_denied&state=` (a
+  refused or failed login: `?error=not_owner | not_blessed | state | failed ...&state=`). The app trades the code:
+  `POST /v1/auth/mobile/token { code, code_verifier }` -> `{ token, id, expiresAt, role, user }`. A code works once; a
+  wrong verifier burns it.
+- **`redirect_uri`.** `typetorch://...` only (no fragment, no user or password); Expo Go's `exp://` and `exps://` only with
+  `TYPETORCH_MOBILE_DEV_REDIRECTS=on` (an Expo Go address can name anyone's development server, so it is off in
+  production; the consent page warns when one is used). A bad `redirect_uri` gets an error page, never a redirect.
+- **With the admin token.** `POST /v1/auth/mobile/token` with the admin token as Bearer and `{ device }` makes an admin
+  token, so the app's "paste the admin token" path never keeps the admin token itself.
+- **Renew, sign out, revoke.** `POST /v1/auth/mobile/refresh` (with the token) gives a new token with a fresh expiry and
+  revokes the old one (the app calls it when fewer than 15 days remain). `POST /v1/auth/mobile/logout` revokes the
+  caller's token. `GET /v1/auth/mobile/tokens` lists them (owners: all; a viewer: their own; `?all=1` adds revoked and
+  expired ones), `DELETE /v1/auth/mobile/tokens/<id>` revokes one (owners: any; a viewer: their own); the Settings page's
+  **Mobile app sessions** card does both. Minting, refreshing, revoking and the consent are in the [audit log](#audit-log)
+  (`mobile.*`), with the token's id, never the token.
+- **Which game.** `GET /v1/auth/check` carries `game: { universeId, label }` (`TYPETORCH_UNIVERSE_ID`, the
+  typetorch.dev label or the public URL's host), signed in or not, so the app can match a backend to a Roblox universe;
+  signed out it also says `mobileLogin` (the browser sign-in is on). With a mobile token it adds `mobile: { id, expiresAt }`.
+  The game's name and icon are `GET /v1/place`.
+
 ### On Coolify: the short list
 
 1. https on (a domain on the app; Coolify's proxy gets the certificate).
@@ -533,6 +575,7 @@ The full steps are in [Deploy on Coolify](#deploy-on-coolify).
 **game** = the API key (or the previous key). **admin** = the admin token as a Bearer header, or an owner's explorer session
 cookie. **web** = the read-only role: a Roblox viewer's session cookie (no token); it gets every route marked `admin, web`
 below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / `PATCH` other than the two query routes.
+A [mobile app token](#mobile-app) (`ttm_...`) as a Bearer header is admin or web, as its sign-in was.
 **lookup** = `TYPETORCH_LOOKUP_TOKEN` as a Bearer header: the routes marked `lookup` only, `403` everywhere else.
 **open** = no credentials.
 
@@ -588,7 +631,11 @@ below, `403` on the rest of the admin routes, and `403` on any `POST` / `PUT` / 
 | `POST /auth/device` | open: the admin token in the body, `X-TypeTorch` header | trusts this browser (device cookie); `{ ok, blessed, upgraded? }`: `upgraded` when this browser's owner read-only typetorch.dev session became admin (new session cookie) |
 | `GET /auth/bless/challenge`, `GET /auth/bless` | open (rate limited, lockout) | the CLI's signed trust link |
 | `GET /api/typetorch/challenge/<token>` | open (rate limited) | the origin challenge, only while a report is pending |
-| `GET /v1/admin/devices`, `DELETE /v1/admin/devices/<id>` | admin | trusted browsers; revoking ends their admin sessions |
+| `GET /v1/admin/devices`, `DELETE /v1/admin/devices/<id>` | admin | trusted browsers; revoking ends their admin sessions and the mobile app tokens made through them |
+| `GET /auth/mobile/start`, `GET`/`POST /auth/mobile/consent` | open (rate limited, lockout) | the [mobile app](#mobile-app)'s browser sign-in and its consent page |
+| `POST /v1/auth/mobile/token` | open: a sign-in code + PKCE verifier, or the admin token as Bearer | `{ token, id, expiresAt, role, user }` |
+| `POST /v1/auth/mobile/refresh`, `POST /v1/auth/mobile/logout` | a mobile app token | a new token (the old one revoked); revoke the caller's token |
+| `GET /v1/auth/mobile/tokens`, `DELETE /v1/auth/mobile/tokens/<id>` | admin, web (its own) | mobile app tokens (no secret); revoke one |
 | `GET /v1/access/keys` | admin | the signing keys a trust link may use |
 | `PUT /v1/access/keys` | admin token only (not a session) | `{ keys: [base64 raw Ed25519 public key, ...] }` (4 at most) |
 | `POST /v1/central/report` | admin | send the origin report now |
@@ -689,7 +736,8 @@ method: `token`, `roblox`, `typetorch.dev`, `bearer` for a wrong token on a rout
 (`sign-in.lockout`), settings changes (`settings.change`: each key with its old and new value and its source; the webhook
 URL only as `set` / `not set`; lists such as viewers and the allow list as added / removed), refused saves (the lockout
 guards), test alerts, the owner list (`access.owners`: seq, added, removed) and the signing keys, trusted browsers
-(`device.trust`, `device.revoke`), alert acks (`alert.ack`), erasure (`erasure`: counts only, never a pid or a UserId; the
+(`device.trust`, `device.revoke`), mobile app sign-ins and tokens (`mobile.sign-in`, `mobile.token.mint`,
+`mobile.token.refresh`, `mobile.token.revoke`: the token's id and device, never the token), alert acks (`alert.ack`), erasure (`erasure`: counts only, never a pid or a UserId; the
 Roblox webhook too), the identity backfill, backups (`backup.create`, `backup.download`), remote debug watches and
 commands, the CLI's release starts and marks (`deploy.start`, `deploy.mark`, by the API key), and any other write by a
 signed-in caller under `<METHOD> <route>` (a write the web role tried is recorded as `refused`).
