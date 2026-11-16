@@ -81,6 +81,13 @@
  *   GET  /auth/typetorch/start | callback   the broker login (owners: admin on a blessed device, else web or refused)
  *   POST /auth/device { token }     the admin token once blesses this browser (device cookie)
  *   GET  /auth/bless/challenge, GET /auth/bless?challenge=&sig=   the CLI's link signed by the game's signing key
+ *   Mobile app (README "Mobile app"; mobile-tokens.ts): `ttm_` Bearer tokens with the admin or web role of their sign-in
+ *   GET  /auth/mobile/start?redirect_uri=typetorch://..&state=&code_challenge=&code_challenge_method=S256&device=
+ *                                   the app's sign-in in the phone's browser (through the login above), then
+ *   GET | POST /auth/mobile/consent the consent page; Continue -> redirect_uri?code=&state= (one-time, 60 s)
+ *   POST /v1/auth/mobile/token      { code, code_verifier } or the admin token as Bearer + { device } -> { token, id, expiresAt, role, user }
+ *   POST /v1/auth/mobile/refresh | logout   (a mobile token) a new token, the old one revoked | revoke this one
+ *   GET  /v1/auth/mobile/tokens, DELETE /v1/auth/mobile/tokens/<id>   admin: all; web: its own
  *   GET  /api/typetorch/challenge/<token>   the origin challenge, only while a report is pending
  *   GET  /v1/admin/devices, DELETE /v1/admin/devices/<id>, GET|PUT /v1/access/keys (PUT: admin token only),
  *   POST /v1/central/report         owners only
@@ -88,6 +95,7 @@
  *
  * The explorer calls /api/<route> (its dev proxy's prefix); the backend takes that prefix off, so one build works both ways.
  */
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -129,7 +137,8 @@ import { KeyError, KeyStore, scopeOf, type CallerKey } from "./keys.ts";
 import { NAMES_MAX } from "../queries/player-support.ts";
 import { ANONYMOUS, AUDIT_PAGE_MAX, AuditLog, actorOfUser, routeAction, settingChanges, type AuditActor, type AuditOutcome, type AuditRole, type AuditVia } from "./audit.ts";
 import { BackupError, Backups } from "./backup.ts";
-import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
+import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, originProblem, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
+import { MOBILE_ID_PATTERN, MobileTokenError, MobileTokens, deviceName, sameUser, viewOf, type MobileTokenRecord, type MobileUser } from "./mobile-tokens.ts";
 import type { ServerConfig } from "./config.ts";
 import { DiskWatch, type DiskUsage } from "./disk.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
@@ -176,7 +185,6 @@ import { IngestBusy } from "./busy.ts";
 import { MainQueue, s3Bucket, type QueueBucket, type QueueStats } from "./queue.ts";
 import { ExportApi } from "./export.ts";
 import { MigrateError, Migration, type StartBody } from "./migrate.ts";
-import { randomBytes } from "node:crypto";
 
 export interface AppOptions {
 	clock?: () => number;
@@ -297,6 +305,16 @@ const OAUTH_PATH = "/v1/auth/roblox";
 /** Sign in with typetorch.dev: its routes and its short-lived state cookie (path-scoped like the Roblox one). */
 const CENTRAL_PATH = "/auth/typetorch";
 const CENTRAL_COOKIE = "tt_central";
+/** The mobile app's sign-in in the phone's browser: its routes, its pending-login cookie and its limits. */
+const MOBILE_PATH = "/auth/mobile";
+const MOBILE_COOKIE = "tt_mobile";
+const MOBILE_PENDING_MS = 10 * 60_000;
+const MOBILE_CODE_MS = 60_000;
+const MOBILE_PENDING_MAX = 500;
+const MOBILE_PENDING_PER_IP = 5;
+const MOBILE_CODES_MAX = 500;
+/** The consent page loads nothing; its form posts here and its answer redirects to the app's scheme. */
+const MOBILE_CONSENT_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' typetorch: exp: exps:; frame-ancestors 'none'; base-uri 'none'";
 const FLEET_GAME_ROUTES = new Set(Object.keys(FLEET_LIMITS));
 /** POST /v1/errors per JobId per minute (the kernel sends at most 6). */
 const ERROR_JOB_PER_MINUTE = 30;
@@ -425,6 +443,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		keepDays: () => runtime.get("auditKeepDays"),
 		secrets: () => [config.adminToken, ...config.apiKeys, config.queue?.secretAccessKey, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, config.basinRead?.token, ...(migration?.secrets() ?? [])],
 	});
+	// Mobile app tokens (server/mobile-tokens.ts): the TypeTorch app's long-lived Bearers.
+	const mobileTokens = await MobileTokens.open(sqlite, { days: config.mobileTokenDays, clock, log });
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	// Scheduled live events (live-events.ts): the schedule the owner signs with the CLI, and each event's lift report.
 	const liveEvents = await LiveEventStore.open(sqlite, clock);
@@ -636,7 +656,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		tokenLogin: () => runtime.get("tokenLogin"),
 		// `central` is made below; this runs per request, after it.
 		deviceActive: (id) => central?.devices.has(id) ?? true,
+		mobileTokens,
 	});
+	/** The token login turned off: the mobile app tokens made with the admin token end like its explorer sessions. */
+	const endTokenMobileTokens = () => mobileTokens.revokeWhere((t) => t.user.kind === "token", "token login turned off").catch(() => 0);
 	/** Ends the Roblox sessions whose user no longer holds the role they signed in with (an owner removed, a viewer removed). */
 	const endStaleRobloxSessions = () => sessions.endWhere((s) => s.user.kind === "roblox" && !auth.robloxStillHolds(s.user.userId, s.role));
 	const proxyOpts = { trustProxy: config.trustProxy, ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}) };
@@ -2067,6 +2090,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return setCookie(SESSION_COOKIE, value, { secure: secureCookie(req), sameSite: "Strict", maxAgeSeconds: config.sessionMaxMs / 1000 });
 	}
 	const describeUser = (p: Principal) => ("user" in p ? p.user : undefined);
+	/** The admin token itself as a Bearer (the CLI): not a session, not a mobile app token (even one made with it). */
+	const isAdminToken = (p: Principal) => p.via === "bearer" && p.role === "admin" && !p.mobile && p.user.kind === "token";
+	/** Which game this backend is for, so the mobile app can match a backend to a Roblox universe. */
+	const gameInfo = () => ({ universeId: config.universeId ?? null, label: central?.config.label ?? (config.publicUrl ? new URL(config.publicUrl).host : null) });
 
 	/** GET /v1/auth/check: which role these credentials have. No side effects (a rejected Bearer only counts toward the limit). */
 	function authCheck(req: Request, ip: string): Response {
@@ -2088,21 +2115,26 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			// part that is off (a game key writes to every part that runs; the admin token reads them).
 			const parts = { analytics: config.parts.has("analytics"), fleet: config.parts.has("fleet") };
 			const named = auth.key(req);
+			const ref = principal.role !== "game" && principal.via === "bearer" ? principal.mobile : undefined;
 			return json(200, {
 				ok: true,
 				role: principal.role,
 				via: principal.via,
 				...(user ? { user } : {}),
 				...(named ? { key: { id: named.id, name: named.name, role: named.role }, scopes: [...named.scopes] } : {}),
+				...(ref ? { mobile: { id: ref.id, expiresAt: new Date(ref.expires).toISOString() } } : {}),
 				service: "typetorch-backend",
 				version: PACKAGE.version,
 				parts,
+				game: gameInfo(),
 				...dashboard(),
 				...untrustedOwner(principal),
 			});
 		}
+		const dead = deadMobile(req);
+		if (dead) return dead;
 		if (bearer(req) !== undefined) failedAuth(ip, "token check", "bearer");
-		return json(401, { error: "sign in required", login: loginOptions() });
+		return json(401, { error: "sign in required", login: loginOptions(), game: gameInfo(), mobileLogin: mobileLoginPath() !== undefined });
 	}
 
 	/**
@@ -2169,7 +2201,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		try {
 			const { url, state } = await oauth.start(ip);
 			const cookie = setCookie(OAUTH_COOKIE, state, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: 600, path: OAUTH_PATH });
-			return redirect(url, [cookie]);
+			return redirect(url, [cookie, ...dropStaleMobile(req)]);
 		} catch (error) {
 			log(`roblox sign-in could not start: ${error instanceof OAuthError ? error.detail : "unexpected error"}`);
 			return redirect("/?login_error=failed");
@@ -2181,6 +2213,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!adminIpOk(ip)) return notFound();
 		if (!oauthLimiter.take(`callback:${ip}`)) return tooMany(oauthLimiter.retryAfter(`callback:${ip}`));
 		const clear = clearCookie(OAUTH_COOKIE, { secure: secureCookie(req), sameSite: "Lax", path: OAUTH_PATH });
+		const mobile = mobilePendingOf(req);
 		try {
 			const who = await oauth.complete(
 				{ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") },
@@ -2190,9 +2223,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (!role) {
 				log(`roblox sign-in refused from ${ip}: user ${who.userId} is not an owner or a viewer`);
 				noteAudit(req, { actor: { kind: "roblox", label: `roblox user ${who.userId}`, userId: who.userId }, role: "none", via: "none", action: "sign-in", outcome: "refused", details: { method: "roblox", reason: "not an owner or a viewer" } });
-				return redirect("/?login_error=not_owner", [clear]);
+				return mobile ? mobileFailed(req, mobile, "not_owner", [clear]) : redirect("/?login_error=not_owner", [clear]);
 			}
 			const user: SessionUser = { kind: "roblox", userId: who.userId, name: who.name, ...(who.displayName ? { displayName: who.displayName } : {}), ...(who.avatar ? { avatar: who.avatar } : {}) };
+			// Started by the mobile app: no explorer session here, the consent page instead.
+			if (mobile) return mobileSignedIn(req, mobile, user, role, "roblox", undefined, [clear]);
 			const id = sessions.create(user, role);
 			noteSignIn(req, user, role, "roblox");
 			return redirect("/", [clear, sessionCookie(req, id)]);
@@ -2200,11 +2235,11 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			if (error instanceof OAuthError) {
 				log(`roblox sign-in failed from ${ip}: ${error.code}: ${error.detail}`);
 				noteAudit(req, { actor: ANONYMOUS, role: "none", via: "none", action: "sign-in", outcome: "failed", details: { method: "roblox", code: error.code } });
-				return redirect(`/?login_error=${error.code}`, [clear]);
+				return mobile ? mobileFailed(req, mobile, error.code, [clear]) : redirect(`/?login_error=${error.code}`, [clear]);
 			}
 			log(`roblox sign-in failed from ${ip}: unexpected error`);
 			noteAudit(req, { actor: ANONYMOUS, role: "none", via: "none", action: "sign-in", outcome: "failed", details: { method: "roblox", code: "failed" } });
-			return redirect("/?login_error=failed", [clear]);
+			return mobile ? mobileFailed(req, mobile, "failed", [clear]) : redirect("/?login_error=failed", [clear]);
 		}
 	}
 
@@ -2224,7 +2259,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (!oauthLimiter.take(`central-start:${ip}`)) return tooMany(oauthLimiter.retryAfter(`central-start:${ip}`));
 		const { url, state } = central.login.start(ip);
 		const cookie = setCookie(CENTRAL_COOKIE, state, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: 600, path: CENTRAL_PATH });
-		return redirect(url, [cookie]);
+		return redirect(url, [cookie, ...dropStaleMobile(req)]);
 	}
 
 	/**
@@ -2239,18 +2274,19 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (blocked) return blocked;
 		if (!oauthLimiter.take(`central-callback:${ip}`)) return tooMany(oauthLimiter.retryAfter(`central-callback:${ip}`));
 		const clear = clearCookie(CENTRAL_COOKIE, { secure: secureCookie(req), sameSite: "Lax", path: CENTRAL_PATH });
+		const mobile = mobilePendingOf(req);
 		let who;
 		try {
 			who = await central.login.complete({ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") }, readCookie(req, CENTRAL_COOKIE));
 		} catch (error) {
 			const code = error instanceof OAuthError ? error.code : "failed";
 			failedAuth(ip, `typetorch.dev login (${error instanceof OAuthError ? `${error.code}: ${error.detail}` : "unexpected error"})`, "typetorch.dev");
-			return redirect(`/?login_error=${code}`, [clear]);
+			return mobile ? mobileFailed(req, mobile, code, [clear]) : redirect(`/?login_error=${code}`, [clear]);
 		}
 		const listed = auth.roleOfRobloxUser(who.userId);
 		if (!listed) {
 			failedAuth(ip, `typetorch.dev login (user ${who.userId} is not an owner or a viewer)`, "typetorch.dev");
-			return redirect("/?login_error=not_owner", [clear]);
+			return mobile ? mobileFailed(req, mobile, "not_owner", [clear]) : redirect("/?login_error=not_owner", [clear]);
 		}
 		let role = listed;
 		const cookies = [clear];
@@ -2264,8 +2300,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			} else if (central.config.unblessed === "refuse") {
 				log(`login: typetorch.dev refused owner ${who.userId} from ${ip}: this device was never blessed (TYPETORCH_CENTRAL_LOGIN_UNBLESSED=refuse)`);
 				noteAudit(req, { actor: actorOfUser({ kind: "roblox", userId: who.userId, name: who.name, login: "typetorch.dev" }), role: "none", via: "none", action: "sign-in", outcome: "refused", details: { method: "typetorch.dev", reason: "this browser was never trusted" } });
-				return redirect("/?login_error=not_blessed", [clear]);
+				return mobile ? mobileFailed(req, mobile, "not_blessed", [clear]) : redirect("/?login_error=not_blessed", [clear]);
 			} else role = "web";
+		}
+		// Started by the mobile app: the same role this browser would get, no explorer session, the consent page instead.
+		// An owner's admin token from a trusted browser is tied to it (revoking the browser revokes the token).
+		if (mobile) {
+			authFailures.reset(ip);
+			const appUser: SessionUser = { kind: "roblox", userId: who.userId, name: who.name, login: "typetorch.dev" };
+			const blessed = role === "admin" && rotated ? rotated.slice(0, rotated.indexOf(".")) : undefined;
+			return mobileSignedIn(req, mobile, appUser, role, "typetorch.dev", blessed, cookies);
 		}
 		// Never reuse a session id from before the login.
 		sessions.destroy(readCookie(req, SESSION_COOKIE));
@@ -2362,6 +2406,376 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		return redirect("/?blessed=1", [deviceCookie(req, value), ...(upgraded ? [upgraded] : [])]);
 	}
 
+	// Mobile app sign-in (README "Mobile app") ---------------------------------------------------------------------------
+	// GET /auth/mobile/start keeps the app's request (redirect_uri, state, PKCE challenge, device) under a short-lived
+	// HttpOnly cookie, then sends the browser through this backend's own login (typetorch.dev when it is on, else Sign in
+	// with Roblox). Their callbacks see the cookie and, instead of an explorer session, show the consent page; Continue
+	// sends a one-time 60-second code to the app's redirect_uri, which POST /v1/auth/mobile/token trades (with the PKCE
+	// verifier) for a mobile app token. The role is what the browser login would have given.
+
+	interface MobileLogin {
+		user: MobileUser;
+		role: AccessRole;
+		method: "roblox" | "typetorch.dev";
+		blessedDevice?: string;
+		/** The consent form's token (only this page knows it). */
+		form: string;
+	}
+	interface MobilePending {
+		redirectUri: string;
+		state: string;
+		challenge: string;
+		device: string;
+		created: number;
+		ip: string;
+		login?: MobileLogin;
+	}
+	/** sha256(cookie) -> the pending app sign-in. */
+	const mobilePending = new Map<string, MobilePending>();
+	/** sha256(code) -> a finished sign-in waiting for POST /v1/auth/mobile/token. */
+	const mobileCodes = new Map<string, MobilePending & { login: MobileLogin; expires: number }>();
+	const mobileLimiter = new RateLimiter(30, clock);
+	const sha256Hex = (value: string) => createHash("sha256").update(value).digest("hex");
+	const sameSecret = (a: string, b: string) => {
+		const x = createHash("sha256").update(a).digest();
+		const y = createHash("sha256").update(b).digest();
+		return timingSafeEqual(x, y);
+	};
+	/**
+	 * A real mobile app token that no longer works (revoked, expired): `401 { error, code: "mobile_token_dead", reason }`,
+	 * not counted as a wrong token (the phone signs in again); undefined for anything else.
+	 */
+	function deadMobile(req: Request): Response | undefined {
+		const reason = auth.deadMobileToken(req);
+		return reason ? json(401, { error: "this mobile app token no longer works: sign in again", code: "mobile_token_dead", reason }) : undefined;
+	}
+
+	/** The browser login the app's sign-in goes through: typetorch.dev when it is on, else Sign in with Roblox. */
+	function mobileLoginPath(): string | undefined {
+		if (central) return `${CENTRAL_PATH}/start`;
+		if (oauth) return `${OAUTH_PATH}/start`;
+		return undefined;
+	}
+	const mobileCookie = (req: Request, value: string) => setCookie(MOBILE_COOKIE, value, { secure: secureCookie(req), sameSite: "Lax", maxAgeSeconds: MOBILE_PENDING_MS / 1000 });
+	const clearMobileCookie = (req: Request) => clearCookie(MOBILE_COOKIE, { secure: secureCookie(req), sameSite: "Lax" });
+
+	function sweepMobile(now: number): void {
+		for (const [k, v] of mobilePending) if (now - v.created > MOBILE_PENDING_MS) mobilePending.delete(k);
+		for (const [k, v] of mobileCodes) if (now >= v.expires) mobileCodes.delete(k);
+	}
+
+	/** The app's redirect_uri: `typetorch://...`, or Expo Go's exp:// / exps:// with TYPETORCH_MOBILE_DEV_REDIRECTS=on. */
+	function mobileRedirectProblem(raw: string | null): string | undefined {
+		if (!raw || raw.length > 512 || /[\u0000- \u007f]/.test(raw)) return "redirect_uri is missing, too long or has spaces";
+		let u: URL;
+		try {
+			u = new URL(raw);
+		} catch {
+			return "redirect_uri is not a URL";
+		}
+		if (raw.includes("#")) return "redirect_uri may not have a fragment";
+		if (u.username || u.password) return "redirect_uri may not carry a user or password";
+		if (u.protocol === "typetorch:") return undefined;
+		if (u.protocol === "exp:" || u.protocol === "exps:") return config.mobileDevRedirects ? undefined : "Expo Go redirects (exp://) are off on this server (TYPETORCH_MOBILE_DEV_REDIRECTS=on turns them on)";
+		return "redirect_uri must start with typetorch://";
+	}
+
+	function appRedirect(redirectUri: string, params: Record<string, string>): string {
+		const u = new URL(redirectUri);
+		for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+		return u.toString();
+	}
+
+	const esc = (v: string) => v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
+
+	/** A small self-contained page (no script, nothing loaded): the consent page, and the sign-in's errors. */
+	function mobilePage(status: number, title: string, body: string, cookies: string[] = []): Response {
+		const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>${esc(title)}</title><style>
+:root{color-scheme:light dark;--bg:#fff;--fg:#0a0a0a;--muted:#737373;--border:#e5e5e5;--primary:#171717;--primary-fg:#fafafa;--warn:#b45309}
+@media (prefers-color-scheme:dark){:root{--bg:#0a0a0a;--fg:#fafafa;--muted:#a3a3a3;--border:#262626;--primary:#fafafa;--primary-fg:#171717;--warn:#f59e0b}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:420px;margin:48px auto;padding:0 16px}.card{border:1px solid var(--border);border-radius:12px;padding:20px}
+h1{font-size:18px;margin:0 0 12px}p{margin:0 0 12px;overflow-wrap:anywhere}.muted{color:var(--muted);font-size:13px}.warn{color:var(--warn);font-size:13px}
+.row{display:flex;gap:8px;margin-top:16px}button{flex:1;font:inherit;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--fg);cursor:pointer}
+button.primary{background:var(--primary);color:var(--primary-fg);border-color:var(--primary)}code{font-size:13px}
+</style></head><body><main><div class="card"><h1>${esc(title)}</h1>${body}</div></main></body></html>`;
+		const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": MOBILE_CONSENT_CSP });
+		for (const c of cookies) headers.append("set-cookie", c);
+		return new Response(html, { status, headers });
+	}
+
+	/** The pending app sign-in behind this browser's cookie (not yet signed in), or undefined. */
+	function mobilePendingOf(req: Request): { key: string; pending: MobilePending } | undefined {
+		const cookie = readCookie(req, MOBILE_COOKIE);
+		if (!cookie || cookie.length > 128) return undefined;
+		const key = sha256Hex(cookie);
+		const pending = mobilePending.get(key);
+		if (!pending || clock() - pending.created > MOBILE_PENDING_MS || pending.login) return undefined;
+		return { key, pending };
+	}
+
+	/** A plain explorer login start drops an app sign-in this browser left pending (so it can't capture the login). */
+	function dropStaleMobile(req: Request): string[] {
+		if (new URL(req.url).searchParams.get("mobile") === "1") return [];
+		const cookie = readCookie(req, MOBILE_COOKIE);
+		if (!cookie) return [];
+		if (cookie.length <= 128) mobilePending.delete(sha256Hex(cookie));
+		return [clearMobileCookie(req)];
+	}
+
+	/** GET /auth/mobile/start?redirect_uri=&state=&code_challenge=&code_challenge_method=S256&device= */
+	function mobileStart(req: Request, url: URL, ip: string): Response {
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		if (!mobileLimiter.take(`start:${ip}`)) return tooMany(mobileLimiter.retryAfter(`start:${ip}`));
+		const q = url.searchParams;
+		const redirectUri = q.get("redirect_uri");
+		const problem = mobileRedirectProblem(redirectUri);
+		// Never redirect to a redirect_uri that failed the check: the answer is a page.
+		if (problem) return mobilePage(400, "Can't sign in", `<p>${esc(problem)}.</p>`);
+		const state = q.get("state") ?? "";
+		const challenge = q.get("code_challenge") ?? "";
+		if (!/^[\x21-\x7e]{1,512}$/.test(state)) return mobilePage(400, "Can't sign in", "<p>The app's request has no valid <code>state</code>.</p>");
+		if (q.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return mobilePage(400, "Can't sign in", "<p>The app's request needs a PKCE <code>code_challenge</code> with <code>code_challenge_method=S256</code>.</p>");
+		const login = mobileLoginPath();
+		if (!login) return mobilePage(404, "No browser sign-in here", "<p>This backend has neither Sign in with typetorch.dev nor Sign in with Roblox on. Sign the app in with the admin token instead.</p>");
+		const now = clock();
+		sweepMobile(now);
+		// At most a few pending per address (its oldest go), and MOBILE_PENDING_MAX in all (the oldest go).
+		const fromIp = [...mobilePending.entries()].filter(([, v]) => v.ip === ip);
+		for (const [k] of fromIp.slice(0, Math.max(0, fromIp.length + 1 - MOBILE_PENDING_PER_IP))) mobilePending.delete(k);
+		while (mobilePending.size >= MOBILE_PENDING_MAX) mobilePending.delete(mobilePending.keys().next().value as string);
+		const value = randomBytes(32).toString("base64url");
+		mobilePending.set(sha256Hex(value), { redirectUri: redirectUri as string, state, challenge, device: deviceName(q.get("device")), created: now, ip });
+		return redirect(`${login}?mobile=1`, [mobileCookie(req, value)]);
+	}
+
+	/** The browser login finished for an app sign-in: keep who and which role, then the consent page. */
+	function mobileSignedIn(req: Request, m: { key: string; pending: MobilePending }, user: MobileUser, role: AccessRole, method: MobileLogin["method"], blessedDevice: string | undefined, cookies: string[]): Response {
+		m.pending.login = { user, role, method, ...(blessedDevice ? { blessedDevice } : {}), form: randomBytes(24).toString("base64url") };
+		noteAudit(req, { actor: actorOfUser(user), role, via: "none", action: "mobile.sign-in", outcome: "ok", details: { method, role, device: m.pending.device } });
+		return redirect(`${MOBILE_PATH}/consent`, cookies);
+	}
+
+	/** The browser login failed or was refused for an app sign-in: the app hears `error` (and its state); nothing is kept. */
+	function mobileFailed(req: Request, m: { key: string; pending: MobilePending }, code: string, cookies: string[]): Response {
+		mobilePending.delete(m.key);
+		return redirect(appRedirect(m.pending.redirectUri, { error: /^[a-z_]{1,40}$/.test(code) ? code : "failed", state: m.pending.state }), [...cookies, clearMobileCookie(req)]);
+	}
+
+	/** The signed-in app sign-in behind this browser's cookie, or undefined. */
+	function mobileConsentOf(req: Request): { key: string; pending: MobilePending & { login: MobileLogin } } | undefined {
+		const cookie = readCookie(req, MOBILE_COOKIE);
+		if (!cookie || cookie.length > 128) return undefined;
+		const key = sha256Hex(cookie);
+		const pending = mobilePending.get(key);
+		if (!pending?.login || clock() - pending.created > MOBILE_PENDING_MS) return undefined;
+		return { key, pending: pending as MobilePending & { login: MobileLogin } };
+	}
+
+	const expiredPage = (req: Request) => mobilePage(400, "This sign-in expired", "<p>Start again from the TypeTorch app.</p>", [clearMobileCookie(req)]);
+
+	/** GET /auth/mobile/consent: "Sign in to <game> on the TypeTorch app (<device>) as <name>, role <role>?" */
+	function mobileConsentPage(req: Request, ip: string): Response {
+		if (!adminIpOk(ip)) return notFound();
+		const m = mobileConsentOf(req);
+		if (!m) return expiredPage(req);
+		const { login, device, redirectUri } = m.pending;
+		const label = gameInfo().label ?? "this backend";
+		const who = login.user.kind === "roblox" ? login.user.name : "the admin token";
+		const roleText = login.role === "admin" ? "admin (reads and manages)" : "web (read-only)";
+		const dev = new URL(redirectUri).protocol !== "typetorch:";
+		const body = `<p>Sign in to <strong>${esc(label)}</strong> on the TypeTorch app (<strong>${esc(device)}</strong>) as <strong>${esc(who)}</strong>, role <strong>${esc(roleText)}</strong>?</p>
+<p class="muted">The app stays signed in for ${config.mobileTokenDays} days unless it is revoked (Settings, Mobile app sessions). Continue only if you just started this sign-in in the app yourself.</p>
+${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${esc(redirectUri.slice(0, 120))}</code>. Continue only if that is your own development server.</p>` : ""}
+<form method="post" action="${MOBILE_PATH}/consent"><input type="hidden" name="form" value="${esc(login.form)}"><div class="row"><button type="submit" name="decision" value="deny">Cancel</button><button class="primary" type="submit" name="decision" value="allow">Continue</button></div></form>`;
+		return mobilePage(200, "Sign in to the TypeTorch app", body);
+	}
+
+	/** POST /auth/mobile/consent (the page's form): Continue sends a one-time code to the app; Cancel, access_denied. */
+	async function mobileConsent(req: Request, ip: string): Promise<Response> {
+		if (!adminIpOk(ip)) return notFound();
+		const problem = originProblem(req, proxyOpts);
+		if (problem) return mobilePage(403, "Can't sign in", `<p>${esc(problem)}.</p>`);
+		if (!/^application\/x-www-form-urlencoded\b/i.test(req.headers.get("content-type") ?? "")) return mobilePage(415, "Can't sign in", "<p>Use the page's buttons.</p>");
+		const raw = await readCapped(req, 2048);
+		if (!raw) return mobilePage(413, "Can't sign in", "<p>Use the page's buttons.</p>");
+		const form = new URLSearchParams(Buffer.from(raw).toString("utf8"));
+		const m = mobileConsentOf(req);
+		if (!m) return expiredPage(req);
+		const given = form.get("form") ?? "";
+		if (!sameSecret(given, m.pending.login.form)) return mobilePage(403, "Can't sign in", "<p>This page is out of date. Start again from the TypeTorch app.</p>");
+		// One answer per sign-in, whatever it is.
+		mobilePending.delete(m.key);
+		const { login, redirectUri, state } = m.pending;
+		const cookies = [clearMobileCookie(req)];
+		if (form.get("decision") !== "allow") {
+			noteAudit(req, { actor: actorOfUser(login.user), role: login.role, via: "none", action: "mobile.sign-in", outcome: "refused", details: { method: login.method, reason: "cancelled on the consent page" } });
+			return seeOther(appRedirect(redirectUri, { error: "access_denied", state }), cookies);
+		}
+		// Time passed since the login: the role must still hold.
+		if (login.user.kind === "roblox" && !auth.robloxStillHolds(login.user.userId, login.role)) return seeOther(appRedirect(redirectUri, { error: "access_denied", state }), cookies);
+		const now = clock();
+		sweepMobile(now);
+		while (mobileCodes.size >= MOBILE_CODES_MAX) mobileCodes.delete(mobileCodes.keys().next().value as string);
+		const code = randomBytes(32).toString("base64url");
+		mobileCodes.set(sha256Hex(code), { ...m.pending, login, expires: now + MOBILE_CODE_MS });
+		return seeOther(appRedirect(redirectUri, { code, state }), cookies);
+	}
+
+	function seeOther(location: string, cookies: string[] = []): Response {
+		const headers = new Headers({ location, "cache-control": "no-store" });
+		for (const c of cookies) headers.append("set-cookie", c);
+		return new Response(null, { status: 303, headers });
+	}
+
+	/** Reads a small JSON object body, or the answer. */
+	async function smallJson(req: Request, max = 4096): Promise<Record<string, unknown> | Response> {
+		if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON" });
+		const raw = await readCapped(req, max);
+		if (!raw) return json(413, { error: `body over ${max} bytes` });
+		if (!raw.length) return {};
+		try {
+			const value = JSON.parse(Buffer.from(raw).toString("utf8")) as unknown;
+			return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : json(400, { error: "send a JSON object" });
+		} catch {
+			return json(400, { error: "body is not JSON" });
+		}
+	}
+
+	/** Makes a token and answers `{ token, id, expiresAt, role, user }` (the only time the token is shown). */
+	async function mintAnswer(req: Request, input: Parameters<MobileTokens["mint"]>[0], action: string, details: Record<string, unknown>, replacing?: MobileTokenRecord): Promise<Response> {
+		let made;
+		try {
+			made = await mobileTokens.mint(input, replacing?.id);
+		} catch (error) {
+			if (error instanceof MobileTokenError) return json(error.status, { error: error.message });
+			throw error;
+		}
+		if (replacing) await mobileTokens.revoke(replacing.id, "refreshed");
+		const { token, record } = made;
+		const view = viewOf(record);
+		noteAudit(req, { actor: actorOfUser(record.user), role: record.role, via: "bearer", action, outcome: "ok", details: { mobile: record.id, device: record.device, role: record.role, ...details } });
+		log(`mobile app token ${record.id} ${replacing ? `refreshed (was ${replacing.id})` : "made"} for ${actorOfUser(record.user).label}, role ${record.role}`);
+		return json(200, { token, id: record.id, expiresAt: view.expiresAt, role: record.role, user: view.user });
+	}
+
+	/**
+	 * POST /v1/auth/mobile/token: `{ code, code_verifier, device? }` (the browser sign-in's one-time code and the PKCE
+	 * verifier), or the admin token as Bearer with `{ device }` (the app's "paste the admin token": it keeps the new token,
+	 * never the admin token).
+	 */
+	async function mobileToken(req: Request, ip: string): Promise<Response> {
+		if (!adminIpOk(ip)) return notFound();
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		if (!mobileLimiter.take(`token:${ip}`)) return tooMany(mobileLimiter.retryAfter(`token:${ip}`));
+		const body = await smallJson(req);
+		if (body instanceof Response) return body;
+		if (bearer(req) !== undefined) {
+			if (!auth.hasAdminBearer(req)) {
+				if (auth.mobilePrincipal(req)) return json(400, { error: "a mobile app token renews itself with POST /v1/auth/mobile/refresh" });
+				// A named key (keyGate already checked it) never signs anything in, like it never opens an explorer session.
+				if (auth.key(req)) return json(403, { error: "a named API key can't sign the mobile app in: use the admin token or the browser sign-in" });
+				failedAuth(ip, "mobile app token (admin token)", "bearer");
+				return json(401, { error: "wrong token" });
+			}
+			// Pasting the admin token into the app is the token login's mobile twin: off with it.
+			if (!runtime.get("tokenLogin")) return json(403, { error: "the token login is off on this server: sign the app in through the browser" });
+			return mintAnswer(req, { user: { kind: "token" }, role: "admin", device: deviceName(body.device), adminTokenHash }, "mobile.token.mint", { method: "admin token" });
+		}
+		const code = body.code;
+		const verifier = body.code_verifier;
+		if (typeof code !== "string" || !/^[A-Za-z0-9_-]{20,128}$/.test(code) || typeof verifier !== "string" || !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) {
+			return json(400, { error: "invalid_request", detail: "send { code, code_verifier } (or the admin token as Bearer)" });
+		}
+		const key = sha256Hex(code);
+		const entry = mobileCodes.get(key);
+		// Single use, whatever happens next.
+		mobileCodes.delete(key);
+		if (!entry || clock() >= entry.expires) {
+			failedAuth(ip, "mobile app sign-in (unknown or expired code)", "mobile");
+			return json(400, { error: "invalid_grant" });
+		}
+		const computed = createHash("sha256").update(verifier).digest("base64url");
+		if (!sameSecret(computed, entry.challenge)) {
+			failedAuth(ip, "mobile app sign-in (PKCE verifier does not match)", "mobile");
+			return json(400, { error: "invalid_grant" });
+		}
+		if (typeof body.redirect_uri === "string" && body.redirect_uri !== entry.redirectUri) return json(400, { error: "invalid_grant" });
+		const { login } = entry;
+		if (login.user.kind === "roblox" && !auth.robloxStillHolds(login.user.userId, login.role)) return json(403, { error: "access_denied" });
+		const device = entry.device !== "Mobile app" ? entry.device : deviceName(body.device);
+		return mintAnswer(req, { user: login.user, role: login.role, device, ...(login.blessedDevice ? { blessedDevice: login.blessedDevice } : {}) }, "mobile.token.mint", { method: login.method });
+	}
+
+	/** The mobile app token behind the request (allow list, lockout and a wrong Bearer counted like every Bearer), or the answer. */
+	function mobileGate(req: Request, ip: string): { principal: Principal & { role: AccessRole; via: "bearer"; mobile: { id: string; expires: number } } } | { response: Response } {
+		if (!adminIpOk(ip)) return { response: notFound() };
+		const blocked = blockedResponse(ip);
+		if (blocked) return { response: blocked };
+		const principal = auth.mobilePrincipal(req);
+		if (principal) return { principal };
+		const dead = deadMobile(req);
+		if (dead) return { response: dead };
+		if (bearer(req) !== undefined && !auth.principal(req)) failedAuth(ip, "mobile app token", "bearer");
+		return { response: json(401, { error: "a mobile app token is required (Authorization: Bearer ttm_...)" }) };
+	}
+
+	/** POST /v1/auth/mobile/refresh (a mobile app token): a new token with a fresh expiry; the old one is revoked. */
+	async function mobileRefresh(req: Request, ip: string): Promise<Response> {
+		const gate = mobileGate(req, ip);
+		if ("response" in gate) return gate.response;
+		const id = gate.principal.mobile.id;
+		if (!mobileLimiter.take(`refresh:${id}`, 5)) return tooMany(mobileLimiter.retryAfter(`refresh:${id}`, 5));
+		const record = mobileTokens.get(id);
+		if (!record) return json(401, { error: "a mobile app token is required (Authorization: Bearer ttm_...)" });
+		return mintAnswer(
+			req,
+			{ user: record.user, role: record.role, device: record.device, ...(record.adminTokenHash ? { adminTokenHash: record.adminTokenHash } : {}), ...(record.blessedDevice ? { blessedDevice: record.blessedDevice } : {}) },
+			"mobile.token.refresh",
+			{ replaced: record.id },
+			record,
+		);
+	}
+
+	/** POST /v1/auth/mobile/logout (a mobile app token): revokes that token. */
+	async function mobileLogout(req: Request, ip: string): Promise<Response> {
+		const gate = mobileGate(req, ip);
+		if ("response" in gate) return gate.response;
+		const p = gate.principal;
+		await mobileTokens.revoke(p.mobile.id, "signed out in the app");
+		noteAudit(req, { principal: p, action: "mobile.token.revoke", outcome: "ok", details: { mobile: p.mobile.id, reason: "signed out in the app" } });
+		return json(200, { ok: true });
+	}
+
+	/** GET /v1/auth/mobile/tokens (?all=1 adds revoked and expired ones): admins see every token, the web role its own. */
+	async function mobileTokenList(p: SignedIn, all: boolean): Promise<Record<string, unknown>> {
+		const records = await mobileTokens.list({ all, ...(p.role === "admin" ? {} : { owner: p.user }) });
+		const current = p.via === "bearer" ? p.mobile?.id : undefined;
+		return { tokens: records.map((t) => viewOf(t, current)), lifetimeDays: config.mobileTokenDays };
+	}
+
+	/** GET /v1/auth/mobile/tokens, DELETE /v1/auth/mobile/tokens/<id>: every signed-in role (the web role: its own tokens). */
+	async function mobileTokensRoute(req: Request, url: URL, path: string, ip: string): Promise<Response> {
+		const gate = readGate(req, ip, true);
+		if ("response" in gate) return gate.response;
+		const p = gate.principal;
+		if (path === "/v1/auth/mobile/tokens") {
+			if (req.method !== "GET") return json(405, { error: "GET only" });
+			return json(200, await mobileTokenList(p, url.searchParams.get("all") === "1"));
+		}
+		if (req.method !== "DELETE") return json(405, { error: "DELETE only" });
+		const id = path.slice("/v1/auth/mobile/tokens/".length);
+		if (!MOBILE_ID_PATTERN.test(id)) return json(400, { error: "bad token id" });
+		const record = await mobileTokens.find(id);
+		if (!record || (p.role !== "admin" && !sameUser(record.user, p.user))) return json(404, { error: "no such token" });
+		const revoked = record.revoked === null ? await mobileTokens.revoke(id, "revoked on the Settings page") : false;
+		noteAudit(req, { action: "mobile.token.revoke", outcome: "ok", details: { mobile: id, device: record.device, reason: "revoked", ...(revoked ? {} : { already: true }) } });
+		return json(200, { ok: true, ...(await mobileTokenList(p, url.searchParams.get("all") === "1")) });
+	}
+
 	/** GET /api/typetorch/challenge/<token>: the origin challenge, answered only while a report is pending. */
 	function originChallenge(token: string, ip: string): Response {
 		if (!central || token.length > 128) return notFound();
@@ -2377,8 +2791,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	/** PUT /v1/access/keys { keys } (the admin token only): the signing keys a blessing link may be signed with. */
 	async function putBlessKeys(req: Request, principal: Principal): Promise<Response> {
 		if (!central) return centralOff();
-		if (principal.via !== "bearer") return json(403, { error: "the signing keys are set with the admin token (the CLI), not from the explorer" });
 		if (isNamedKey(principal)) return json(403, { error: "the signing keys are set with the admin token (the CLI), not with a named API key" });
+		if (!isAdminToken(principal)) return json(403, { error: "the signing keys are set with the admin token (the CLI), not from the explorer" });
 		const raw = await readCapped(req, 8 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: { keys?: unknown };
@@ -2400,8 +2814,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	/** PUT /v1/access (the admin token only: the CLI sends the signed access list's owners). */
 	async function putAccess(req: Request, principal: Principal): Promise<Response> {
-		if (principal.via !== "bearer") return json(403, { error: "the owner list is set with the admin token (the CLI), not from the explorer" });
 		if (isNamedKey(principal)) return json(403, { error: "the owner list is set with the admin token (the CLI), not with a named API key" });
+		if (!isAdminToken(principal)) return json(403, { error: "the owner list is set with the admin token (the CLI), not from the explorer" });
 		const raw = await readCapped(req, 64 * 1024);
 		if (!raw) return json(413, { error: "body too large" });
 		let body: unknown;
@@ -2436,16 +2850,18 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	/** Who is changing settings, for the audit list and the log: never a token; a Roblox name made safe. */
 	function actorOf(principal: Principal & { role: "admin" }): SettingsActor {
 		if (principal.user.kind === "key") return { who: `key ${principal.user.name} (${principal.user.id})`, via: "bearer" };
-		if (principal.via === "bearer") return { who: "admin token", via: "bearer" };
+		const app = principal.via === "bearer" && principal.mobile ? " (mobile app)" : "";
+		if (isAdminToken(principal)) return { who: "admin token", via: "bearer" };
 		if (principal.user.kind === "roblox") {
 			// The username (Roblox allows letters, digits and _); the "Roblox user <id>" stand-in adds nothing.
 			const raw = principal.user.name;
 			const name = /^Roblox user \d+$/.test(raw) ? "" : raw.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 32);
-			return { who: `roblox user ${principal.user.userId}${name ? ` (${name})` : ""}`, via: "session" };
+			return { who: `roblox user ${principal.user.userId}${name ? ` (${name})` : ""}${app}`, via: app ? "bearer" : "session" };
 		}
-		return { who: "admin token", via: "session" };
+		return { who: `admin token${app}`, via: app ? "bearer" : "session" };
 	}
-	const isRobloxSession = (p: Principal & { role: "admin" }) => p.via === "cookie" && p.user.kind === "roblox";
+	/** A Roblox sign-in: an explorer session, or a mobile app token made by one. */
+	const isRobloxSession = (p: Principal & { role: "admin" }) => p.user.kind === "roblox" && (p.via === "cookie" || Boolean(p.mobile));
 
 	/** GET /v1/admin/settings: every editable setting (secrets as set / not set), the env-only names, the audit list. */
 	function settingsView(ip: string, principal: Principal & { role: "admin" }): Record<string, unknown> {
@@ -2486,7 +2902,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			}
 			// Notifications turned back on: the auth halt (a refused Open Cloud key) ends.
 			if (result.changed.includes("notify.enabled") && runtime.get("notify.enabled")) await notify.resume();
-			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
+			const sessionsEnded = (result.tokenLoginTurnedOff ? sessions.endWhere((s) => s.user.kind === "token") + (await endTokenMobileTokens()) : 0) + (result.changed.includes("webViewers") ? endStaleRobloxSessions() : 0);
 			noteAudit(req, {
 				action: "settings.change",
 				details: { changes: settingChanges(result.changed, (k) => before.get(k), (k) => runtime.get(k), (k) => runtime.source(k)), ...(sessionsEnded ? { sessionsEnded } : {}) },
@@ -2968,7 +3384,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	 * The signed-in gate: allow list, failure limit, credentials (the admin or the web role), and the cookie's extra checks.
 	 * Returns the principal or the answer.
 	 */
-	function readGate(req: Request, ip: string): { principal: SignedIn } | { response: Response } {
+	function readGate(req: Request, ip: string, webMayWrite = false): { principal: SignedIn } | { response: Response } {
 		if (!adminIpOk(ip)) return { response: notFound() };
 		const blocked = blockedResponse(ip);
 		if (blocked) return { response: blocked };
@@ -2978,6 +3394,8 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		// Who called, for the audit entry `handle` writes after the route (a write by this caller is recorded).
 		if (principal && principal.role !== "game") noteAudit(req, { principal });
 		if (!principal) {
+			const dead = deadMobile(req);
+			if (dead) return { response: dead };
 			if (bearer(req) !== undefined) failedAuth(ip, "admin request", "bearer");
 			return { response: json(401, { error: "admin token required" }) };
 		}
@@ -2988,7 +3406,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		}
 		// The web role reads: GET / HEAD, or one of the two read-only query POSTs. Decided here, by method, so no handler
 		// has to remember it; the admin-only reads (the settings, storage, the debug audit) go through adminGate instead.
-		if (principal.role === "web" && !READ_METHODS.has(req.method) && !WEB_POST_ALLOWED.test(routePath(req))) return { response: json(403, { error: READ_ONLY }) };
+		if (principal.role === "web" && !webMayWrite && !READ_METHODS.has(req.method) && !WEB_POST_ALLOWED.test(routePath(req))) return { response: json(403, { error: READ_ONLY }) };
 		return { principal };
 	}
 
@@ -3065,6 +3483,13 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (path === "/auth/bless/challenge") return method === "GET" ? blessChallenge(ip) : json(405, { error: "GET only" });
 		if (path === "/auth/bless") return method === "GET" ? blessWithLink(req, url, ip) : json(405, { error: "GET only" });
 		if (path.startsWith("/typetorch/challenge/")) return method === "GET" ? originChallenge(path.slice("/typetorch/challenge/".length), ip) : json(405, { error: "GET only" });
+		// The mobile app: its browser sign-in and consent page, its tokens (README "Mobile app").
+		if (path === `${MOBILE_PATH}/start`) return method === "GET" ? mobileStart(req, url, ip) : json(405, { error: "GET only" });
+		if (path === `${MOBILE_PATH}/consent`) return method === "GET" ? mobileConsentPage(req, ip) : method === "POST" ? mobileConsent(req, ip) : json(405, { error: "GET or POST only" });
+		if (path === "/v1/auth/mobile/token") return method === "POST" ? mobileToken(req, ip) : json(405, { error: "POST only" });
+		if (path === "/v1/auth/mobile/refresh") return method === "POST" ? mobileRefresh(req, ip) : json(405, { error: "POST only" });
+		if (path === "/v1/auth/mobile/logout") return method === "POST" ? mobileLogout(req, ip) : json(405, { error: "POST only" });
+		if (path === "/v1/auth/mobile/tokens" || path.startsWith("/v1/auth/mobile/tokens/")) return mobileTokensRoute(req, url, path, ip);
 
 		// Game routes (API key).
 		if (path === "/v1/ingest") return method === "POST" ? ingest(req, ip) : json(405, { error: "POST only" });
@@ -3275,6 +3700,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				const admin = manage();
 				if (admin instanceof Response) return admin;
 				if (admin.via !== "bearer") return json(403, { error: "the export API takes the admin token as a Bearer (the CLI, the migration job), not a browser session" });
+				if (admin.mobile) return json(403, { error: "the export API takes the admin token as a Bearer (the CLI, the migration job), not a mobile app token" });
 				// Every row and the pid <-> UserId table in one go: the env admin token only, never a named API key (even an admin one).
 				if (isNamedKey(admin)) return json(403, { error: "the export API takes the env admin token (TYPETORCH_ADMIN_TOKEN), not a named API key" });
 				return exportApi.handle(req, path, url);
@@ -3331,7 +3757,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				if (!central.devices.revoke(id)) return json(404, { error: "no such device" });
 				// The admin sessions that device opened end with it.
 				const ended = sessions.endWhere((s) => s.device === id);
-				noteAudit(req, { action: "device.revoke", details: { device: id, sessionsEnded: ended } });
+				// So do the mobile app tokens an owner signed in for through it.
+				const appTokens = await mobileTokens.revokeWhere((t) => t.blessedDevice === id, "trusted browser revoked");
+				noteAudit(req, { action: "device.revoke", details: { device: id, sessionsEnded: ended, ...(appTokens ? { mobileTokensRevoked: appTokens } : {}) } });
 				log(`device ${id} revoked by ${actorOf(admin).who}${ended ? `; ${ended} session(s) ended` : ""}`);
 				return json(200, { ok: true, sessionsEnded: ended, devices: central.devices.list(central.devices.idOf(readCookie(req, DEVICE_COOKIE), adminTokenHash)) });
 			}
@@ -3466,6 +3894,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		const jobs = [
 			setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000),
 			setInterval(() => void audit.prune().catch((e) => log(`audit log prune failed: ${(e as Error).message}`)), 10 * 60_000),
+			setInterval(() => void mobileTokens.prune().catch((e) => log(`mobile token prune failed: ${(e as Error).message}`)), 10 * 60_000),
 			setInterval(() => metrics.sample(), 1000),
 		];
 		if (config.backupHours > 0) jobs.push(setInterval(() => void backupTick(), BACKUP_CHECK_MS));
@@ -3552,8 +3981,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		// The previous server is gone now; what it saved while both ran (the Settings page, the owner list) applies here too.
 		const changed = runtime.reload();
 		sessions.reload();
+		await mobileTokens.reload().catch((e) => log(`handover: mobile app tokens could not be read again (${(e as Error).message.slice(0, 120)})`));
 		const listsChanged = access.reload() || changed.includes("webViewers");
-		const ended = (listsChanged ? endStaleRobloxSessions() : 0) + (changed.includes("tokenLogin") && !runtime.get("tokenLogin") ? sessions.endWhere((s) => s.user.kind === "token") : 0);
+		const tokenLoginOff = changed.includes("tokenLogin") && !runtime.get("tokenLogin");
+		const ended = (listsChanged ? endStaleRobloxSessions() : 0) + (tokenLoginOff ? sessions.endWhere((s) => s.user.kind === "token") + (await endTokenMobileTokens()) : 0);
 		if (changed.length || ended) log(`handover: picked up what the previous server saved meanwhile${changed.length ? ` (settings: ${changed.join(", ")})` : ""}${ended ? `; ${ended} session(s) ended` : ""}`);
 	}
 	if (lockedAtStart) {

@@ -11,6 +11,7 @@ import { alertRulesChange, BackendAlertRules, type AlertRulesDraft } from "@/com
 import { BackupCard } from "@/components/BackupCard";
 import { CentralLoginSection } from "@/components/CentralLoginSection";
 import { MigrationCard } from "@/components/MigrationCard";
+import { MobileSessionsCard } from "@/components/MobileSessionsCard";
 import { EmptyState, PageHeader, QueryState, Section } from "@/components/common";
 import { DataTable, type DataColumn } from "@/components/data-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -542,6 +543,7 @@ function SettingsForm({ data }: { data: SettingsView }) {
 				);
 			})}
 			{data.centralLogin ? <CentralLoginSection info={data.centralLogin} /> : null}
+			<MobileSessionsCard />
 			<BackupCard />
 			<MigrationCard />
 			<p className="text-xs text-muted-foreground">

@@ -12,6 +12,10 @@
  * role, `game` keys as the API key, `analyst` keys as the read-only role (their scopes stop them before anything else),
  * `lookup` / `support` keys like the lookup token. A key never opens an explorer session.
  *
+ * Mobile app tokens (`ttm_<id>_<secret>`, server/mobile-tokens.ts) are Bearers with the admin or the web role of the
+ * sign-in that made them, re-checked on every request like an explorer session (the Roblox user's role, the token login
+ * for one made with the admin token, the trusted browser for one an owner made through typetorch.dev).
+ *
  * Explorer sessions are signed JWTs (HS256, 3 days by default; see Sessions), keyed by a secret in the data dir and a
  * hash of the admin token, so they survive deploys and changing the token ends them all. A session is made by pasting the admin token or by
  * signing in with Roblox as an owner (admin) or a viewer (web). The cookie is HttpOnly, SameSite=Strict (Lax for the short OAuth state cookie only)
@@ -304,9 +308,15 @@ export class Sessions {
 	}
 }
 
+/** A mobile app token behind a Bearer principal (server/mobile-tokens.ts): its id and when it expires (unix ms). */
+export interface MobileRef {
+	id: string;
+	expires: number;
+}
+
 export type Principal =
 	| { role: "game"; via: "bearer" }
-	| { role: AccessRole; via: "bearer"; user: SessionUser }
+	| { role: AccessRole; via: "bearer"; user: SessionUser; mobile?: MobileRef }
 	| { role: AccessRole; via: "cookie"; user: SessionUser; cookie: string };
 
 /** A signed-in caller: the admin or the web role (never the game key). */
@@ -328,10 +338,20 @@ export interface AuthOptions {
 	tokenLogin?(): boolean;
 	/** Whether a blessed device still is; a session a device opened ends with it. */
 	deviceActive?(id: string): boolean;
+	/** The mobile app tokens (`ttm_...` Bearers), when the server keeps them. */
+	mobileTokens?: {
+		resolve(token: string, currentAdminTokenHash: string): { id: string; user: SessionUser; role: AccessRole; expires: number; blessedDevice: string | null } | undefined;
+		revoke(id: string, reason: string): Promise<boolean>;
+		deadReason(token: string): string | undefined;
+	};
 }
 
 export class Auth {
-	constructor(private readonly o: AuthOptions) {}
+	private readonly adminTokenHash: string;
+
+	constructor(private readonly o: AuthOptions) {
+		this.adminTokenHash = Sessions.hashToken(o.adminToken);
+	}
 
 	get sessions(): Sessions {
 		return this.o.sessions;
@@ -405,8 +425,47 @@ export class Auth {
 	}
 
 	/**
+	 * The live mobile app token behind the request's Bearer (`ttm_...`), with its Roblox user still holding its role (an
+	 * owner for admin, a viewer or an owner for web; else the token is revoked), or undefined.
+	 */
+	mobilePrincipal(req: Request): (Principal & { role: AccessRole; via: "bearer"; mobile: MobileRef }) | undefined {
+		const given = bearer(req);
+		if (!given?.startsWith("ttm_") || !this.o.mobileTokens) return undefined;
+		const t = this.o.mobileTokens.resolve(given, this.adminTokenHash);
+		if (!t) return undefined;
+		// The same checks as an explorer session (cookieSession): the role still held, the token login still on for a
+		// token made with the admin token, the trusted browser still trusted for an owner's typetorch.dev sign-in.
+		const stale =
+			t.user.kind === "roblox" && !this.robloxStillHolds(t.user.userId, t.role)
+				? t.role === "admin"
+					? "no longer an owner"
+					: "no longer a viewer or an owner"
+				: t.user.kind === "token" && this.o.tokenLogin !== undefined && !this.o.tokenLogin()
+					? "token login turned off"
+					: t.blessedDevice && this.o.deviceActive !== undefined && !this.o.deviceActive(t.blessedDevice)
+						? "trusted browser revoked"
+						: undefined;
+		if (stale) {
+			void this.o.mobileTokens.revoke(t.id, stale).catch(() => {});
+			return undefined;
+		}
+		return { role: t.role, via: "bearer", user: t.user, mobile: { id: t.id, expires: t.expires } };
+	}
+
+	/**
+	 * Why the request's Bearer, a real mobile app token, no longer works (revoked or expired), or undefined. Such a token is
+	 * refused without counting as a wrong token (the phone just signs in again).
+	 */
+	deadMobileToken(req: Request): string | undefined {
+		const given = bearer(req);
+		if (!given?.startsWith("ttm_") || !this.o.mobileTokens) return undefined;
+		return this.o.mobileTokens.deadReason(given);
+	}
+
+	/**
 	 * The caller's role. A Bearer header decides alone (a wrong Bearer is not rescued by a cookie); without one the
-	 * session cookie counts. Tokens are never read from the URL.
+	 * session cookie counts. Tokens are never read from the URL. A mobile app token (`ttm_...`) is a Bearer with the role
+	 * and user of its sign-in.
 	 */
 	principal(req: Request): Principal | undefined {
 		if (bearer(req) !== undefined) {
@@ -422,7 +481,7 @@ export class Auth {
 				return undefined;
 			}
 			if (this.hasGameKey(req)) return { role: "game", via: "bearer" };
-			return undefined;
+			return this.mobilePrincipal(req);
 		}
 		const found = this.cookieSession(req);
 		return found ? { role: found.session.role, via: "cookie", user: found.session.user, cookie: found.cookie } : undefined;
@@ -450,6 +509,11 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 export function cookieMutationProblem(req: Request, o: { trustProxy: number; publicUrl?: string }): string | undefined {
 	if (SAFE_METHODS.has(req.method)) return undefined;
 	if (req.headers.get(CSRF_HEADER) !== "1") return `requests that change something need the header ${CSRF_HEADER}: 1`;
+	return originProblem(req, o);
+}
+
+/** When the browser sends an Origin, that it is this site (the host, the public URL's, a trusted proxy's); else the reason. */
+export function originProblem(req: Request, o: { trustProxy: number; publicUrl?: string }): string | undefined {
 	const origin = req.headers.get("origin");
 	if (origin) {
 		let host = "";
@@ -467,7 +531,7 @@ export function cookieMutationProblem(req: Request, o: { trustProxy: number; pub
 			const forwarded = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
 			if (forwarded) allowed.add(forwarded);
 		}
-		if (!allowed.has(host)) return "cross-origin request refused";
+		if (!host || !allowed.has(host)) return "cross-origin request refused";
 	}
 	return undefined;
 }

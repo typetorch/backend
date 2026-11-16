@@ -425,6 +425,40 @@ describe("Sign in with typetorch.dev", () => {
 	});
 
 
+	test("the mobile app signs in through typetorch.dev with the browser's role: web on an untrusted browser, admin on a trusted one (revoking it revokes the token)", async () => {
+		const appLogin = async (device?: string) => {
+			const ip = c.freshIp();
+			const verifier = b64(randomBytes(32));
+			const challenge = b64(createHash("sha256").update(verifier).digest());
+			const start = await h.call(`/auth/mobile/start?${new URLSearchParams({ redirect_uri: "typetorch://cb", state: "st", code_challenge: challenge, code_challenge_method: "S256", device: "Phone" })}`, { ip });
+			expect(start.headers.get("location")).toBe("/auth/typetorch/start?mobile=1");
+			const mobile = (c.cookieValue(start, "tt_mobile") as string).split(";")[0] as string;
+			const cs = await h.call("/auth/typetorch/start?mobile=1", { ip, headers: { cookie: mobile } });
+			const central = (c.cookieValue(cs, "tt_central") as string).split(";")[0] as string;
+			const r = await c.callback(fakes.authorize(cs.headers.get("location") as string), [central, mobile, ...(device ? [device] : [])], ip);
+			expect(r.location).toBe("/auth/mobile/consent");
+			expect(r.session).toBeUndefined();
+			const html = await (await h.call("/auth/mobile/consent", { ip, headers: { cookie: mobile } })).text();
+			const form = /name="form" value="([^"]+)"/.exec(html)?.[1] as string;
+			const ok = await h.call("/auth/mobile/consent", { method: "POST", ip, body: new URLSearchParams({ form, decision: "allow" }).toString(), headers: { "content-type": "application/x-www-form-urlencoded", cookie: mobile } });
+			const code = new URL(ok.headers.get("location") as string).searchParams.get("code") as string;
+			const res = await h.call("/v1/auth/mobile/token", { method: "POST", ip, ...json({ code, code_verifier: verifier }) });
+			expect(res.status).toBe(200);
+			return asJson(res);
+		};
+		const untrusted = await appLogin();
+		expect(untrusted).toMatchObject({ role: "web", user: { kind: "roblox", userId: OWNER, login: "typetorch.dev" } });
+		const blessed = c.cookieValue(await blessWithToken(), "tt_device")?.split(";")[0] as string;
+		const trusted = await appLogin(blessed);
+		expect(trusted.role).toBe("admin");
+		expect((await h.call("/v1/auth/check", { headers: bearer(trusted.token) })).status).toBe(200);
+		const devices = await asJson(await h.call("/v1/admin/devices", { headers: bearer(ADMIN) }));
+		const id = (devices.devices as { id: string; used: string }[]).sort((a, b) => b.used.localeCompare(a.used))[0]?.id as string;
+		expect((await h.call(`/v1/admin/devices/${id}`, { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
+		expect((await h.call("/v1/auth/check", { headers: bearer(trusted.token) })).status).toBe(401);
+		expect((await h.call("/v1/auth/check", { headers: bearer(untrusted.token) })).status).toBe(200);
+	});
+
 	test("a viewer gets the web role; a stranger is refused like a wrong token, with no session", async () => {
 		const viewer = await c.login({ sub: VIEWER });
 		expect(await role(viewer.session)).toBe("web");

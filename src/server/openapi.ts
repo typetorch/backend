@@ -11,7 +11,7 @@ import { PACKAGE } from "../version.ts";
 import { NAME_MAX as SAVED_QUERY_NAME_MAX, PINNED_MAX, SAVED_QUERIES_MAX, SAVED_QUERY_CHARTS, WRITES_PER_MINUTE as SAVED_QUERY_WRITES } from "./saved-queries.ts";
 
 /** Who may call a route: the roles of README "Routes and roles". */
-type Role = "game" | "admin" | "web" | "lookup" | "open" | "adminToken" | "support";
+type Role = "game" | "admin" | "web" | "lookup" | "open" | "adminToken" | "support" | "mobile";
 
 type Schema = Record<string, unknown>;
 
@@ -62,6 +62,18 @@ const nullable = (type: string, description?: string): Schema => ({ type: [type,
 
 /** The fleet's server shapes (fleet/service.ts serverInfo): the fields documented here, the rest stay open. */
 const SCHEMAS: Record<string, Schema> = {
+	MobileToken: {
+		type: "object",
+		description: "A new mobile app token: keep `token` in the phone's secure store; refresh it when fewer than 15 days remain.",
+		required: ["token", "id", "expiresAt", "role", "user"],
+		properties: {
+			token: str("ttm_<id>_<secret>: the Bearer for every /v1 read and manage route of its role"),
+			id: str("10 characters [0-9a-z]"),
+			expiresAt: str("ISO time"),
+			role: { type: "string", enum: ["admin", "web"] },
+			user: obj({ kind: { type: "string", enum: ["token", "roblox"] }, userId: int(), name: str(), login: str("typetorch.dev when that login made it") }, ["kind"]),
+		},
+	},
 	ServerLocation: {
 		type: "object",
 		description: "Where a server's latest address is, from the backend's offline IP database (city level at best). Credit the source GeoStatus names (DB-IP Lite: CC BY 4.0).",
@@ -129,7 +141,7 @@ const ROUTES: Route[] = [
 		roles: ["open"],
 		summary: "Who am I",
 		description:
-			'`{ ok, role: "game" | "admin" | "web", via, user?, service, version, parts: { analytics, fleet }, dashboard?, untrustedOwner?, trustWithToken? }`; the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? } }` without valid credentials. Rate limited.',
+			'`{ ok, role: "game" | "admin" | "web", via, user?, mobile?: { id, expiresAt }, service, version, parts: { analytics, fleet }, game: { universeId, label }, dashboard?, untrustedOwner?, trustWithToken? }`; the lookup token gets `{ ok, role: "lookup", via, routes }`; `401 { login: { token, roblox, typetorch?, dashboard? }, game: { universeId, label }, mobileLogin }` without valid credentials (`game.universeId`: TYPETORCH_UNIVERSE_ID or null; `mobileLogin`: the app\'s browser sign-in is on). Rate limited.',
 	},
 	{
 		method: "post",
@@ -162,6 +174,56 @@ const ROUTES: Route[] = [
 		description: "The admin token in the body and an `X-TypeTorch` header. `{ ok, blessed, upgraded? }`.",
 		body: obj({ token: str("the admin token") }, ["token"]),
 	},
+	{
+		method: "get",
+		path: "/auth/mobile/start",
+		tag: "auth",
+		roles: ["open"],
+		summary: "Mobile app sign-in: start (in the phone's browser)",
+		description:
+			"Keeps the app's request under a 10-minute HttpOnly cookie and redirects to this backend's browser login (typetorch.dev when on, else Sign in with Roblox). `redirect_uri` must be `typetorch://...` (Expo Go's `exp://` / `exps://` only with TYPETORCH_MOBILE_DEV_REDIRECTS=on; no fragment); a bad request gets an HTML page, never a redirect. After the login: the consent page.",
+		params: [
+			q("redirect_uri", "typetorch://... (where the code goes)"),
+			q("state", "the app's state, 1 to 512 printable characters; sent back as is"),
+			q("code_challenge", "PKCE: base64url SHA-256 of the verifier (43 characters)"),
+			q("code_challenge_method", "S256", { type: "string", enum: ["S256"] }),
+			q("device", "the device's name for the list (64 characters at most)"),
+		],
+		ok: { status: 302, description: "redirect to the browser login" },
+	},
+	{ method: "get", path: "/auth/mobile/consent", tag: "auth", roles: ["open"], summary: "Mobile app sign-in: the consent page", ok: { status: 200, description: "an HTML page", contentType: "text/html" } },
+	{
+		method: "post",
+		path: "/auth/mobile/consent",
+		tag: "auth",
+		roles: ["open"],
+		summary: "Mobile app sign-in: Continue or Cancel (the page's form)",
+		description: "Form fields `form` (the page's token) and `decision` (`allow` / `deny`), same origin. Continue: `303` to `redirect_uri?code=<one-time, 60 s>&state=`; Cancel: `redirect_uri?error=access_denied&state=`. A failed or refused login sends `?error=<code>&state=` too.",
+		ok: { status: 303, description: "redirect to the app" },
+	},
+	{
+		method: "post",
+		path: "/v1/auth/mobile/token",
+		tag: "auth",
+		roles: ["open"],
+		summary: "Mobile app token from a sign-in code, or from the admin token",
+		description:
+			"`{ code, code_verifier }` (single-use code, PKCE S256) or the admin token as Bearer with `{ device }`. Answers `{ token, id, expiresAt, role, user }`; the token is shown only here. `400 { error: \"invalid_grant\" }` for a spent, expired or unknown code or a wrong verifier (counted toward the lockout).",
+		body: obj({ code: str("the code from the redirect"), code_verifier: str("the PKCE verifier (43 to 128 characters)"), device: str("the device's name (admin token path)") }),
+		response: ref("MobileToken"),
+	},
+	{ method: "post", path: "/v1/auth/mobile/refresh", tag: "auth", roles: ["mobile"], summary: "A new mobile app token with a fresh expiry (the old one is revoked)", response: ref("MobileToken") },
+	{ method: "post", path: "/v1/auth/mobile/logout", tag: "auth", roles: ["mobile"], summary: "Revoke the calling mobile app token" },
+	{
+		method: "get",
+		path: "/v1/auth/mobile/tokens",
+		tag: "auth",
+		roles: ["admin", "web"],
+		summary: "Mobile app tokens (admins: all; the web role: its own)",
+		description: "`{ tokens: [{ id, device, user, role, createdAt, expiresAt, lastUsedAt, revokedAt?, revokeReason?, current? }], lifetimeDays }`; no hash, no secret.",
+		params: [q("all", "1: also revoked and expired tokens (kept 30 days)")],
+	},
+	{ method: "delete", path: "/v1/auth/mobile/tokens/{id}", tag: "auth", roles: ["admin", "web"], summary: "Revoke a mobile app token (admins: any; the web role: its own)", params: [p("id", "10 characters [0-9a-z]")] },
 	{ method: "get", path: "/auth/bless/challenge", tag: "auth", roles: ["open"], summary: "The CLI's signed trust link: challenge" },
 	{ method: "get", path: "/auth/bless", tag: "auth", roles: ["open"], summary: "The CLI's signed trust link" },
 	{
@@ -698,6 +760,7 @@ const ROLE_TEXT: Record<Role, string> = {
 	lookup: "lookup token",
 	adminToken: "the admin token only (not a session)",
 	support: "a named key with players:read (support or admin role)",
+	mobile: "a mobile app token only (ttm_...)",
 };
 
 function security(roles: Role[]): Record<string, string[]>[] {
@@ -706,6 +769,7 @@ function security(roles: Role[]): Record<string, string[]>[] {
 	if (roles.includes("game")) out.push({ apiKey: [] });
 	if (roles.includes("admin") || roles.includes("adminToken")) out.push({ adminToken: [] });
 	if (roles.includes("admin") || roles.includes("web")) out.push({ session: [] });
+	if (roles.includes("admin") || roles.includes("web") || roles.includes("mobile")) out.push({ mobileToken: [] });
 	if (roles.includes("lookup")) out.push({ lookupToken: [] });
 	if (roles.includes("support")) out.push({ namedKey: [] });
 	return out;
@@ -768,6 +832,11 @@ export function openApiSpec(o: DocsOptions = {}): Schema {
 				adminToken: { type: "http", scheme: "bearer", description: "The admin token (TYPETORCH_ADMIN_TOKEN): reads and manages everything." },
 				lookupToken: { type: "http", scheme: "bearer", description: "TYPETORCH_LOOKUP_TOKEN: GET /v1/identity/resolve only (for scripts and LLM agents)." },
 				namedKey: { type: "http", scheme: "bearer", description: "A named API key `ttk_<id>_<secret>` (plans/31; POST /v1/admin/keys): a role (game, lookup, support, analyst, admin) and its scopes; a route outside them answers 403 { error: forbidden, need }." },
+				mobileToken: {
+					type: "http",
+					scheme: "bearer",
+					description: "A mobile app token (`ttm_<id>_<secret>`, 30 to 90 days): the admin or web role of the sign-in that made it, re-checked on every request. Never reaches the admin-token-only routes.",
+				},
 				session: { type: "apiKey", in: "cookie", name: "tt_session", description: "An explorer session (admin for owners, web for viewers). A mutation from a cookie needs a same-origin request." },
 			},
 			schemas: SCHEMAS,

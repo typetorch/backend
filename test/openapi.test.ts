@@ -21,6 +21,7 @@ describe("openapi", () => {
 		const app = readFileSync(new URL("../src/server/app.ts", import.meta.url), "utf8");
 		const literals = [...app.matchAll(/path === "(\/[^"]+)"/g)].map((m) => m[1] as string);
 		literals.push(...[...app.matchAll(/path === `\$\{CENTRAL_PATH\}(\/[^`]+)`/g)].map((m) => `/auth/typetorch${m[1]}`));
+		literals.push(...[...app.matchAll(/path === `\$\{MOBILE_PATH\}(\/[^`]+)`/g)].map((m) => `/auth/mobile${m[1]}`));
 		literals.push(...Object.keys(FLEET_LIMITS).map((k) => `/v1/fleet/${k}`));
 		expect(literals.length).toBeGreaterThan(40);
 		const missing = [...new Set(literals)].filter((l) => !patterns.some((re) => re.test(l)));
@@ -35,7 +36,8 @@ describe("openapi", () => {
 		expect(new Set(ids).size).toBe(ids.length);
 		expect(spec.paths["/healthz"]?.get?.security).toEqual([]);
 		expect(spec.paths["/v1/ingest"]?.post?.security).toEqual([{ apiKey: [] }]);
-		expect(spec.paths["/v1/identity/resolve"]?.get?.security).toEqual([{ adminToken: [] }, { session: [] }, { lookupToken: [] }]);
+		expect(spec.paths["/v1/identity/resolve"]?.get?.security).toEqual([{ adminToken: [] }, { session: [] }, { mobileToken: [] }, { lookupToken: [] }]);
+		expect(spec.paths["/v1/auth/mobile/refresh"]?.post?.security).toEqual([{ mobileToken: [] }]);
 		expect(spec.paths["/v1/access"]?.put?.security).toEqual([{ adminToken: [] }]);
 		const query = spec.paths["/v1/query/{name}"]?.post as unknown as { parameters: { schema: { enum: string[] } }[] };
 		expect(query.parameters[0]?.schema.enum).toEqual(QUERY_NAMES);
