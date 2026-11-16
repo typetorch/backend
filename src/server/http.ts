@@ -225,7 +225,8 @@ export const API_CSP = "default-src 'none'; frame-ancestors 'none'";
 export function withSecurityHeaders(response: Response, o: { https: boolean; csp: string }): Response {
 	const headers = new Headers(response.headers);
 	headers.set("x-content-type-options", "nosniff");
-	headers.set("referrer-policy", "no-referrer");
+	// A page may ask for a looser one (the mobile consent page: same-origin, so its form POST carries a real Origin).
+	if (!headers.has("referrer-policy")) headers.set("referrer-policy", "no-referrer");
 	headers.set("x-frame-options", "DENY");
 	headers.set("cross-origin-resource-policy", "same-origin");
 	headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");

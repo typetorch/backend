@@ -9,7 +9,11 @@
  * re-checked on every request (Auth.principal: an owner for admin, a viewer or owner for web) and revoked when the user
  * no longer holds it. A token made with the admin token dies when the admin token changes; one made by an owner on a
  * trusted (blessed) browser dies when that browser is revoked. Lifetime TYPETORCH_MOBILE_TOKEN_DAYS (30 to 90, default
- * 60); `last_used_at` is written at most once a minute. Bounded: MOBILE_TOKENS_PER_USER active tokens per user (the one
+ * 60); `last_used_at` is written at most once a minute. Refreshing (POST /v1/auth/mobile/refresh) claims the token before
+ * anything else runs (a parallel refresh gets 409), keeps the sign-in's time and its family (every token one sign-in led
+ * to), and stops TYPETORCH_MOBILE_TOKEN_MAX_DAYS (default 180) after the sign-in: no token of a family outlives that. A
+ * refreshed token presented again later than REUSE_GRACE_MS after its refresh revokes its family (reuse detection: one of
+ * the two holders is not the app). Bounded: MOBILE_TOKENS_PER_USER active tokens per user (the one
  * used longest ago is revoked past it), MOBILE_TOKENS_MAX active in all (a new one is refused past it); revoked and
  * expired rows are deleted MOBILE_TOKENS_KEEP_DAYS after.
  *
@@ -29,14 +33,22 @@ export const MOBILE_DEVICE_MAX = 64;
 const DAY = 86_400_000;
 const TOUCH_MS = 60_000;
 const DEAD_MAX = 5000;
+/** A refreshed token presented this soon after its refresh is a request that was already on its way, not a reuse. */
+export const REUSE_GRACE_MS = 10_000;
+export const MOBILE_REFRESHED = "refreshed";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS mobile_tokens (
 	id TEXT PRIMARY KEY, hash TEXT NOT NULL, user_kind TEXT NOT NULL, user_id INTEGER, user_name TEXT, login TEXT, role TEXT NOT NULL,
 	device_name TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER,
-	revoke_reason TEXT, admin_token_hash TEXT, blessed_device TEXT);
+	revoke_reason TEXT, admin_token_hash TEXT, blessed_device TEXT, signed_in_at INTEGER, family TEXT);
 CREATE INDEX IF NOT EXISTS mobile_tokens_user ON mobile_tokens (user_kind, user_id);
 `;
+/** Columns added after the first release (a table made before them gets them; old rows read signed_in_at = created_at, family = id). */
+const ADDED_COLUMNS: [string, string][] = [
+	["signed_in_at", "INTEGER"],
+	["family", "TEXT"],
+];
 
 /** Who a mobile app token belongs to: the admin token or a Roblox user (a named API key never makes one). */
 export type MobileUser = Exclude<SessionUser, { kind: "key" }>;
@@ -57,6 +69,10 @@ export interface MobileTokenRecord {
 	adminTokenHash: string | null;
 	/** The trusted browser an owner's admin token came through (typetorch.dev login): revoking it revokes the token. */
 	blessedDevice: string | null;
+	/** When the sign-in this token comes from happened (kept across refreshes), unix ms. */
+	signedIn: number;
+	/** The id of the sign-in's first token: every token its refreshes made shares it. */
+	family: string;
 }
 
 /** What the explorer and the app see: no hash. */
@@ -78,6 +94,7 @@ export class MobileTokenError extends Error {
 	constructor(
 		message: string,
 		readonly status: number,
+		readonly code?: string,
 	) {
 		super(message);
 	}
@@ -99,6 +116,8 @@ interface Row {
 	revoke_reason: string | null;
 	admin_token_hash: string | null;
 	blessed_device: string | null;
+	signed_in_at: number | null;
+	family: string | null;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -135,6 +154,8 @@ function toRecord(r: Row): MobileTokenRecord {
 		revokeReason: r.revoke_reason,
 		adminTokenHash: r.admin_token_hash,
 		blessedDevice: r.blessed_device,
+		signedIn: r.signed_in_at === null || r.signed_in_at === undefined ? Number(r.created_at) : Number(r.signed_in_at),
+		family: r.family ?? r.id,
 	};
 }
 
@@ -165,10 +186,24 @@ export function sameUser(a: SessionUser, b: SessionUser): boolean {
 export interface MobileTokensOptions {
 	/** Lifetime of a new token, days (30 to 90). */
 	days: number;
+	/** How long after its sign-in a token family may still be refreshed, days (default 180); no token outlives it. */
+	maxDays?: number;
+	/** A refreshed token was presented again: its family (`revoked` tokens) was revoked. For the audit log. */
+	onReuse?: (info: { id: string; family: string; revoked: number; user: MobileUser }) => void;
 	clock?: () => number;
 	log?: (line: string) => void;
 	perUser?: number;
 	max?: number;
+}
+
+/** A token that worked and does not any more: enough to tell its holder why, and to spot a refreshed token used again. */
+interface DeadToken {
+	hash: string;
+	reason: string;
+	family: string;
+	/** When it was revoked (or expired), unix ms. */
+	at: number;
+	user?: MobileUser;
 }
 
 export interface MintInput {
@@ -186,7 +221,9 @@ export class MobileTokens {
 	 * Tokens that were real and are not any more (revoked, expired), by id: their hash and why, so a phone presenting one
 	 * hears "sign in again" instead of counting toward the wrong-token lockout. Bounded (DEAD_MAX, oldest go first).
 	 */
-	private readonly dead = new Map<string, { hash: string; reason: string }>();
+	private readonly dead = new Map<string, DeadToken>();
+	/** Tokens a refresh has claimed and not finished (a second refresh of one gets 409). Bounded by `active`. */
+	private readonly refreshing = new Set<string>();
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
 	private readonly perUser: number;
@@ -205,11 +242,14 @@ export class MobileTokens {
 
 	static async open(db: FleetDb, options: MobileTokensOptions): Promise<MobileTokens> {
 		await db.exec(SCHEMA);
+		const have = new Set((await db.all<{ name: string }>("PRAGMA table_info(mobile_tokens)")).map((c) => c.name));
+		for (const [name, type] of ADDED_COLUMNS) if (!have.has(name)) await db.exec(`ALTER TABLE mobile_tokens ADD COLUMN ${name} ${type}`);
 		const store = new MobileTokens(db, options);
 		const rows = await db.all<Row>("SELECT * FROM mobile_tokens WHERE revoked_at IS NULL AND expires_at > ? ORDER BY created_at LIMIT ?", [store.clock(), store.max]);
 		for (const row of rows) store.active.set(row.id, toRecord(row));
-		const dead = await db.all<Row>("SELECT id, hash, revoke_reason, expires_at, revoked_at FROM mobile_tokens WHERE revoked_at IS NOT NULL OR expires_at <= ? ORDER BY created_at LIMIT ?", [store.clock(), DEAD_MAX]);
-		for (const row of dead) store.dead.set(row.id, { hash: row.hash, reason: row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired" });
+		// The newest DEAD_MAX, oldest first (bury keeps insertion order).
+		const dead = await db.all<Row>("SELECT * FROM (SELECT * FROM mobile_tokens WHERE revoked_at IS NOT NULL OR expires_at <= ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at", [store.clock(), DEAD_MAX]);
+		for (const row of dead) store.bury(toRecord(row), row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired", row.revoked_at !== null ? Number(row.revoked_at) : Number(row.expires_at));
 		return store;
 	}
 
@@ -233,7 +273,7 @@ export class MobileTokens {
 			if (seen.has(id)) continue;
 			this.active.delete(id);
 			const row = await this.db.first<Row>("SELECT revoked_at, revoke_reason FROM mobile_tokens WHERE id = ?", [id]);
-			this.bury(t, row && row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired");
+			this.bury(t, row && row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired", row && row.revoked_at !== null ? Number(row.revoked_at) : now);
 		}
 	}
 
@@ -241,12 +281,17 @@ export class MobileTokens {
 		return this.options.days * DAY;
 	}
 
+	/** How long after its sign-in a token family may live, ms (never less than one token's lifetime). */
+	get maxMs(): number {
+		return Math.max(this.options.days, this.options.maxDays ?? 180) * DAY;
+	}
+
 	get size(): number {
 		return this.active.size;
 	}
 
 	/** A new token: returns the token string (shown once) and its record. Revokes the user's oldest past the per-user cap. */
-	async mint(input: MintInput, replacing?: string): Promise<{ token: string; record: MobileTokenRecord }> {
+	async mint(input: MintInput, replacing?: string, chain?: { signedIn: number; family: string; expires: number }): Promise<{ token: string; record: MobileTokenRecord }> {
 		const now = this.clock();
 		this.sweep(now);
 		const mine = [...this.active.values()].filter((t) => t.id !== replacing && sameUser(t.user, input.user));
@@ -272,15 +317,17 @@ export class MobileTokens {
 			role: input.role,
 			device: deviceName(input.device),
 			created: now,
-			expires: now + this.lifetimeMs,
+			expires: chain?.expires ?? now + this.lifetimeMs,
 			lastUsed: null,
 			revoked: null,
 			revokeReason: null,
 			adminTokenHash: u.kind === "token" ? (input.adminTokenHash ?? null) : null,
 			blessedDevice: input.blessedDevice ?? null,
+			signedIn: chain?.signedIn ?? now,
+			family: chain?.family ?? id,
 		};
 		await this.db.run(
-			"INSERT INTO mobile_tokens (id, hash, user_kind, user_id, user_name, login, role, device_name, created_at, expires_at, last_used_at, revoked_at, revoke_reason, admin_token_hash, blessed_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)",
+			"INSERT INTO mobile_tokens (id, hash, user_kind, user_id, user_name, login, role, device_name, created_at, expires_at, last_used_at, revoked_at, revoke_reason, admin_token_hash, blessed_device, signed_in_at, family) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)",
 			[
 				id,
 				record.hash,
@@ -294,10 +341,48 @@ export class MobileTokens {
 				record.expires,
 				record.adminTokenHash,
 				record.blessedDevice,
+				record.signedIn,
+				record.family,
 			],
 		);
 		this.active.set(id, record);
 		return { token, record };
+	}
+
+	/**
+	 * Refreshes an active token: a new one in its family, with a fresh expiry (never past the family's
+	 * TYPETORCH_MOBILE_TOKEN_MAX_DAYS), and the old one revoked ("refreshed"). The old token is claimed before the first
+	 * await, so a parallel refresh of it gets 409 and only one new token is made; a failed mint gives the claim back. Throws
+	 * MobileTokenError: 401 not active, 409 already being refreshed, 403 `mobile_signin_too_old` (sign in again), 429 caps.
+	 */
+	async refresh(id: string): Promise<{ token: string; record: MobileTokenRecord; replaced: MobileTokenRecord }> {
+		const now = this.clock();
+		const parent = this.active.get(id);
+		if (!parent || now >= parent.expires) throw new MobileTokenError("a mobile app token is required (Authorization: Bearer ttm_...)", 401);
+		if (this.refreshing.has(id)) throw new MobileTokenError("this token is already being refreshed: use the new one", 409, "mobile_refresh_in_progress");
+		const cap = parent.signedIn + this.maxMs;
+		const expires = Math.min(now + this.lifetimeMs, cap);
+		// Past the family's maximum (or once a token already lives to it: a refresh can't move it) the phone signs in again.
+		if (now >= cap || parent.expires >= cap) throw new MobileTokenError(`this sign-in is ${Math.round(this.maxMs / DAY)} days old: sign in again`, 403, "mobile_signin_too_old");
+		this.refreshing.add(id);
+		let made: { token: string; record: MobileTokenRecord };
+		try {
+			const u = parent.user;
+			made = await this.mint(
+				{ user: u, role: parent.role, device: parent.device, ...(parent.adminTokenHash ? { adminTokenHash: parent.adminTokenHash } : {}), ...(parent.blessedDevice ? { blessedDevice: parent.blessedDevice } : {}) },
+				id,
+				{ signedIn: parent.signedIn, family: parent.family, expires },
+			);
+		} finally {
+			this.refreshing.delete(id);
+		}
+		// Revoked while the new one was being made (Settings, a role check, revoke all): the new one goes too.
+		if (!this.active.has(id)) {
+			await this.revoke(made.record.id, "the token it replaced was revoked");
+			throw new MobileTokenError("a mobile app token is required (Authorization: Bearer ttm_...)", 401);
+		}
+		await this.revoke(id, MOBILE_REFRESHED);
+		return { ...made, replaced: parent };
 	}
 
 	/**
@@ -316,7 +401,7 @@ export class MobileTokens {
 		const now = this.clock();
 		if (now >= record.expires) {
 			this.active.delete(record.id);
-			this.bury(record, "expired");
+			this.bury(record, "expired", record.expires);
 			return undefined;
 		}
 		if (record.user.kind === "token" && record.adminTokenHash !== currentAdminTokenHash) {
@@ -332,7 +417,9 @@ export class MobileTokens {
 
 	/**
 	 * Why a presented token no longer works (revoked: the reason; or "expired"), when it is a real token that did (the
-	 * secret matches); undefined for anything else, which counts as a wrong token.
+	 * secret matches); undefined for anything else, which counts as a wrong token. Reuse detection: a refreshed token
+	 * presented more than REUSE_GRACE_MS after its refresh revokes every active token of its family (whoever refreshed
+	 * it, the app or a thief, loses the new one; the phone signs in again).
 	 */
 	deadReason(token: string): string | undefined {
 		if (token.length > 80) return undefined;
@@ -340,17 +427,74 @@ export class MobileTokens {
 		if (!m) return undefined;
 		const id = m[1] as string;
 		const live = this.active.get(id);
-		const entry = live && this.clock() >= live.expires ? { hash: live.hash, reason: "expired" } : this.dead.get(id);
+		const now = this.clock();
+		const entry: DeadToken | undefined = live && now >= live.expires ? { hash: live.hash, reason: "expired", family: live.family, at: live.expires } : this.dead.get(id);
 		if (!entry) return undefined;
 		const given = createHash("sha256").update(token).digest();
 		const stored = Buffer.from(entry.hash, "hex");
-		return stored.length === given.length && timingSafeEqual(stored, given) ? entry.reason : undefined;
+		if (stored.length !== given.length || !timingSafeEqual(stored, given)) return undefined;
+		if (entry.reason === MOBILE_REFRESHED && now - entry.at > REUSE_GRACE_MS) {
+			const revoked = this.revokeFamily(entry.family, "a refreshed token was used again");
+			if (revoked.length) {
+				this.log(`mobile tokens: refreshed token ${id} was used again: revoked ${revoked.length} token(s) of its sign-in`);
+				const user = entry.user ?? revoked[0]?.user;
+				if (user) this.options.onReuse?.({ id, family: entry.family, revoked: revoked.length, user });
+			}
+		}
+		return entry.reason;
 	}
 
-	private bury(record: MobileTokenRecord, reason: string): void {
+	private bury(record: MobileTokenRecord, reason: string, at = this.clock()): void {
 		this.dead.delete(record.id);
-		this.dead.set(record.id, { hash: record.hash, reason });
+		this.dead.set(record.id, { hash: record.hash, reason, family: record.family, at, user: record.user });
 		while (this.dead.size > DEAD_MAX) this.dead.delete(this.dead.keys().next().value as string);
+	}
+
+	/**
+	 * Takes the matching active tokens out at once (synchronously: nothing can use them after this returns), then marks
+	 * them revoked in the table. Returns the records taken out.
+	 */
+	private takeOut(match: (t: MobileTokenRecord) => boolean, reason: string): MobileTokenRecord[] {
+		const why = reason.slice(0, 80);
+		const now = this.clock();
+		const taken = [...this.active.values()].filter(match);
+		for (const t of taken) {
+			this.active.delete(t.id);
+			this.bury(t, why, now);
+		}
+		return taken;
+	}
+
+	private persistRevoked(ids: string[], reason: string): Promise<void> {
+		if (!ids.length) return Promise.resolve();
+		const now = this.clock();
+		const why = reason.slice(0, 80);
+		return this.db
+			.transaction((tx) => {
+				for (const id of ids) tx.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE id = ? AND revoked_at IS NULL", [now, why, id]);
+			})
+			.catch((e) => this.log(`mobile tokens: could not mark ${ids.length} token(s) revoked (${(e as Error).message.slice(0, 120)})`));
+	}
+
+	/** Revokes every active token of a family (the memory part at once, the table after); returns them. */
+	private revokeFamily(family: string, reason: string): MobileTokenRecord[] {
+		const taken = this.takeOut((t) => t.family === family, reason);
+		void this.persistRevoked(
+			taken.map((t) => t.id),
+			reason,
+		);
+		return taken;
+	}
+
+	/**
+	 * Revokes every active token (the Settings page's "Revoke all"): the ones in memory at once, then every row the table
+	 * still has live (also those another process made during a rolling deploy). Returns how many.
+	 */
+	async revokeAll(reason: string): Promise<number> {
+		const taken = this.takeOut(() => true, reason);
+		const now = this.clock();
+		const r = await this.db.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE revoked_at IS NULL AND expires_at > ?", [now, reason.slice(0, 80), now]);
+		return Math.max(taken.length, r.changes);
 	}
 
 	/** An active token by id (no secret check: for routes that already know the caller). */
@@ -425,7 +569,7 @@ export class MobileTokens {
 		for (const [id, t] of this.active) {
 			if (now >= t.expires) {
 				this.active.delete(id);
-				this.bury(t, "expired");
+				this.bury(t, "expired", t.expires);
 			}
 		}
 	}

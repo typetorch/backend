@@ -133,10 +133,17 @@ export interface ServerConfig {
 	/** Mobile app tokens (server/mobile-tokens.ts): lifetime in days, 30 to 90 (TYPETORCH_MOBILE_TOKEN_DAYS, default 60). */
 	mobileTokenDays: number;
 	/**
-	 * TYPETORCH_MOBILE_DEV_REDIRECTS=on: the app's sign-in may also send its code to Expo Go (exp:// and exps://), for
-	 * development. Off by default: an Expo Go address can name anyone's development server.
+	 * How long after its sign-in a mobile app token may still be refreshed, days (TYPETORCH_MOBILE_TOKEN_MAX_DAYS, default
+	 * 180, at least mobileTokenDays, at most 730): past it the phone signs in again.
 	 */
-	mobileDevRedirects: boolean;
+	mobileTokenMaxDays: number;
+	/**
+	 * TYPETORCH_MOBILE_DEV_REDIRECTS: which Expo Go (exp:// and exps://) addresses the app's sign-in may send its code to,
+	 * for development; false = none (the default). An Expo Go address can name anyone's development server, so `on` only
+	 * allows loopback and private-network IP addresses, and anything else must be listed (host[:port]). A sign-in that
+	 * goes to Expo Go never gets the admin role.
+	 */
+	mobileDevRedirects: false | MobileDevRedirects;
 	/** Failed logins per IP before a 429 and the window they count in, ms. */
 	loginMaxFailures: number;
 	loginWindowMs: number;
@@ -323,6 +330,61 @@ function num(env: Record<string, string | undefined>, name: string, fallback: nu
 	const n = Number(raw);
 	if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${name} must be a number from ${min} to ${max}`);
 	return n;
+}
+
+/** TYPETORCH_MOBILE_DEV_REDIRECTS when it is not off. */
+export interface MobileDevRedirects {
+	/** `on`: loopback and private-network IP addresses (127/8, 10/8, 172.16/12, 192.168/16, ::1, fc00::/7), any port. */
+	privateNetwork: boolean;
+	/** Listed host[:port] entries, lower case; one without a port allows any port. */
+	hosts: string[];
+}
+
+const HOST_ENTRY = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]{2,45}\])(?::(\d{1,5}))?$/;
+const MOBILE_DEV_HOSTS_MAX = 20;
+
+/** TYPETORCH_MOBILE_DEV_REDIRECTS: off (default), on (private network only), or a comma list of host[:port] (may include `on`). */
+export function parseMobileDevRedirects(raw: string | undefined): false | MobileDevRedirects {
+	const value = (raw ?? "").trim().toLowerCase();
+	if (!value || FALSE.includes(value)) return false;
+	if (TRUE.includes(value)) return { privateNetwork: true, hosts: [] };
+	const problem = "TYPETORCH_MOBILE_DEV_REDIRECTS must be off, on (loopback and private-network addresses only) or a comma list of host[:port], e.g. 192.168.1.5:8081,abc-anonymous-8081.exp.direct";
+	const entries = value.split(",").map((e) => e.trim()).filter(Boolean);
+	if (entries.length > MOBILE_DEV_HOSTS_MAX) throw new Error(`${problem} (at most ${MOBILE_DEV_HOSTS_MAX})`);
+	const rules: MobileDevRedirects = { privateNetwork: false, hosts: [] };
+	for (const entry of entries) {
+		if (TRUE.includes(entry)) {
+			rules.privateNetwork = true;
+			continue;
+		}
+		const m = HOST_ENTRY.exec(entry);
+		if (!m || entry.length > 260 || (m[1] !== undefined && Number(m[1]) > 65535)) throw new Error(problem);
+		rules.hosts.push(entry);
+	}
+	return rules;
+}
+
+/** A loopback or private-network IP address (or localhost): IP literals only, never a name that could resolve anywhere. */
+export function isPrivateNetworkHost(hostname: string): boolean {
+	const h = hostname.toLowerCase();
+	if (h === "localhost" || h === "[::1]") return true;
+	const octet = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+	const v4 = new RegExp(`^${octet}\\.${octet}\\.${octet}\\.${octet}$`).exec(h);
+	if (v4) {
+		const [a, b] = [Number(v4[1]), Number(v4[2])];
+		return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+	}
+	// IPv6 unique local addresses (fc00::/7).
+	return /^\[f[cd][0-9a-f]{0,2}:[0-9a-f:.]*\]$/.test(h);
+}
+
+/** Whether an Expo Go redirect's host (`host[:port]` as URL.host gives it) is allowed by TYPETORCH_MOBILE_DEV_REDIRECTS. */
+export function mobileDevRedirectAllowed(rules: false | MobileDevRedirects, host: string, hostname: string): boolean {
+	if (!rules || !hostname) return false;
+	const h = host.toLowerCase();
+	const name = hostname.toLowerCase();
+	if (rules.privateNetwork && isPrivateNetworkHost(name)) return true;
+	return rules.hosts.some((entry) => entry === h || entry === name);
 }
 
 const TRUE = ["1", "true", "yes", "on"];
@@ -582,7 +644,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		trustProxy,
 		sessionMaxMs: num(env, "TYPETORCH_SESSION_MAX_DAYS", 3, 0.01, 90) * 86_400_000,
 		mobileTokenDays: Math.min(90, Math.max(30, Math.round(num(env, "TYPETORCH_MOBILE_TOKEN_DAYS", 60, 1, 3650)))),
-		mobileDevRedirects: flag(env, "TYPETORCH_MOBILE_DEV_REDIRECTS", false),
+		mobileTokenMaxDays: 180,
+		mobileDevRedirects: parseMobileDevRedirects(env.TYPETORCH_MOBILE_DEV_REDIRECTS),
 		loginMaxFailures: num(env, "TYPETORCH_LOGIN_MAX_FAILURES", 5, 1, 1000),
 		loginWindowMs: num(env, "TYPETORCH_LOGIN_WINDOW_MINUTES", 15, 0.01, 24 * 60) * 60_000,
 		liveMaxClients: num(env, "TYPETORCH_LIVE_MAX_CLIENTS", 20, 1, 1000),
@@ -676,6 +739,13 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 	}
 	const mobileDays = env.TYPETORCH_MOBILE_TOKEN_DAYS;
 	if (mobileDays && Number(mobileDays) !== config.mobileTokenDays) warnings.push(`TYPETORCH_MOBILE_TOKEN_DAYS is kept between 30 and 90: using ${config.mobileTokenDays}`);
+	const maxRaw = env.TYPETORCH_MOBILE_TOKEN_MAX_DAYS;
+	config.mobileTokenMaxDays = Math.min(730, Math.max(config.mobileTokenDays, Math.round(num(env, "TYPETORCH_MOBILE_TOKEN_MAX_DAYS", 180, 1, 36500))));
+	if (maxRaw && Number(maxRaw) !== config.mobileTokenMaxDays) warnings.push(`TYPETORCH_MOBILE_TOKEN_MAX_DAYS is kept between TYPETORCH_MOBILE_TOKEN_DAYS (${config.mobileTokenDays}) and 730: using ${config.mobileTokenMaxDays}`);
+	// Expo Go redirects on a server the internet reaches: allowed, but said at every start.
+	if (config.mobileDevRedirects && config.publicUrl && !isPrivateNetworkHost(new URL(config.publicUrl).hostname)) {
+		warnings.push(`TYPETORCH_MOBILE_DEV_REDIRECTS is on while TYPETORCH_PUBLIC_URL is public (${new URL(config.publicUrl).host}): the app's sign-in may send its code to Expo Go development servers (read-only role only). Turn it off in production.`);
+	}
 	if (universe) {
 		const u = Number(universe);
 		if (!Number.isSafeInteger(u) || u <= 0) throw new Error("TYPETORCH_UNIVERSE_ID must be a positive integer");

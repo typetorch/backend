@@ -118,6 +118,8 @@ export interface FleetHttpOptions {
 	keepOpen?(req: Request): void;
 	/** Seconds between SSE keep-alive comments (default 15). */
 	pingSeconds?: number;
+	/** Asked on every SSE ping: false closes the stream (the caller's token or session was revoked, or its role is gone). */
+	stillAllowed?(): boolean;
 	/**
 	 * Extra fields for a heartbeat's 202 reply: plans/25 `rd: 1` while the explorer watches that JobId; plans/34 `xq: 1`
 	 * (send the declarations) and `lm: 1` (the live map is watched). `body` is the heartbeat as sent (its `xh` / `xd`).
@@ -424,6 +426,20 @@ function stream(req: Request, url: URL, o: FleetHttpOptions, ips: boolean): Resp
 				send(event.type, event.type === "server" && !ips ? { ...event, server: withoutIps(event.server) } : event);
 			});
 			ping = setInterval(() => {
+				let allowed = true;
+				try {
+					allowed = o.stillAllowed?.() ?? true;
+				} catch {
+					allowed = false;
+				}
+				if (!allowed) {
+					unsubscribe();
+					if (ping) clearInterval(ping);
+					try {
+						controller.close();
+					} catch {}
+					return;
+				}
 				try {
 					controller.enqueue(encoder.encode(": ping\n\n"));
 				} catch {

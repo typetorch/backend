@@ -139,7 +139,7 @@ import { ANONYMOUS, AUDIT_PAGE_MAX, AuditLog, actorOfUser, routeAction, settingC
 import { BackupError, Backups } from "./backup.ts";
 import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, originProblem, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
 import { MOBILE_ID_PATTERN, MobileTokenError, MobileTokens, deviceName, sameUser, viewOf, type MobileTokenRecord, type MobileUser } from "./mobile-tokens.ts";
-import type { ServerConfig } from "./config.ts";
+import { mobileDevRedirectAllowed, type ServerConfig } from "./config.ts";
 import { DiskWatch, type DiskUsage } from "./disk.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
 import { API_CSP, EXPLORER_CSP, FailureLimiter, RateLimiter, bearer, clearCookie, clientIp, json, readCapped, readCookie, setCookie, tokenIn, tooMany, withSecurityHeaders } from "./http.ts";
@@ -206,6 +206,8 @@ export interface AppOptions {
 	mapExport?: { sleep?: (ms: number) => Promise<void>; pollMs?: number; retryDelayMs?: number };
 	/** The migration job's knobs (tests: small pages, no waits; server/migrate.ts). */
 	migrate?: Partial<Pick<import("./migrate.ts").MigrationOptions, "pageSize" | "mergeRows" | "quietMs" | "pollMs" | "queryWaitMs" | "sleep" | "onPage" | "tries" | "basin">>;
+	/** Seconds between the event streams' keep-alive pings, which also re-check the caller (default 15; tests pass a short one). */
+	ssePingSeconds?: number;
 	/** Plans/35 C (TYPETORCH_ROLE=main): the queue bucket (default: Bun's S3Client on TYPETORCH_QUEUE_*), and how long it must fail before the alert. */
 	queue?: { bucket?: QueueBucket; downAfterMs?: number };
 }
@@ -444,7 +446,15 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		secrets: () => [config.adminToken, ...config.apiKeys, config.queue?.secretAccessKey, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, config.basinRead?.token, ...(migration?.secrets() ?? [])],
 	});
 	// Mobile app tokens (server/mobile-tokens.ts): the TypeTorch app's long-lived Bearers.
-	const mobileTokens = await MobileTokens.open(sqlite, { days: config.mobileTokenDays, clock, log });
+	const mobileTokens = await MobileTokens.open(sqlite, {
+		days: config.mobileTokenDays,
+		maxDays: config.mobileTokenMaxDays,
+		clock,
+		log,
+		// Reuse detection: a refreshed token presented again ended its whole sign-in (mobile-tokens.ts deadReason).
+		onReuse: ({ id, family, revoked, user }) =>
+			void audit.record({ actor: actorOfUser(user), role: "none", via: "bearer", ip: "", action: "mobile.token.revoke", outcome: "refused", details: { mobile: id, family, revoked, reason: "a refreshed token was used again" } }),
+	});
 	const savedQueries = await SavedQueryStore.open(sqlite, clock);
 	// Scheduled live events (live-events.ts): the schedule the owner signs with the CLI, and each event's lift report.
 	const liveEvents = await LiveEventStore.open(sqlite, clock);
@@ -638,7 +648,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	// The webhook is slow and remote: queued, so a stuck Discord never holds a heartbeat up. Always subscribed: the
 	// notifier skips alerts while no webhook is set, and one saved on the Settings page applies at once.
 	bus.subscribe("alert-notifier", ["alert"], (_topic, alert) => notifier.notify(alert), { mode: "queue", maxQueue: 200 });
-	const live = new LiveHub(bus, { maxClients: config.liveMaxClients, clock });
+	const live = new LiveHub(bus, { maxClients: config.liveMaxClients, clock, ...(options.ssePingSeconds ? { pingSeconds: options.ssePingSeconds } : {}) });
 	live.start();
 
 	// Auth -------------------------------------------------------------------------------------------------------------
@@ -2464,7 +2474,10 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		for (const [k, v] of mobileCodes) if (now >= v.expires) mobileCodes.delete(k);
 	}
 
-	/** The app's redirect_uri: `typetorch://...`, or Expo Go's exp:// / exps:// with TYPETORCH_MOBILE_DEV_REDIRECTS=on. */
+	/**
+	 * The app's redirect_uri: `typetorch://...`, or Expo Go's exp:// / exps:// on a host TYPETORCH_MOBILE_DEV_REDIRECTS
+	 * allows (`on`: loopback and private-network addresses; else the listed host[:port]).
+	 */
 	function mobileRedirectProblem(raw: string | null): string | undefined {
 		if (!raw || raw.length > 512 || /[\u0000- \u007f]/.test(raw)) return "redirect_uri is missing, too long or has spaces";
 		let u: URL;
@@ -2476,8 +2489,16 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		if (raw.includes("#")) return "redirect_uri may not have a fragment";
 		if (u.username || u.password) return "redirect_uri may not carry a user or password";
 		if (u.protocol === "typetorch:") return undefined;
-		if (u.protocol === "exp:" || u.protocol === "exps:") return config.mobileDevRedirects ? undefined : "Expo Go redirects (exp://) are off on this server (TYPETORCH_MOBILE_DEV_REDIRECTS=on turns them on)";
+		if (isDevRedirect(raw)) {
+			if (!config.mobileDevRedirects) return "Expo Go redirects (exp://) are off on this server (TYPETORCH_MOBILE_DEV_REDIRECTS turns them on)";
+			return mobileDevRedirectAllowed(config.mobileDevRedirects, u.host, u.hostname) ? undefined : "this Expo Go address is not allowed on this server (TYPETORCH_MOBILE_DEV_REDIRECTS: on allows private-network addresses; list any other host[:port])";
+		}
 		return "redirect_uri must start with typetorch://";
+	}
+
+	/** An Expo Go redirect (a development build): its sign-in never gets the admin role. */
+	function isDevRedirect(redirectUri: string): boolean {
+		return /^exps?:/i.test(redirectUri);
 	}
 
 	function appRedirect(redirectUri: string, params: Record<string, string>): string {
@@ -2490,7 +2511,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 
 	/** A small self-contained page (no script, nothing loaded): the consent page, and the sign-in's errors. */
 	function mobilePage(status: number, title: string, body: string, cookies: string[] = []): Response {
-		const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>${esc(title)}</title><style>
+		const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="same-origin"><title>${esc(title)}</title><style>
 :root{color-scheme:light dark;--bg:#fff;--fg:#0a0a0a;--muted:#737373;--border:#e5e5e5;--primary:#171717;--primary-fg:#fafafa;--warn:#b45309}
 @media (prefers-color-scheme:dark){:root{--bg:#0a0a0a;--fg:#fafafa;--muted:#a3a3a3;--border:#262626;--primary:#fafafa;--primary-fg:#171717;--warn:#f59e0b}}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -2499,7 +2520,9 @@ h1{font-size:18px;margin:0 0 12px}p{margin:0 0 12px;overflow-wrap:anywhere}.mute
 .row{display:flex;gap:8px;margin-top:16px}button{flex:1;font:inherit;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--fg);cursor:pointer}
 button.primary{background:var(--primary);color:var(--primary-fg);border-color:var(--primary)}code{font-size:13px}
 </style></head><body><main><div class="card"><h1>${esc(title)}</h1>${body}</div></main></body></html>`;
-		const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": MOBILE_CONSENT_CSP });
+		// same-origin, not no-referrer: with no-referrer browsers may send `Origin: null` on the consent form's POST. The
+		// Referer never leaves this site either way (the code goes to the app in a redirect, not a link).
+		const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": MOBILE_CONSENT_CSP, "referrer-policy": "same-origin" });
 		for (const c of cookies) headers.append("set-cookie", c);
 		return new Response(html, { status, headers });
 	}
@@ -2552,7 +2575,9 @@ button.primary{background:var(--primary);color:var(--primary-fg);border-color:va
 	}
 
 	/** The browser login finished for an app sign-in: keep who and which role, then the consent page. */
-	function mobileSignedIn(req: Request, m: { key: string; pending: MobilePending }, user: MobileUser, role: AccessRole, method: MobileLogin["method"], blessedDevice: string | undefined, cookies: string[]): Response {
+	function mobileSignedIn(req: Request, m: { key: string; pending: MobilePending }, user: MobileUser, given: AccessRole, method: MobileLogin["method"], blessedDevice: string | undefined, cookies: string[]): Response {
+		// A development build (Expo Go) reads only: an exp:// address could be someone else's development server.
+		const role: AccessRole = isDevRedirect(m.pending.redirectUri) ? "web" : given;
 		m.pending.login = { user, role, method, ...(blessedDevice ? { blessedDevice } : {}), form: randomBytes(24).toString("base64url") };
 		noteAudit(req, { actor: actorOfUser(user), role, via: "none", action: "mobile.sign-in", outcome: "ok", details: { method, role, device: m.pending.device } });
 		return redirect(`${MOBILE_PATH}/consent`, cookies);
@@ -2574,21 +2599,47 @@ button.primary{background:var(--primary);color:var(--primary-fg);border-color:va
 		return { key, pending: pending as MobilePending & { login: MobileLogin } };
 	}
 
+	/** The consent routes' lockout (wrong tokens from this address) and per-address limit, or undefined. */
+	function consentLimited(ip: string): Response | undefined {
+		const blocked = blockedResponse(ip);
+		if (blocked) return blocked;
+		return mobileLimiter.take(`consent:${ip}`) ? undefined : tooMany(mobileLimiter.retryAfter(`consent:${ip}`));
+	}
+
+	/**
+	 * The consent form's origin check: a foreign Origin (or a cross-site fetch) is refused; `Origin: null` is accepted,
+	 * as some browsers send it on a form POST from a page with a strict referrer policy. CSRF is stopped by the form's
+	 * token (only the page has it) and the SameSite=Lax pending cookie either way.
+	 */
+	function consentOriginProblem(req: Request): string | undefined {
+		if (req.headers.get("sec-fetch-site") === "cross-site") return "cross-origin request refused";
+		if (req.headers.get("origin") === "null") return undefined;
+		return originProblem(req, proxyOpts);
+	}
+
 	const expiredPage = (req: Request) => mobilePage(400, "This sign-in expired", "<p>Start again from the TypeTorch app.</p>", [clearMobileCookie(req)]);
 
 	/** GET /auth/mobile/consent: "Sign in to <game> on the TypeTorch app (<device>) as <name>, role <role>?" */
 	function mobileConsentPage(req: Request, ip: string): Response {
 		if (!adminIpOk(ip)) return notFound();
+		const limited = consentLimited(ip);
+		if (limited) return limited;
 		const m = mobileConsentOf(req);
 		if (!m) return expiredPage(req);
 		const { login, device, redirectUri } = m.pending;
 		const label = gameInfo().label ?? "this backend";
 		const who = login.user.kind === "roblox" ? login.user.name : "the admin token";
 		const roleText = login.role === "admin" ? "admin (reads and manages)" : "web (read-only)";
-		const dev = new URL(redirectUri).protocol !== "typetorch:";
-		const body = `<p>Sign in to <strong>${esc(label)}</strong> on the TypeTorch app (<strong>${esc(device)}</strong>) as <strong>${esc(who)}</strong>, role <strong>${esc(roleText)}</strong>?</p>
+		const target = new URL(redirectUri);
+		const dev = target.protocol !== "typetorch:";
+		// The device name is whatever the app sent: shown as its claim, never as a fact; where the code goes is the fact.
+		const goesTo = dev
+			? `<p class="warn">Development build: the code goes to the Expo Go server at <strong><code>${esc(target.host.slice(0, 120))}</code></strong> (<code>${esc(redirectUri.slice(0, 120))}</code>). Continue only if that is your own development server. A development build gets the read-only role.</p>`
+			: `<p>The code goes to <strong><code>typetorch://</code></strong>: the TypeTorch app on this phone.</p>`;
+		const body = `<p>Sign in to <strong>${esc(label)}</strong> on the TypeTorch app as <strong>${esc(who)}</strong>, role <strong>${esc(roleText)}</strong>?</p>
+${goesTo}
+<p class="muted">The app calls itself "${esc(device)}" (its own claim: this server can't check it).</p>
 <p class="muted">The app stays signed in for ${config.mobileTokenDays} days unless it is revoked (Settings, Mobile app sessions). Continue only if you just started this sign-in in the app yourself.</p>
-${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${esc(redirectUri.slice(0, 120))}</code>. Continue only if that is your own development server.</p>` : ""}
 <form method="post" action="${MOBILE_PATH}/consent"><input type="hidden" name="form" value="${esc(login.form)}"><div class="row"><button type="submit" name="decision" value="deny">Cancel</button><button class="primary" type="submit" name="decision" value="allow">Continue</button></div></form>`;
 		return mobilePage(200, "Sign in to the TypeTorch app", body);
 	}
@@ -2596,7 +2647,9 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 	/** POST /auth/mobile/consent (the page's form): Continue sends a one-time code to the app; Cancel, access_denied. */
 	async function mobileConsent(req: Request, ip: string): Promise<Response> {
 		if (!adminIpOk(ip)) return notFound();
-		const problem = originProblem(req, proxyOpts);
+		const limited = consentLimited(ip);
+		if (limited) return limited;
+		const problem = consentOriginProblem(req);
 		if (problem) return mobilePage(403, "Can't sign in", `<p>${esc(problem)}.</p>`);
 		if (!/^application\/x-www-form-urlencoded\b/i.test(req.headers.get("content-type") ?? "")) return mobilePage(415, "Can't sign in", "<p>Use the page's buttons.</p>");
 		const raw = await readCapped(req, 2048);
@@ -2605,7 +2658,11 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		const m = mobileConsentOf(req);
 		if (!m) return expiredPage(req);
 		const given = form.get("form") ?? "";
-		if (!sameSecret(given, m.pending.login.form)) return mobilePage(403, "Can't sign in", "<p>This page is out of date. Start again from the TypeTorch app.</p>");
+		if (!sameSecret(given, m.pending.login.form)) {
+			// The form token is a secret only the page had: a wrong one counts toward the lockout.
+			failedAuth(ip, "mobile app consent (wrong form token)", "mobile");
+			return mobilePage(403, "Can't sign in", "<p>This page is out of date. Start again from the TypeTorch app.</p>");
+		}
 		// One answer per sign-in, whatever it is.
 		mobilePending.delete(m.key);
 		const { login, redirectUri, state } = m.pending;
@@ -2645,16 +2702,15 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 	}
 
 	/** Makes a token and answers `{ token, id, expiresAt, role, user }` (the only time the token is shown). */
-	async function mintAnswer(req: Request, input: Parameters<MobileTokens["mint"]>[0], action: string, details: Record<string, unknown>, replacing?: MobileTokenRecord): Promise<Response> {
-		let made;
+	async function mintAnswer(req: Request, input: Parameters<MobileTokens["mint"]>[0] | { refresh: string }, action: string, details: Record<string, unknown>): Promise<Response> {
+		let made: { token: string; record: MobileTokenRecord; replaced?: MobileTokenRecord };
 		try {
-			made = await mobileTokens.mint(input, replacing?.id);
+			made = "refresh" in input ? await mobileTokens.refresh(input.refresh) : await mobileTokens.mint(input);
 		} catch (error) {
-			if (error instanceof MobileTokenError) return json(error.status, { error: error.message });
+			if (error instanceof MobileTokenError) return json(error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
 			throw error;
 		}
-		if (replacing) await mobileTokens.revoke(replacing.id, "refreshed");
-		const { token, record } = made;
+		const { token, record, replaced: replacing } = made;
 		const view = viewOf(record);
 		noteAudit(req, { actor: actorOfUser(record.user), role: record.role, via: "bearer", action, outcome: "ok", details: { mobile: record.id, device: record.device, role: record.role, ...details } });
 		log(`mobile app token ${record.id} ${replacing ? `refreshed (was ${replacing.id})` : "made"} for ${actorOfUser(record.user).label}, role ${record.role}`);
@@ -2705,9 +2761,11 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		}
 		if (typeof body.redirect_uri === "string" && body.redirect_uri !== entry.redirectUri) return json(400, { error: "invalid_grant" });
 		const { login } = entry;
-		if (login.user.kind === "roblox" && !auth.robloxStillHolds(login.user.userId, login.role)) return json(403, { error: "access_denied" });
+		// Never admin through Expo Go (mobileSignedIn caps it already; this is the second lock).
+		const role: AccessRole = isDevRedirect(entry.redirectUri) ? "web" : login.role;
+		if (login.user.kind === "roblox" && !auth.robloxStillHolds(login.user.userId, role)) return json(403, { error: "access_denied" });
 		const device = entry.device !== "Mobile app" ? entry.device : deviceName(body.device);
-		return mintAnswer(req, { user: login.user, role: login.role, device, ...(login.blessedDevice ? { blessedDevice: login.blessedDevice } : {}) }, "mobile.token.mint", { method: login.method });
+		return mintAnswer(req, { user: login.user, role, device, ...(login.blessedDevice ? { blessedDevice: login.blessedDevice } : {}) }, "mobile.token.mint", { method: login.method });
 	}
 
 	/** The mobile app token behind the request (allow list, lockout and a wrong Bearer counted like every Bearer), or the answer. */
@@ -2723,21 +2781,21 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		return { response: json(401, { error: "a mobile app token is required (Authorization: Bearer ttm_...)" }) };
 	}
 
-	/** POST /v1/auth/mobile/refresh (a mobile app token): a new token with a fresh expiry; the old one is revoked. */
+	/**
+	 * POST /v1/auth/mobile/refresh (a mobile app token): a new token with a fresh expiry; the old one is revoked. The store
+	 * claims the old token before anything awaits (a parallel refresh gets 409), keeps the sign-in's time (403
+	 * `mobile_signin_too_old` past TYPETORCH_MOBILE_TOKEN_MAX_DAYS) and its family (limited per family, so a new id each
+	 * time doesn't reset the limit).
+	 */
 	async function mobileRefresh(req: Request, ip: string): Promise<Response> {
 		const gate = mobileGate(req, ip);
 		if ("response" in gate) return gate.response;
 		const id = gate.principal.mobile.id;
-		if (!mobileLimiter.take(`refresh:${id}`, 5)) return tooMany(mobileLimiter.retryAfter(`refresh:${id}`, 5));
 		const record = mobileTokens.get(id);
 		if (!record) return json(401, { error: "a mobile app token is required (Authorization: Bearer ttm_...)" });
-		return mintAnswer(
-			req,
-			{ user: record.user, role: record.role, device: record.device, ...(record.adminTokenHash ? { adminTokenHash: record.adminTokenHash } : {}), ...(record.blessedDevice ? { blessedDevice: record.blessedDevice } : {}) },
-			"mobile.token.refresh",
-			{ replaced: record.id },
-			record,
-		);
+		const key = `refresh:${record.family}`;
+		if (!mobileLimiter.take(key, 5)) return tooMany(mobileLimiter.retryAfter(key, 5));
+		return mintAnswer(req, { refresh: id }, "mobile.token.refresh", { replaced: id });
 	}
 
 	/** POST /v1/auth/mobile/logout (a mobile app token): revokes that token. */
@@ -2765,6 +2823,15 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		if (path === "/v1/auth/mobile/tokens") {
 			if (req.method !== "GET") return json(405, { error: "GET only" });
 			return json(200, await mobileTokenList(p, url.searchParams.get("all") === "1"));
+		}
+		// Every phone signed out at once (owners): rotating the admin token ends only the tokens made with it.
+		if (path === "/v1/auth/mobile/tokens/revoke-all") {
+			if (req.method !== "POST") return json(405, { error: "POST only" });
+			if (p.role !== "admin") return json(403, { error: READ_ONLY });
+			const revoked = await mobileTokens.revokeAll("every token revoked on the Settings page");
+			noteAudit(req, { action: "mobile.token.revoke-all", outcome: "ok", details: { revoked } });
+			log(`mobile app tokens: all ${revoked} revoked by ${actorOf(p as Principal & { role: "admin" }).who}`);
+			return json(200, { ok: true, revoked, ...(await mobileTokenList(p, url.searchParams.get("all") === "1")) });
 		}
 		if (req.method !== "DELETE") return json(405, { error: "DELETE only" });
 		const id = path.slice("/v1/auth/mobile/tokens/".length);
@@ -3410,6 +3477,20 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 		return { principal };
 	}
 
+	/**
+	 * For a long-lived stream: whether its caller still is who opened it, asked again on every keep-alive ping. The same
+	 * checks as a new request (auth.principal: a mobile app token still live and its Roblox user still holding its role,
+	 * a session not signed out or revoked and its role still held, a named key not revoked), the allow list, and the same
+	 * role as at the start.
+	 */
+	function stillSignedIn(req: Request, ip: string, first: SignedIn): () => boolean {
+		return () => {
+			if (!adminIpOk(ip)) return false;
+			const now = auth.principal(req);
+			return now !== undefined && now.role === first.role && now.via === first.via;
+		};
+	}
+
 	/** The route of a request, with the explorer's /api prefix taken off (as `handle` does). */
 	function routePath(req: Request): string {
 		const path = new URL(req.url).pathname;
@@ -3559,6 +3640,9 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 						limiters: fleetLimiters,
 						newJobs: newFleetJobs,
 						keepOpen: (r) => keepOpen.get(r)?.(),
+						...(options.ssePingSeconds ? { pingSeconds: options.ssePingSeconds } : {}),
+						// The stream's pings re-check its caller: a revoked token or session closes it.
+						...(gate && "principal" in gate ? { stillAllowed: stillSignedIn(req, ip, gate.principal) } : {}),
 						accept: (topic, message) => bus.publish(topic, message as never),
 						// Plans/25: a watched JobId's heartbeat reply wakes its kernel's debug poll.
 						// Plans/34: `xq: 1` (send the declarations again) and `lm: 1` (the live map is watched).
@@ -3741,7 +3825,7 @@ ${dev ? `<p class="warn">Development build: the code goes to Expo Go at <code>${
 				const admin = manage();
 				return admin instanceof Response ? admin : testAlert(req, admin);
 			}
-			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.());
+			if (path === "/v1/live" && method === "GET") return live.connect(req, url, () => keepOpen.get(req)?.(), stillSignedIn(req, ip, gate.principal));
 			// Sign in with typetorch.dev: blessed devices (list, revoke), the blessing keys, a report now. Owners only.
 			if (path === "/v1/admin/devices" || path.startsWith("/v1/admin/devices/")) {
 				const admin = manage();

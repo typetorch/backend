@@ -181,7 +181,7 @@ const ROUTES: Route[] = [
 		roles: ["open"],
 		summary: "Mobile app sign-in: start (in the phone's browser)",
 		description:
-			"Keeps the app's request under a 10-minute HttpOnly cookie and redirects to this backend's browser login (typetorch.dev when on, else Sign in with Roblox). `redirect_uri` must be `typetorch://...` (Expo Go's `exp://` / `exps://` only with TYPETORCH_MOBILE_DEV_REDIRECTS=on; no fragment); a bad request gets an HTML page, never a redirect. After the login: the consent page.",
+			"Keeps the app's request under a 10-minute HttpOnly cookie and redirects to this backend's browser login (typetorch.dev when on, else Sign in with Roblox). `redirect_uri` must be `typetorch://...` (Expo Go's `exp://` / `exps://` only on a host TYPETORCH_MOBILE_DEV_REDIRECTS allows: `on` = loopback and private-network addresses, else the listed host[:port]; such a sign-in gets the web role at most; no fragment); a bad request gets an HTML page, never a redirect. Rate limited per address, with the login lockout. After the login: the consent page.",
 		params: [
 			q("redirect_uri", "typetorch://... (where the code goes)"),
 			q("state", "the app's state, 1 to 512 printable characters; sent back as is"),
@@ -191,14 +191,22 @@ const ROUTES: Route[] = [
 		],
 		ok: { status: 302, description: "redirect to the browser login" },
 	},
-	{ method: "get", path: "/auth/mobile/consent", tag: "auth", roles: ["open"], summary: "Mobile app sign-in: the consent page", ok: { status: 200, description: "an HTML page", contentType: "text/html" } },
+	{
+		method: "get",
+		path: "/auth/mobile/consent",
+		tag: "auth",
+		roles: ["open"],
+		summary: "Mobile app sign-in: the consent page",
+		description: "Who, which role, where the code goes (the redirect's host); the device name only as the app's own claim. `Referrer-Policy: same-origin`. Rate limited per address, with the login lockout.",
+		ok: { status: 200, description: "an HTML page", contentType: "text/html" },
+	},
 	{
 		method: "post",
 		path: "/auth/mobile/consent",
 		tag: "auth",
 		roles: ["open"],
 		summary: "Mobile app sign-in: Continue or Cancel (the page's form)",
-		description: "Form fields `form` (the page's token) and `decision` (`allow` / `deny`), same origin. Continue: `303` to `redirect_uri?code=<one-time, 60 s>&state=`; Cancel: `redirect_uri?error=access_denied&state=`. A failed or refused login sends `?error=<code>&state=` too.",
+		description: "Form fields `form` (the page's token; a wrong one counts toward the lockout) and `decision` (`allow` / `deny`), same origin (`Origin: null` is accepted: the form token and the SameSite=Lax cookie stop cross-site posts). Continue: `303` to `redirect_uri?code=<one-time, 60 s>&state=`; Cancel: `redirect_uri?error=access_denied&state=`. A failed or refused login sends `?error=<code>&state=` too.",
 		ok: { status: 303, description: "redirect to the app" },
 	},
 	{
@@ -212,7 +220,16 @@ const ROUTES: Route[] = [
 		body: obj({ code: str("the code from the redirect"), code_verifier: str("the PKCE verifier (43 to 128 characters)"), device: str("the device's name (admin token path)") }),
 		response: ref("MobileToken"),
 	},
-	{ method: "post", path: "/v1/auth/mobile/refresh", tag: "auth", roles: ["mobile"], summary: "A new mobile app token with a fresh expiry (the old one is revoked)", response: ref("MobileToken") },
+	{
+		method: "post",
+		path: "/v1/auth/mobile/refresh",
+		tag: "auth",
+		roles: ["mobile"],
+		summary: "A new mobile app token with a fresh expiry (the old one is revoked)",
+		description:
+			"`409 { code: \"mobile_refresh_in_progress\" }` while another refresh of the same token runs (only one new token is made); `403 { code: \"mobile_signin_too_old\" }` once the sign-in is TYPETORCH_MOBILE_TOKEN_MAX_DAYS old (no token outlives it: sign in again). A refreshed token presented again more than 10 s after its refresh revokes every token of its sign-in.",
+		response: ref("MobileToken"),
+	},
 	{ method: "post", path: "/v1/auth/mobile/logout", tag: "auth", roles: ["mobile"], summary: "Revoke the calling mobile app token" },
 	{
 		method: "get",
@@ -222,6 +239,14 @@ const ROUTES: Route[] = [
 		summary: "Mobile app tokens (admins: all; the web role: its own)",
 		description: "`{ tokens: [{ id, device, user, role, createdAt, expiresAt, lastUsedAt, revokedAt?, revokeReason?, current? }], lifetimeDays }`; no hash, no secret.",
 		params: [q("all", "1: also revoked and expired tokens (kept 30 days)")],
+	},
+	{
+		method: "post",
+		path: "/v1/auth/mobile/tokens/revoke-all",
+		tag: "auth",
+		roles: ["admin"],
+		summary: "Revoke every mobile app token (every phone signs out)",
+		description: "`{ ok, revoked, tokens, lifetimeDays }`. Audited (`mobile.token.revoke-all`). Rotating the admin token ends only the tokens made with it; this ends the Roblox users' too.",
 	},
 	{ method: "delete", path: "/v1/auth/mobile/tokens/{id}", tag: "auth", roles: ["admin", "web"], summary: "Revoke a mobile app token (admins: any; the web role: its own)", params: [p("id", "10 characters [0-9a-z]")] },
 	{ method: "get", path: "/auth/bless/challenge", tag: "auth", roles: ["open"], summary: "The CLI's signed trust link: challenge" },

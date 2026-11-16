@@ -182,8 +182,11 @@ export class LiveHub {
 		} catch {}
 	}
 
-	/** The SSE response for an admin request. `keepOpen` switches off the connection's idle timeout. */
-	connect(req: Request, url: URL, keepOpen?: () => void): Response {
+	/**
+	 * The SSE response for a signed-in request. `keepOpen` switches off the connection's idle timeout; `stillAllowed` is
+	 * asked on every ping and closes the stream once it says no (a revoked token or session, a role no longer held).
+	 */
+	connect(req: Request, url: URL, keepOpen?: () => void, stillAllowed?: () => boolean): Response {
 		if (this.clients.size >= this.options.maxClients) {
 			return new Response(JSON.stringify({ error: "too many live streams open" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "10", "cache-control": "no-store" } });
 		}
@@ -200,6 +203,16 @@ export class LiveHub {
 					this.clients.add(client);
 					this.write(client, `event: hello\ndata: ${JSON.stringify({ at: this.clock(), topics: [...topics] })}\n\n`);
 					client.ping = setInterval(() => {
+						let allowed = true;
+						try {
+							allowed = stillAllowed?.() ?? true;
+						} catch {
+							allowed = false;
+						}
+						if (!allowed) {
+							if (client) this.close(client);
+							return;
+						}
 						try {
 							controller.enqueue(this.encoder.encode(": ping\n\n"));
 						} catch {
