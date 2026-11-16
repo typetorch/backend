@@ -100,6 +100,13 @@ export interface ServerConfig {
 	/** Explorer sessions: idle and absolute lifetimes, ms. */
 	sessionIdleMs: number;
 	sessionMaxMs: number;
+	/** Mobile app tokens (server/mobile-tokens.ts): lifetime in days, 30 to 90 (TYPETORCH_MOBILE_TOKEN_DAYS, default 60). */
+	mobileTokenDays: number;
+	/**
+	 * TYPETORCH_MOBILE_DEV_REDIRECTS=on: the app's sign-in may also send its code to Expo Go (exp:// and exps://), for
+	 * development. Off by default: an Expo Go address can name anyone's development server.
+	 */
+	mobileDevRedirects: boolean;
 	/** Failed logins per IP before a 429 and the window they count in, ms. */
 	loginMaxFailures: number;
 	loginWindowMs: number;
@@ -488,6 +495,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		trustProxy,
 		sessionIdleMs: num(env, "TYPETORCH_SESSION_IDLE_HOURS", 12, 0.01, 24 * 30) * 3_600_000,
 		sessionMaxMs: num(env, "TYPETORCH_SESSION_MAX_DAYS", 7, 0.01, 90) * 86_400_000,
+		mobileTokenDays: Math.min(90, Math.max(30, Math.round(num(env, "TYPETORCH_MOBILE_TOKEN_DAYS", 60, 1, 3650)))),
+		mobileDevRedirects: flag(env, "TYPETORCH_MOBILE_DEV_REDIRECTS", false),
 		loginMaxFailures: num(env, "TYPETORCH_LOGIN_MAX_FAILURES", 5, 1, 1000),
 		loginWindowMs: num(env, "TYPETORCH_LOGIN_WINDOW_MINUTES", 15, 0.01, 24 * 60) * 60_000,
 		liveMaxClients: num(env, "TYPETORCH_LIVE_MAX_CLIENTS", 20, 1, 1000),
@@ -550,6 +559,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		if (/^[\x21-\x7e]{16,4096}$/.test(messagingKey)) config.messagingKey = messagingKey;
 		else warnings.push("OPENCLOUD_API_KEY doesn't look like an Open Cloud API key (16-4096 printable characters, no spaces): remote debug wake is off");
 	}
+	const mobileDays = env.TYPETORCH_MOBILE_TOKEN_DAYS;
+	if (mobileDays && Number(mobileDays) !== config.mobileTokenDays) warnings.push(`TYPETORCH_MOBILE_TOKEN_DAYS is kept between 30 and 90: using ${config.mobileTokenDays}`);
 	if (universe) {
 		const u = Number(universe);
 		if (!Number.isSafeInteger(u) || u <= 0) throw new Error("TYPETORCH_UNIVERSE_ID must be a positive integer");
