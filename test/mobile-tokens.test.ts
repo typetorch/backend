@@ -325,6 +325,91 @@ describe("mobile app tokens", () => {
 		expect(res.status).toBe(401);
 		expect(await asJson(res)).toMatchObject({ game: { universeId: 123456789, label: "backend.example.com" }, mobileLogin: true });
 	});
+
+	/** A plain explorer session (Sign in with Roblox, no app sign-in pending): the cookie. */
+	async function explorerSession(sub: number): Promise<string> {
+		const ip = freshIp();
+		const rs = await h.call("/v1/auth/roblox/start", { ip });
+		const oauth = (cookieOf(rs, "tt_oauth") as string).split(";")[0] as string;
+		const authorizeUrl = rs.headers.get("location") as string;
+		const code = roblox.approve(authorizeUrl, (c) => ({ ...c, sub: String(sub), preferred_username: sub === VIEWER ? "ViewerName" : "OwnerName" }));
+		const cb = await h.call(`/v1/auth/roblox/callback?${new URLSearchParams({ code, state: new URL(authorizeUrl).searchParams.get("state") as string })}`, { ip, headers: { cookie: oauth } });
+		return (cookieOf(cb, "tt_session") as string).split(";")[0] as string;
+	}
+
+	test("every explorer route answers a mobile token exactly as it answers the same user's explorer session (streams included)", async () => {
+		const XT = { "x-typetorch": "1", origin: "http://backend.test" };
+		const routes: [string, string][] = [
+			["GET", "/v1/fleet/servers"],
+			["GET", "/v1/fleet/stream"],
+			["GET", "/v1/fleet/columns"],
+			["GET", "/v1/fleet/live-map"],
+			["POST", "/v1/fleet/live-map/watch"],
+			["GET", "/v1/live-events"],
+			["GET", "/v1/maps"],
+			["GET", "/v1/notify/recent"],
+			["GET", "/v1/errors"],
+			["GET", "/v1/saved-queries"],
+			["GET", "/v1/experiments"],
+			["GET", "/v1/admin/settings"],
+			["GET", "/v1/admin/keys"],
+			["GET", "/v1/admin/audit"],
+			["GET", "/v1/auth/mobile/tokens"],
+		];
+		const status = async (method: string, path: string, headers: Record<string, string>) => {
+			const res = await h.call(path, { method, headers, ip: freshIp() });
+			await res.body?.cancel();
+			return res.status;
+		};
+		for (const sub of [OWNER, VIEWER]) {
+			const cookie = await explorerSession(sub);
+			const s = await signIn({ sub });
+			const { token } = await asJson(await redeem(s.code, s.p.verifier));
+			const seen: Record<string, [number, number]> = {};
+			for (const [method, path] of routes) seen[`${method} ${path}`] = [await status(method, path, { cookie, ...XT }), await status(method, path, bearer(token))];
+			for (const [route, [web, app]] of Object.entries(seen)) {
+				expect({ route, sub, status: app }).toEqual({ route, sub, status: web });
+				expect({ route, status: app }).not.toEqual({ route, status: 401 });
+			}
+			// Signed in for real, both ways: the event stream opens for every signed-in role.
+			expect(seen["GET /v1/fleet/stream"]).toEqual([200, 200]);
+			expect(seen["GET /v1/live-events"]).toEqual([200, 200]);
+			// Owners manage, viewers read.
+			expect(seen["GET /v1/admin/settings"]?.[1]).toBe(sub === OWNER ? 200 : 403);
+			expect(seen["POST /v1/fleet/live-map/watch"]?.[1]).toBe(sub === OWNER ? 200 : 403);
+		}
+	});
+
+	test("a named API key never mints a mobile token; a mobile admin token never reaches the export API", async () => {
+		const made = await asJson(await h.call("/v1/admin/keys", { method: "POST", ...json({ name: "mobile-test-admin", role: "admin" }), headers: { "content-type": "application/json", ...bearer(ADMIN) } }));
+		const ip = freshIp();
+		const refused = await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(made.key), ip));
+		expect(refused.status).toBe(403);
+		// Not counted as a wrong token: the same address still mints with the admin token.
+		const minted = await asJson(await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN), ip)));
+		expect(minted.role).toBe("admin");
+		expect((await h.call("/v1/admin/export/manifest", { headers: bearer(minted.token) })).status).toBe(403);
+	});
+
+	test("the token login turned off ends the tokens made with the admin token (like its sessions), and the admin token mints none", async () => {
+		const byAdmin = await asJson(await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN))));
+		const s = await signIn();
+		const owner = await asJson(await redeem(s.code, s.p.verifier));
+		const patch = (body: unknown) => h.call("/v1/admin/settings", { method: "PATCH", ...json(body), headers: { "content-type": "application/json", ...bearer(owner.token) } });
+		// An owner's app token counts as a Roblox sign-in for the guard, like the owner's explorer session.
+		const off = await patch({ tokenLogin: false });
+		expect(off.status).toBe(200);
+		expect((await asJson(off)).sessionsEnded).toBeGreaterThanOrEqual(1);
+		const dead = await check(byAdmin.token);
+		expect(dead.status).toBe(401);
+		expect(await asJson(dead)).toMatchObject({ code: "mobile_token_dead", reason: "token login turned off" });
+		expect((await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN)))).status).toBe(403);
+		expect((await check(owner.token)).status).toBe(200);
+		expect((await patch({ tokenLogin: true })).status).toBe(200);
+		// Revoked for good.
+		expect((await check(byAdmin.token)).status).toBe(401);
+		expect((await h.call("/v1/auth/mobile/token", tokenPost({ device: "x" }, bearer(ADMIN)))).status).toBe(200);
+	});
 });
 
 describe("mobile app tokens: the admin token changing, and restarts", () => {
@@ -391,6 +476,23 @@ describe("mobile app tokens: the store's caps", () => {
 		await expect(store.mint({ user: { kind: "roblox", userId: 3, name: "C" }, role: "web", device: "e" })).rejects.toThrow("too many");
 		// A wrong secret with a right id is refused.
 		expect(store.resolve(`ttm_${a.record.id}_${b64(randomBytes(32))}`, "x")).toBeUndefined();
+		await db.close();
+	});
+
+	test("reload picks up what another process made or revoked (a rolling deploy's handover)", async () => {
+		const now = T0;
+		const db = await openSqlite(join(dir, "b.sqlite"));
+		const mine = await MobileTokens.open(db, { days: 60, clock: () => now });
+		const other = await MobileTokens.open(db, { days: 60, clock: () => now });
+		const user = { kind: "roblox" as const, userId: 9, name: "N" };
+		const made = await other.mint({ user, role: "web", device: "p" });
+		expect(mine.resolve(made.token, "x")).toBeUndefined();
+		await mine.reload();
+		expect(mine.resolve(made.token, "x")?.id).toBe(made.record.id);
+		await other.revoke(made.record.id, "signed out in the app");
+		await mine.reload();
+		expect(mine.resolve(made.token, "x")).toBeUndefined();
+		expect(mine.deadReason(made.token)).toBe("signed out in the app");
 		await db.close();
 	});
 });
