@@ -652,7 +652,7 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   signed out it also says `mobileLogin` (the browser sign-in is on). With a mobile token it adds `mobile: { id, expiresAt }`.
   The game's name and icon are `GET /v1/place`.
 - **Live numbers.** `GET /v1/mobile/live?minutes=30` (a mobile app token only; 20 a minute per token) is what the app's
-  live watch (every 30 s) and widgets (every 30 min) poll: `{ at, game: { name, universeId }, ccu, servers, delta,
+  live watch (every 30 s) and widgets (every 30 min) poll: `{ at, game: { name, universeId, iconUrl }, ccu, servers, delta,
   peakToday, series: [{ t, ccu }], lastHour: { at, avgSessionSeconds, medianSessionSeconds, sessionsEnded, playtimeHours }
   | null }`. Aggregates only, never a player. `ccu` and `servers` are the live fleet (the count of `GET /v1/fleet/servers`,
   cached 5 s). The history is one point a minute in memory for 24 hours, taken by the alert evaluator's sample; after a
@@ -660,7 +660,33 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   little high (each server's peak in the bucket; kernels 0.4.2+). `delta`: now minus the point nearest 5 minutes ago (null
   without one); `peakToday`: since 00:00 UTC; `series`: the last `minutes` (1 to 360). `lastHour`: the Session time
   query over the last 60 minutes (sessions that ended in it: mean, median, count; `playtimeHours`: time all players spent
-  in the game in it, running sessions included), cached 5 minutes; null without analytics.
+  in the game in it, running sessions included), cached 5 minutes; null without analytics. `game.iconUrl` is the
+  game's 256x256 icon (thumbnails.roblox.com through the place card's client, an https URL on `*.rbxcdn.com`), kept 6
+  hours; a failed lookup keeps the last good URL (retried after 10 minutes), null when there is none.
+- **Widget stats.** `GET /v1/mobile/live?metrics=dau,d1,revenue:72h` adds `metrics: { <id>: { value, prev, unit,
+  label } | null }` in the order asked (without `metrics=` the answer and its cost are as above). `prev` is the same
+  number for the window right before (null when unknown); `unit` is `count`, `ratio` (0..1), `robux`, `seconds` or
+  `hours`. Windows `<w>` are `<n>h` (1 to 72) or `<n>d` (1 to 90). Unknown or invalid ids, and ids past the 12th,
+  answer null, never a 400 (an older backend keeps working with a newer app); only a parameter over 1,000 characters
+  or sent twice is refused. Every number comes from a named query with the dashboard's default filters:
+
+  | id | value (prev: the window before) | query |
+  |---|---|---|
+  | `ccu`, `servers`, `peakToday` | the fields above (`ccu`'s prev: 5 minutes ago; the others none) | the fleet |
+  | `dau`, `wau`, `mau` | unique players in the last 24 h, 7 days, 30 days | `overview` |
+  | `new:<w>` | new players (a first-ever session) in the window | `overview` |
+  | `d1`, `d7` | retention of the latest complete join-day cohort (D1: joined two UTC days ago, back the next day); prev: the cohort a day older | `retention` |
+  | `session:<w>` | mean length of the sessions that ended in the window, seconds | `session-time` (by end, no merge) |
+  | `playtime:<w>` | time played in the window, running sessions included, hours | `session-time` |
+  | `sessions:<w>` | sessions that ended in the window | `session-time` |
+  | `revenue:<w>` | Robux players paid (server-sent purchases) | `monetization` |
+  | `payers:<w>` | unique paying players | `monetization` |
+
+  Metrics that read the same query and window share one computation (`session:1h`, `playtime:1h`). Each is cached 5
+  minutes (`mau` and `d7` 15), one computation at a time per source and two at once; a failure keeps the last good
+  numbers (retried after a minute). A request waits up to 8 s for a computation and otherwise answers the last good
+  numbers (or null) while it finishes for the next poll; at most 64 sources are kept. Without analytics those metrics
+  answer `{ value: null, prev: null, unit, label }`. Aggregates only, never a player.
 - **Push.** `POST /v1/mobile/push { token: "ExponentPushToken[...]", milestones }` registers the phone (one registration
   per mobile app token, a second call replaces it; the same push token under another token is dropped there; SQLite
   `mobile_push`, 2,000 at most) and answers `{ ok, milestones }`; `DELETE /v1/mobile/push` removes it. Logout, revoke,
@@ -784,7 +810,7 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /auth/mobile/start`, `GET`/`POST /auth/mobile/consent` | open (rate limited, lockout) | the [mobile app](#mobile-app)'s browser sign-in and its consent page |
 | `POST /v1/auth/mobile/token` | open: a sign-in code + PKCE verifier, or the admin token as Bearer | `{ token, id, expiresAt, role, user }` |
 | `POST /v1/auth/mobile/refresh`, `POST /v1/auth/mobile/logout` | a mobile app token | a new token (the old one revoked); revoke the caller's token |
-| `GET /v1/mobile/live?minutes=` | a mobile app token | the game's live numbers (aggregates) for the app's live watch and widgets |
+| `GET /v1/mobile/live?minutes=&metrics=` | a mobile app token | the game's live numbers and widget stats (aggregates) for the app's live watch and widgets |
 | `POST`, `DELETE /v1/mobile/push`; `POST /v1/mobile/push/test` | a mobile app token | this token's push registration `{ token, milestones }`; one test push |
 | `GET /v1/auth/mobile/tokens`, `DELETE /v1/auth/mobile/tokens/<id>` | admin, web (its own) | mobile app tokens (no secret); revoke one |
 | `POST /v1/auth/mobile/tokens/revoke-all` | admin | revoke every mobile app token (`{ ok, revoked, tokens }`) |

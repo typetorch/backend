@@ -260,7 +260,8 @@ describe("mobile live and push through the app", () => {
 		// 5 minutes ago (T0 - 5 min) job-1 had 9 players: 9 + 3 = 12; now 23.
 		expect(body).toEqual({
 			at: new Date(T0).toISOString(),
-			game: { name: "The Prison", universeId: 123456789 },
+			// No icon from the fake thumbnails service: null.
+			game: { name: "The Prison", universeId: 123456789, iconUrl: null },
 			ccu: 23,
 			servers: 2,
 			delta: 11,

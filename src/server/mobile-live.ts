@@ -10,6 +10,8 @@
  *
  * The last hour: one session-time query (src/queries/session-time.ts, the Session time page's sessions) over the
  * last 60 minutes, cached LAST_HOUR_TTL_MS; one computation at a time, the last good answer is kept when one fails.
+ *
+ * The game's icon (`game.iconUrl`): IconCache, kept ICON_TTL_MS. The widget stats (`?metrics=`) are mobile-metrics.ts.
  */
 
 const MINUTE = 60_000;

@@ -255,8 +255,12 @@ const ROUTES: Route[] = [
 		roles: ["mobile"],
 		summary: "The game's live numbers for the mobile app's live watch and widgets",
 		description:
-			"`{ at, game: { name, universeId }, ccu, servers, delta, peakToday, series: [{ t, ccu }], lastHour: { at, avgSessionSeconds, medianSessionSeconds, sessionsEnded, playtimeHours } | null }`. `ccu` and `servers`: the live fleet (GET /v1/fleet/servers' count); `delta`: vs about 5 minutes ago (null when unknown); `series`: one point a minute (5-minute rollup points before this server's start); `lastHour`: cached up to 5 minutes, null without analytics. Aggregates only. 20 a minute per token.",
-		params: [q("minutes", "the series' length, 1 to 360 (default 30)", { type: "integer", minimum: 1, maximum: 360 })],
+			"`{ at, game: { name, universeId, iconUrl }, ccu, servers, delta, peakToday, series: [{ t, ccu }], lastHour: { at, avgSessionSeconds, medianSessionSeconds, sessionsEnded, playtimeHours } | null, metrics? }`. `ccu` and `servers`: the live fleet (GET /v1/fleet/servers' count); `delta`: vs about 5 minutes ago (null when unknown); `series`: one point a minute (5-minute rollup points before this server's start); `lastHour`: cached up to 5 minutes, null without analytics; `game.iconUrl`: the game's 256x256 icon on *.rbxcdn.com (kept 6 hours), null when unknown. " +
+			"`metrics` only when `metrics=` is sent: `{ <id>: { value, prev, unit, label } | null }` in the order asked, `prev` the window right before (null when unknown), `unit` one of count, ratio (0..1), robux, seconds, hours. Ids: `ccu`, `servers`, `peakToday` (the fields above; `ccu`'s prev 5 minutes ago), `dau` / `wau` / `mau` (unique players, last 24 h / 7 d / 30 d), `new:<w>` (new players), `d1` / `d7` (retention of the latest complete join-day cohort; prev: the cohort the day before), `session:<w>` (mean length of the sessions that ended, seconds), `playtime:<w>` (time played, running sessions included, hours), `sessions:<w>` (sessions that ended), `revenue:<w>` (Robux players paid), `payers:<w>` (unique payers); windows `<n>h` (1..72) or `<n>d` (1..90). Unknown or invalid ids, and ids past the 12th, answer null (never a 400). Each number is cached 5 minutes (`mau`, `d7` 15). Aggregates only. 20 a minute per token.",
+		params: [
+			q("minutes", "the series' length, 1 to 360 (default 30)", { type: "integer", minimum: 1, maximum: 360 }),
+			q("metrics", "widget stats, comma-separated ids (at most 12 answered, 1,000 characters at most): ccu, servers, peakToday, dau, wau, mau, d1, d7, new:<w>, session:<w>, playtime:<w>, sessions:<w>, revenue:<w>, payers:<w>; <w> is <n>h (1..72) or <n>d (1..90)"),
+		],
 	},
 	{
 		method: "post",
