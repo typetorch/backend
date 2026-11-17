@@ -1955,6 +1955,29 @@ export class FleetService {
 		this.rolledUntil = until;
 	}
 
+	/**
+	 * The live servers and their players, counted like `servers()` (GET /v1/fleet/servers, the Fleet page's count): open
+	 * servers heard from in the last LOST_AFTER_MS. One indexed aggregate, for the mobile app's live numbers.
+	 */
+	async liveTotals(): Promise<{ servers: number; players: number }> {
+		const r = await this.db.first<{ servers: number; players: number | null }>(
+			"SELECT COUNT(*) AS servers, SUM(COALESCE(players, 0)) AS players FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ?",
+			[this.clock() - LOST_AFTER_MS],
+		);
+		return { servers: Number(r?.servers ?? 0), players: Number(r?.players ?? 0) };
+	}
+
+	/**
+	 * Players per 5-minute bucket since `since` from the metrics rollups (server_metrics_5m: each server's most players in
+	 * the bucket, summed), oldest first; at most 24 hours of buckets. Coarse (a server's peak in the bucket, kernel 0.4.2+
+	 * heartbeats only): the mobile app's CCU history before this process started.
+	 */
+	async playersPerBucket(since: number): Promise<{ t: number; players: number }[]> {
+		const from = Math.max(since, this.clock() - 86_400_000);
+		const rows = await this.db.all<{ t: number; players: number | null }>("SELECT t, SUM(COALESCE(players, 0)) AS players FROM server_metrics_5m WHERE t >= ? GROUP BY t ORDER BY t LIMIT 300", [from]);
+		return rows.map((r) => ({ t: Number(r.t), players: Number(r.players ?? 0) }));
+	}
+
 	/** Players on the live servers right now, from their heartbeats (studio sessions left out); null with no live server. */
 	async livePlayers(): Promise<number | null> {
 		const r = await this.db.first<{ servers: number; players: number | null }>(

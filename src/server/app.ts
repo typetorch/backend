@@ -138,7 +138,10 @@ import { NAMES_MAX } from "../queries/player-support.ts";
 import { ANONYMOUS, AUDIT_PAGE_MAX, AuditLog, actorOfUser, routeAction, settingChanges, type AuditActor, type AuditOutcome, type AuditRole, type AuditVia } from "./audit.ts";
 import { BackupError, Backups } from "./backup.ts";
 import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, originProblem, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
-import { MOBILE_ID_PATTERN, MobileTokenError, MobileTokens, deviceName, sameUser, viewOf, type MobileTokenRecord, type MobileUser } from "./mobile-tokens.ts";
+import { MOBILE_ID_PATTERN, MOBILE_REFRESHED, MobileTokenError, MobileTokens, deviceName, sameUser, viewOf, type MobileTokenRecord, type MobileUser } from "./mobile-tokens.ts";
+import { MobilePush, MobilePushError, type ExpoMessage } from "./mobile-push.ts";
+import { CcuHistory, LastHourCache, lastHourOf, milestoneBody, seriesMinutes, utcMidnight } from "./mobile-live.ts";
+import type { SessionTimeResult } from "../queries/session-time.ts";
 import { mobileDevRedirectAllowed, type ServerConfig } from "./config.ts";
 import { DiskWatch, type DiskUsage } from "./disk.ts";
 import { logErasure, lookupPid, parseErasureBody, verifyRobloxSignature } from "./erasure.ts";
@@ -241,6 +244,8 @@ export interface App {
 	readonly metrics: ServerMetrics;
 	/** Backend alerts (src/alerts): rules over the backend's own data. Undefined without the fleet part (its alert store). */
 	readonly backendAlerts?: BackendAlerts;
+	/** The mobile app's push registrations and the Expo sender (server/mobile-push.ts). */
+	readonly mobilePush: MobilePush;
 	/** Who did what on the admin side (server/audit.ts; GET /v1/admin/audit). */
 	readonly audit: AuditLog;
 	/** Local backups and the download (server/backup.ts). */
@@ -445,12 +450,23 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 		keepDays: () => runtime.get("auditKeepDays"),
 		secrets: () => [config.adminToken, ...config.apiKeys, config.queue?.secretAccessKey, config.lookupToken, config.robloxOAuth?.clientSecret, config.webhookSecret, config.openCloudKey, config.notifyApiKey, config.notifyKey, config.alertWebhookUrl, runtime.get("alertWebhookUrl"), ...madeKeys, config.basinRead?.token, ...(migration?.secrets() ?? [])],
 	});
+	// The mobile app's push registrations (server/mobile-push.ts): one per mobile app token, gone with it.
+	const mobilePush = await MobilePush.open(sqlite, {
+		isLive: (id) => mobileTokens.get(id) !== undefined,
+		...(options.fetch ? { fetch: options.fetch } : {}),
+		clock,
+		log,
+	});
 	// Mobile app tokens (server/mobile-tokens.ts): the TypeTorch app's long-lived Bearers.
 	const mobileTokens = await MobileTokens.open(sqlite, {
 		days: config.mobileTokenDays,
 		maxDays: config.mobileTokenMaxDays,
 		clock,
 		log,
+		// Logout, revoke, revoke all, expiry: the token's push registration goes too (a refresh moves it: mintAnswer).
+		onGone: (id, reason) => {
+			if (reason !== MOBILE_REFRESHED) mobilePush.forget(id);
+		},
 		// Reuse detection: a refreshed token presented again ended its whole sign-in (mobile-tokens.ts deadReason).
 		onReuse: ({ id, family, revoked, user }) =>
 			void audit.record({ actor: actorOfUser(user), role: "none", via: "bearer", ip: "", action: "mobile.token.revoke", outcome: "refused", details: { mobile: id, family, revoked, reason: "a refreshed token was used again" } }),
@@ -524,6 +540,9 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 	const access = AccessStore.at(config.dataDir, clock);
 	// Backend alerts: once a minute, rules over the error tables, the fleet, ingest, these metrics and the disk, raised
 	// through the fleet's alert store (the Fleet page, the stream, the bus and the webhook, like the kernel's).
+	// Its fleet sample each minute is the mobile app's CCU history (mobile-live.ts); a CCU milestone also goes out as a
+	// push to the phones that asked for milestones (never awaited: a push failure never holds up or breaks the rules).
+	const ccuHistory = new CcuHistory();
 	const backendAlerts = fleet
 		? new BackendAlerts({
 				db: sqlite,
@@ -532,7 +551,12 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 				metrics: () => metrics.view("1h"),
 				disk: () => diskOf(config.dataDir),
 				settings: () => runtime.get("backendAlerts"),
-				raise: (alert) => fleet.serverAlert(alert),
+				raise: async (alert) => {
+					const stored = await fleet.serverAlert(alert);
+					if (alert.details.rule === "ccuMilestone") void milestonePush(alert.details).catch((e) => log(`mobile push: milestone failed (${(e as Error).message.slice(0, 160)})`));
+					return stored;
+				},
+				onSample: (sample) => ccuHistory.record(sample.t, sample.players),
 				clock,
 				log,
 			})
@@ -2711,6 +2735,8 @@ ${goesTo}
 			throw error;
 		}
 		const { token, record, replaced: replacing } = made;
+		// The phone's push registration follows its token (one registration per token; the old token is gone).
+		if (replacing) await mobilePush.move(replacing.id, record.id).catch((e) => log(`mobile push: could not move a registration (${(e as Error).message.slice(0, 120)})`));
 		const view = viewOf(record);
 		noteAudit(req, { actor: actorOfUser(record.user), role: record.role, via: "bearer", action, outcome: "ok", details: { mobile: record.id, device: record.device, role: record.role, ...details } });
 		log(`mobile app token ${record.id} ${replacing ? `refreshed (was ${replacing.id})` : "made"} for ${actorOfUser(record.user).label}, role ${record.role}`);
@@ -2833,6 +2859,8 @@ ${goesTo}
 			mobileCodes.clear();
 			mobilePending.clear();
 			const revoked = await mobileTokens.revokeAll("every token revoked on the Settings page");
+			// Also the registrations of tokens another process held (a rolling deploy's): no live token, no registration.
+			await mobilePush.prune().catch((e) => log(`mobile push: prune failed (${(e as Error).message.slice(0, 120)})`));
 			noteAudit(req, { action: "mobile.token.revoke-all", outcome: "ok", details: { revoked } });
 			log(`mobile app tokens: all ${revoked} revoked by ${actorOf(p as Principal & { role: "admin" }).who}`);
 			return json(200, { ok: true, revoked, ...(await mobileTokenList(p, url.searchParams.get("all") === "1")) });
@@ -2845,6 +2873,166 @@ ${goesTo}
 		const revoked = record.revoked === null ? await mobileTokens.revoke(id, "revoked on the Settings page") : false;
 		noteAudit(req, { action: "mobile.token.revoke", outcome: "ok", details: { mobile: id, device: record.device, reason: "revoked", ...(revoked ? {} : { already: true }) } });
 		return json(200, { ok: true, ...(await mobileTokenList(p, url.searchParams.get("all") === "1")) });
+	}
+
+	// The mobile app's live numbers and push (README "Mobile app"; mobile-live.ts, mobile-push.ts) ------------------------
+	// GET /v1/mobile/live: players online now (the Fleet page's count), their history, the last hour's sessions; polled
+	// every 30 s per phone and 30 min per widget, so it reads one indexed aggregate (cached LIVE_TOTALS_MS) and memory.
+	// POST / DELETE /v1/mobile/push: this token's Expo push registration; POST /v1/mobile/push/test: one push to it.
+	const LIVE_TOTALS_MS = 5000;
+	const GAME_NAME_MS = 10 * 60_000;
+	const mobileLiveLimiter = new RateLimiter(20, clock);
+	const mobilePushLimiter = new RateLimiter(10, clock);
+	/** Mobile token id -> when its last test push went (1 per 10 s); bounded by the active tokens, swept as it grows. */
+	const pushTests = new Map<string, number>();
+	let liveTotals: { at: number; value: Promise<{ servers: number; players: number }> } | undefined;
+	let gameName: { at: number; name: string | null; universeId: number | null } | undefined;
+	let gameNameLookup: Promise<void> | undefined;
+	const lastHour = new LastHourCache(
+		async (now) => {
+			if (!warehouse || analytics !== "ready") return undefined;
+			const r = (await warehouse.query("session-time", { from: now - 3_600_000, to: now }, { bucketMinutes: 60, mergeGapMinutes: 0, by: "end" })) as SessionTimeResult;
+			return lastHourOf(r.summary, now);
+		},
+		clock,
+		log,
+	);
+
+	function fleetTotals(): Promise<{ servers: number; players: number }> {
+		const now = clock();
+		if (!liveTotals || now - liveTotals.at >= LIVE_TOTALS_MS) {
+			const value = (fleet as FleetService).liveTotals();
+			liveTotals = { at: now, value };
+			value.catch(() => (liveTotals = undefined));
+		}
+		return liveTotals.value;
+	}
+
+	/** The game's name (Roblox's, cached GAME_NAME_MS; looked up in the background) and universe; the label until known. */
+	async function liveGame(): Promise<{ name: string; universeId: number | null }> {
+		const now = clock();
+		if (!gameName || now - gameName.at >= GAME_NAME_MS) {
+			gameNameLookup ??= (async () => {
+				try {
+					const fleetPlace = fleet ? await fleet.latestPlaceId() : null;
+					if (!config.universeId && !fleetPlace) {
+						gameName = { at: clock(), name: null, universeId: null };
+						return;
+					}
+					const { place } = await robloxPlace.get(config.universeId ? { universeId: config.universeId } : { placeId: fleetPlace as number });
+					gameName = { at: clock(), name: place.name ?? gameName?.name ?? null, universeId: config.universeId ?? place.universeId ?? gameName?.universeId ?? null };
+				} catch (error) {
+					gameName = { at: clock(), name: gameName?.name ?? null, universeId: config.universeId ?? gameName?.universeId ?? null };
+					log(`mobile live: the game's name lookup failed (${(error as Error).message.slice(0, 120)})`);
+				}
+			})().finally(() => (gameNameLookup = undefined));
+			// The first one waits (briefly) for the name; later ones answer with the one they have.
+			if (!gameName) await Promise.race([gameNameLookup, new Promise((r) => setTimeout(r, 2000).unref?.())]);
+		}
+		return { name: gameName?.name ?? gameInfo().label ?? "TypeTorch game", universeId: gameName?.universeId ?? config.universeId ?? null };
+	}
+
+	/** The coarse history before this process's first sample, once (the metrics rollups since 00:00 UTC, 6 h at least). */
+	async function ccuBackfill(now: number): Promise<void> {
+		if (ccuHistory.hasBackfill || !fleet) return;
+		const since = Math.min(utcMidnight(now), now - 6 * 3_600_000);
+		ccuHistory.backfill((await fleet.playersPerBucket(since)).map((p) => ({ t: p.t, ccu: p.players })));
+	}
+
+	/** GET /v1/mobile/live?minutes=30 (a mobile app token). */
+	async function mobileLive(req: Request, url: URL, ip: string): Promise<Response> {
+		const gate = mobileGate(req, ip);
+		if ("response" in gate) return gate.response;
+		const id = gate.principal.mobile.id;
+		if (!mobileLiveLimiter.take(id)) return tooMany(mobileLiveLimiter.retryAfter(id));
+		for (const key of url.searchParams.keys()) if (key !== "minutes") return json(400, { error: "only minutes" });
+		const minutes = seriesMinutes(url.searchParams.get("minutes"));
+		if (minutes === undefined) return json(400, { error: "minutes is a whole number from 1 to 360" });
+		if (!fleet) return json(404, { error: "the fleet part is off on this server" });
+		const now = clock();
+		await ccuBackfill(now).catch((e) => log(`mobile live: the CCU backfill failed (${(e as Error).message.slice(0, 120)})`));
+		const [totals, game, hour] = await Promise.all([fleetTotals(), liveGame(), lastHour.get()]);
+		const before = ccuHistory.at(now - 5 * 60_000);
+		const peak = ccuHistory.peakSince(utcMidnight(now));
+		return json(200, {
+			at: new Date(now).toISOString(),
+			game,
+			ccu: totals.players,
+			servers: totals.servers,
+			delta: before === null ? null : totals.players - before,
+			peakToday: Math.max(peak ?? 0, totals.players),
+			series: ccuHistory.series(now, minutes),
+			lastHour: hour,
+		});
+	}
+
+	/** POST /v1/mobile/push { token, milestones } | DELETE /v1/mobile/push (a mobile app token): its push registration. */
+	async function mobilePushRoute(req: Request, ip: string): Promise<Response> {
+		const gate = mobileGate(req, ip);
+		if ("response" in gate) return gate.response;
+		const p = gate.principal;
+		const id = p.mobile.id;
+		if (!mobilePushLimiter.take(id)) return tooMany(mobilePushLimiter.retryAfter(id));
+		if (req.method === "DELETE") {
+			const removed = await mobilePush.remove(id);
+			noteAudit(req, { principal: p, action: "mobile.push.remove", outcome: "ok", details: { mobile: id, ...(removed ? {} : { already: true }) } });
+			return json(200, { ok: true });
+		}
+		const body = await smallJson(req, 1024);
+		if (body instanceof Response) return body;
+		for (const key of Object.keys(body)) if (key !== "token" && key !== "milestones") return json(400, { error: "send { token, milestones } only" });
+		if (typeof body.token !== "string" || typeof body.milestones !== "boolean") return json(400, { error: 'send { "token": "ExponentPushToken[...]", "milestones": true | false }' });
+		try {
+			await mobilePush.set(id, body.token, body.milestones);
+		} catch (error) {
+			if (error instanceof MobilePushError) return json(error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
+			throw error;
+		}
+		noteAudit(req, { principal: p, action: "mobile.push.register", outcome: "ok", details: { mobile: id, milestones: body.milestones } });
+		return json(200, { ok: true, milestones: body.milestones });
+	}
+
+	/** POST /v1/mobile/push/test (a mobile app token): one push to this token's registration, 1 per 10 s. */
+	async function mobilePushTest(req: Request, ip: string): Promise<Response> {
+		const gate = mobileGate(req, ip);
+		if ("response" in gate) return gate.response;
+		const id = gate.principal.mobile.id;
+		const now = clock();
+		const last = pushTests.get(id);
+		if (last !== undefined && now - last < 10_000) return tooMany(Math.ceil((10_000 - (now - last)) / 1000));
+		if (pushTests.size >= 4096) for (const [k, t] of pushTests) if (now - t >= 10_000) pushTests.delete(k);
+		if (pushTests.size >= 4096) pushTests.delete(pushTests.keys().next().value as string);
+		pushTests.set(id, now);
+		const game = await liveGame();
+		let ticket: { status: "ok" | "error"; error?: string } | undefined;
+		try {
+			ticket = await mobilePush.sendOne(id, (to) => ({ to, title: "Test from TypeTorch", body: `${game.name} · pushes work`, channelId: "milestones", priority: "high", sound: "default", data: { kind: "test", backendUrl: config.publicUrl ?? null } }));
+		} catch (error) {
+			if (error instanceof MobilePushError) return json(error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
+			throw error;
+		}
+		if (!ticket) return json(409, { error: "not_registered" });
+		return json(200, { ok: true, ticket });
+	}
+
+	/** A raised CCU milestone (its alert details) as a push to every registration with milestones on. Never throws. */
+	async function milestonePush(details: Record<string, unknown>): Promise<void> {
+		const milestone = Number(details.milestone);
+		const ccu = Number(details.ccu);
+		if (!Number.isFinite(milestone) || !Number.isFinite(ccu)) return;
+		const [game, hour] = await Promise.all([liveGame(), lastHour.get()]);
+		const body = milestoneBody(game.name, hour, ccu);
+		await mobilePush.sendMilestones(
+			(to): ExpoMessage => ({
+				to,
+				title: `Reached ${milestone.toLocaleString("en-US")} CCU`,
+				body,
+				channelId: "milestones",
+				priority: "high",
+				sound: "default",
+				data: { kind: "ccuMilestone", backendUrl: config.publicUrl ?? null, universeId: game.universeId, ccu, milestone },
+			}),
+		);
 	}
 
 	/** GET /api/typetorch/challenge/<token>: the origin challenge, answered only while a report is pending. */
@@ -3575,6 +3763,10 @@ ${goesTo}
 		if (path === "/v1/auth/mobile/refresh") return method === "POST" ? mobileRefresh(req, ip) : json(405, { error: "POST only" });
 		if (path === "/v1/auth/mobile/logout") return method === "POST" ? mobileLogout(req, ip) : json(405, { error: "POST only" });
 		if (path === "/v1/auth/mobile/tokens" || path.startsWith("/v1/auth/mobile/tokens/")) return mobileTokensRoute(req, url, path, ip);
+		// The mobile app's live numbers and push (a mobile app token only: the registration belongs to the token).
+		if (path === "/v1/mobile/live") return method === "GET" ? mobileLive(req, url, ip) : json(405, { error: "GET only" });
+		if (path === "/v1/mobile/push") return method === "POST" || method === "DELETE" ? mobilePushRoute(req, ip) : json(405, { error: "POST or DELETE only" });
+		if (path === "/v1/mobile/push/test") return method === "POST" ? mobilePushTest(req, ip) : json(405, { error: "POST only" });
 
 		// Game routes (API key).
 		if (path === "/v1/ingest") return method === "POST" ? ingest(req, ip) : json(405, { error: "POST only" });
@@ -3983,6 +4175,9 @@ ${goesTo}
 			setInterval(() => void errors.prune().catch((e) => log(`error log prune failed: ${(e as Error).message}`)), 10 * 60_000),
 			setInterval(() => void audit.prune().catch((e) => log(`audit log prune failed: ${(e as Error).message}`)), 10 * 60_000),
 			setInterval(() => void mobileTokens.prune().catch((e) => log(`mobile token prune failed: ${(e as Error).message}`)), 10 * 60_000),
+			// Push registrations of tokens that died elsewhere, and Expo's receipts (DeviceNotRegistered removes one).
+			setInterval(() => void mobilePush.prune().catch((e) => log(`mobile push prune failed: ${(e as Error).message}`)), 10 * 60_000),
+			setInterval(() => void mobilePush.checkReceipts().catch((e) => log(`mobile push receipts failed: ${(e as Error).message}`)), 5 * 60_000),
 			setInterval(() => metrics.sample(), 1000),
 		];
 		if (config.backupHours > 0) jobs.push(setInterval(() => void backupTick(), BACKUP_CHECK_MS));
@@ -4150,6 +4345,7 @@ ${goesTo}
 		live,
 		metrics,
 		...(backendAlerts ? { backendAlerts } : {}),
+		mobilePush,
 		audit,
 		backups,
 		maps,

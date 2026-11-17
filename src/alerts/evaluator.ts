@@ -19,6 +19,8 @@ import type { AlertLevel } from "../fleet/service.ts";
 import {
 	check5xx,
 	checkCcuDrop,
+	checkCcuMilestone,
+	newMilestoneState,
 	checkDiskGrowth,
 	checkDiskLow,
 	checkErrorSpike,
@@ -33,6 +35,7 @@ import {
 	type DiskSample,
 	type Finding,
 	type KindWindow,
+	type MilestoneState,
 	type MinuteStat,
 	type NewKind,
 	type Sample,
@@ -85,6 +88,8 @@ export interface EvaluatorOptions {
 	disk: () => DiskNow | null;
 	settings: () => BackendAlertSettings;
 	raise: (alert: RaisedAlert) => Promise<unknown>;
+	/** Each tick's fleet sample, once taken (the mobile app's CCU history). Must not throw. */
+	onSample?: (sample: Sample) => void;
 	clock?: () => number;
 	log?: (line: string) => void;
 }
@@ -127,6 +132,7 @@ export class BackendAlerts {
 	private readonly clock: () => number;
 	private readonly log: (line: string) => void;
 	private readonly samples: Sample[] = [];
+	private readonly milestones: MilestoneState = newMilestoneState();
 	private lastIngest: number | null = null;
 	private lastRowsIn: number | undefined;
 	private readonly lastRaised = new Map<string, number>();
@@ -201,6 +207,7 @@ export class BackendAlerts {
 			},
 		]);
 		runs.push(["ccuDrop", () => checkCcuDrop(this.samples, now, q("ccuDrop"), tickMs)]);
+		runs.push(["ccuMilestone", () => checkCcuMilestone(this.milestones, this.o.fleet ? this.samples[this.samples.length - 1] : undefined, now, q("ccuMilestone"))]);
 		runs.push(["fleetSilent", () => checkFleetSilent(this.samples, sample.lastHeartbeat, this.o.analytics() ? this.lastIngest : undefined, now, q("fleetSilent"))]);
 		runs.push(["ingestStopped", () => checkIngestStopped(this.samples, now, q("ingestStopped"), tickMs)]);
 		runs.push(["backendLatency", () => checkLatency(minutes(), now, q("backendLatency"))]);
@@ -215,6 +222,8 @@ export class BackendAlerts {
 		for (const [id, check] of runs) {
 			if (!on(id)) {
 				this.verdicts.delete(id);
+				// Turned back on later, it learns the level again instead of announcing what was crossed while off.
+				if (id === "ccuMilestone") this.milestones.start = 0;
 				continue;
 			}
 			let verdict: Verdict;
@@ -250,6 +259,13 @@ export class BackendAlerts {
 		this.lastRowsIn = rowsIn;
 		this.samples.push({ t: now, servers, players, rowsIn });
 		while (this.samples.length && (this.samples[0] as Sample).t < now - SAMPLES_KEEP_MS) this.samples.shift();
+		if (this.o.fleet) {
+			try {
+				this.o.onSample?.({ t: now, servers, players, rowsIn });
+			} catch (error) {
+				this.log(`backend alerts: the sample listener failed: ${(error as Error).message}`);
+			}
+		}
 		return { lastHeartbeat };
 	}
 
@@ -307,7 +323,7 @@ export class BackendAlerts {
 		const def = RULES_BY_ID.get(id);
 		if (!def) return;
 		const dedupKey = `${def.code}\u0000${f.key}`;
-		const repeatMs = settings.repeatMinutes * MINUTE;
+		const repeatMs = (f.repeatMinutes ?? settings.repeatMinutes) * MINUTE;
 		if (now - (this.lastRaised.get(dedupKey) ?? -Infinity) < repeatMs) {
 			this.stats.deduped++;
 			return;

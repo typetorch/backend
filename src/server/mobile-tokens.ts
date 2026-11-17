@@ -190,6 +190,11 @@ export interface MobileTokensOptions {
 	maxDays?: number;
 	/** A refreshed token was presented again: its family (`revoked` tokens) was revoked. For the audit log. */
 	onReuse?: (info: { id: string; family: string; revoked: number; user: MobileUser }) => void;
+	/**
+	 * A token stopped working in this process (revoked, refreshed, expired): its push registration goes (mobile-push.ts;
+	 * a refresh moves it instead). Called synchronously; must not throw.
+	 */
+	onGone?: (id: string, reason: string) => void;
 	clock?: () => number;
 	log?: (line: string) => void;
 	perUser?: number;
@@ -255,7 +260,7 @@ export class MobileTokens {
 		for (const row of rows) store.active.set(row.id, toRecord(row));
 		// The newest DEAD_MAX, oldest first (bury keeps insertion order).
 		const dead = await db.all<Row>("SELECT * FROM (SELECT * FROM mobile_tokens WHERE revoked_at IS NOT NULL OR expires_at <= ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at", [store.clock(), DEAD_MAX]);
-		for (const row of dead) store.bury(toRecord(row), row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired", row.revoked_at !== null ? Number(row.revoked_at) : Number(row.expires_at));
+		for (const row of dead) store.bury(toRecord(row), row.revoked_at !== null ? (row.revoke_reason ?? "revoked") : "expired", row.revoked_at !== null ? Number(row.revoked_at) : Number(row.expires_at), false);
 		return store;
 	}
 
@@ -359,7 +364,7 @@ export class MobileTokens {
 			const why = this.generationReason;
 			record.revoked = this.clock();
 			record.revokeReason = why;
-			this.bury(record, why, record.revoked);
+			this.bury(record, why, record.revoked, false);
 			await this.db.run("UPDATE mobile_tokens SET revoked_at = ?, revoke_reason = ? WHERE id = ? AND revoked_at IS NULL", [record.revoked, why, id]);
 			throw new MobileTokenError("every mobile app token was just revoked: sign in again", 401, "mobile_revoked_all");
 		}
@@ -499,10 +504,17 @@ export class MobileTokens {
 		return entry.reason;
 	}
 
-	private bury(record: MobileTokenRecord, reason: string, at = this.clock()): void {
+	private bury(record: MobileTokenRecord, reason: string, at = this.clock(), notify = true): void {
 		this.dead.delete(record.id);
 		this.dead.set(record.id, { hash: record.hash, reason, family: record.family, at, user: record.user });
 		while (this.dead.size > DEAD_MAX) this.dead.delete(this.dead.keys().next().value as string);
+		if (notify) {
+			try {
+				this.options.onGone?.(record.id, reason);
+			} catch (error) {
+				this.log(`mobile tokens: the onGone listener failed (${(error as Error).message.slice(0, 120)})`);
+			}
+		}
 	}
 
 	/**

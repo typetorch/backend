@@ -70,6 +70,11 @@ export interface SessionTimeSummary {
 	playtimePerPlayer: number | null;
 	/** Sessions not over (no leave row, an event in the last 10 minutes) that overlap the period. */
 	running: number;
+	/**
+	 * The time all players spent in the game inside the period, minutes: every session (over or running) cut at the
+	 * period's edges, a running one counted up to now. Unlike `playtimeMinutes` (the full length of the sessions counted).
+	 */
+	playedMinutes: number;
 }
 
 export interface SessionTimeResult {
@@ -174,7 +179,18 @@ function robloxTotalOf(a: Acc): number | null {
 	return known.length ? round(known.reduce((x, y) => x + y, 0) / known.length, 2) : avg(a.ms, a.n);
 }
 
-function summaryOf(spans: readonly SessionSpan[], from: number, to: number, bucketMs: number, by: "end" | "start"): { summary: SessionTimeSummary; counted: SessionSpan[]; buckets: Map<number, Acc> } {
+/** Time inside [from, to) over every session, ms: an over one ends at its last event, a running one at `now`. */
+export function playedInside(spans: readonly SessionSpan[], from: number, to: number, now: number): number {
+	let ms = 0;
+	for (const s of spans) {
+		const end = s.over ? s.t1 : Math.max(s.t1, now);
+		const overlap = Math.min(end, to, now) - Math.max(s.t0, from);
+		if (overlap > 0) ms += overlap;
+	}
+	return ms;
+}
+
+function summaryOf(spans: readonly SessionSpan[], from: number, to: number, bucketMs: number, by: "end" | "start", now: number): { summary: SessionTimeSummary; counted: SessionSpan[]; buckets: Map<number, Acc> } {
 	const at = (s: SessionSpan) => (by === "end" ? s.t1 : s.t0);
 	const counted = spans.filter((s) => s.over && at(s) >= from && at(s) < to);
 	const total = accOf();
@@ -204,6 +220,7 @@ function summaryOf(spans: readonly SessionSpan[], from: number, to: number, buck
 			playtimeMinutes: playtime,
 			playtimePerPlayer: total.pids.size ? round(playtime / total.pids.size, 2) : null,
 			running: spans.filter((s) => !s.over && s.t1 >= from && s.t0 < to).length,
+			playedMinutes: round(playedInside(spans, from, to, now) / MINUTE_MS, 1),
 		},
 	};
 }
@@ -257,8 +274,8 @@ export const sessionTime = defineQuery<SessionTimeOptions, SessionTimeResult>({
 		raw.sort((a, b) => (a.pid < b.pid ? -1 : a.pid > b.pid ? 1 : a.t0 - b.t0));
 		const spans = mergeSessions(raw, o.mergeGapMinutes * MINUTE_MS);
 		const span = f.to - f.from;
-		const cur = summaryOf(spans, f.from, f.to, bucketMs, o.by);
-		const prev = summaryOf(spans, f.from - span, f.from, bucketMs, o.by);
+		const cur = summaryOf(spans, f.from, f.to, bucketMs, o.by, ctx.now);
+		const prev = summaryOf(spans, f.from - span, f.from, bucketMs, o.by, ctx.now);
 		const weight = new Map<string, number>();
 		for (const s of cur.counted) weight.set(s.dev, (weight.get(s.dev) ?? 0) + 1);
 		const devices = [...weight].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([d]) => d);

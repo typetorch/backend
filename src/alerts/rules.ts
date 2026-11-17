@@ -43,7 +43,7 @@ export interface RuleDef {
 	params: readonly ParamDef[];
 }
 
-export const RULE_IDS = ["errorSpike", "errorNewAfterDeploy", "ccuDrop", "fleetSilent", "ingestStopped", "backendLatency", "backendMemory", "backendLoopLag", "backend5xx", "diskLow", "diskGrowth"] as const;
+export const RULE_IDS = ["errorSpike", "errorNewAfterDeploy", "ccuDrop", "ccuMilestone", "fleetSilent", "ingestStopped", "backendLatency", "backendMemory", "backendLoopLag", "backend5xx", "diskLow", "diskGrowth"] as const;
 export type RuleId = (typeof RULE_IDS)[number];
 
 const p = (key: string, env: string, label: string, unit: string, min: number, max: number, def: number, zero?: string): ParamDef => ({ key, env, label, unit, min, max, default: def, ...(zero ? { zero } : {}) });
@@ -90,6 +90,18 @@ export const RULES: readonly RuleDef[] = [
 		on: true,
 		needs: ["fleet"],
 		params: [p("percent", "PERCENT", "Drop", "%", 10, 100, 50), p("minutes", "MINUTES", "Within", "min", 2, 120, 10), p("minPlayers", "MIN_PLAYERS", "Peak at least", "players", 1, 10_000_000, 20)],
+	},
+	{
+		id: "ccuMilestone",
+		code: "backend_ccu_milestone",
+		env: "CCU_MILESTONE",
+		group: "players",
+		label: "Players online milestone",
+		help: "Players online (fleet heartbeats) reach a milestone: start, then twice as many each step (10, 20, 40, ...). It fires again only after players fell below the re-arm share of it, and at most once per cooldown. Also sent as a push to the mobile apps that turned milestones on.",
+		level: "info",
+		on: true,
+		needs: ["fleet"],
+		params: [p("start", "START", "First milestone", "players", 1, 1_000_000, 10), p("rearmPercent", "REARM_PERCENT", "Re-arm below", "% of the milestone", 10, 99, 70), p("cooldownMinutes", "COOLDOWN_MINUTES", "Cooldown", "min per milestone", 1, 10_080, 30)],
 	},
 	{
 		id: "fleetSilent",
