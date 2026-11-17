@@ -114,6 +114,17 @@ export class RobloxPlace {
 		return lookup;
 	}
 
+	/**
+	 * The game's icon at a widget's size (the mobile app's `game.iconUrl`): an https URL on *.rbxcdn.com, or null when
+	 * Roblox doesn't answer, has none ready, or the lookups a minute are used up. Not cached here (the caller keeps it).
+	 */
+	async gameIcon(universeId: number, size: "150x150" | "256x256" = "256x256"): Promise<string | null> {
+		if (!isId(universeId)) throw new Error("a positive universeId is required");
+		if (!this.limiter.take("roblox")) return null;
+		const r = await this.getJson(`${ROBLOX_GAME_ICONS_URL}?universeIds=${universeId}&returnPolicy=PlaceHolder&size=${size}&format=Png&isCircular=false`);
+		return r.status === 200 && "body" in r ? readIcon(r.body, universeId) : null;
+	}
+
 	private remember(key: string, entry: Entry): void {
 		this.cache.delete(key);
 		this.cache.set(key, entry);

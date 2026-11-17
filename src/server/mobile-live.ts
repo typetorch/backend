@@ -176,6 +176,54 @@ export class LastHourCache {
 	}
 }
 
+/** How long the game's icon URL is kept. */
+export const ICON_TTL_MS = 6 * HOUR;
+/** After a failed lookup, the next waits this long (the last good URL is served meanwhile). */
+export const ICON_RETRY_MS = 10 * MINUTE;
+
+/**
+ * The game's icon (`game.iconUrl`): one Roblox thumbnails lookup per ICON_TTL_MS, one at a time. A failed lookup keeps
+ * the last good URL of the same universe (null with none). The first read waits up to `waitMs` for it.
+ */
+export class IconCache {
+	private value: { universeId: number; url: string; at: number } | undefined;
+	private tried: { universeId: number; at: number } | undefined;
+	private running: Promise<void> | undefined;
+
+	constructor(
+		private readonly lookup: (universeId: number) => Promise<string | null>,
+		private readonly clock: () => number,
+		private readonly log: (line: string) => void = () => {},
+	) {}
+
+	async get(universeId: number | null, waitMs = 2000): Promise<string | null> {
+		if (universeId === null) return null;
+		const now = this.clock();
+		const known = this.value?.universeId === universeId ? this.value : undefined;
+		if (known && now - known.at < ICON_TTL_MS) return known.url;
+		const recentlyTried = this.tried?.universeId === universeId && now - this.tried.at < ICON_RETRY_MS;
+		if (!this.running && !recentlyTried) {
+			this.tried = { universeId, at: now };
+			this.running = this.refresh(universeId, now).finally(() => (this.running = undefined));
+		}
+		if (!known && this.running) {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([this.running, new Promise<void>((r) => (timer = setTimeout(r, waitMs)))]);
+			clearTimeout(timer);
+		}
+		return this.value?.universeId === universeId ? this.value.url : null;
+	}
+
+	private async refresh(universeId: number, now: number): Promise<void> {
+		try {
+			const url = await this.lookup(universeId);
+			if (url) this.value = { universeId, url, at: now };
+		} catch (error) {
+			this.log(`mobile live: the game's icon lookup failed (${(error as Error).message.slice(0, 120)})`);
+		}
+	}
+}
+
 /** "18 m 40 s", "2 h 5 m", "45 s". */
 export function formatDuration(seconds: number): string {
 	const s = Math.max(0, Math.round(seconds));

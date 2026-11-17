@@ -140,7 +140,8 @@ import { BackupError, Backups } from "./backup.ts";
 import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isHttps, originProblem, type AccessRole, type Principal, type SessionUser, type SignedIn } from "./auth.ts";
 import { MOBILE_ID_PATTERN, MOBILE_REFRESHED, MobileTokenError, MobileTokens, deviceName, sameUser, viewOf, type MobileTokenRecord, type MobileUser } from "./mobile-tokens.ts";
 import { MobilePush, MobilePushError, type ExpoMessage } from "./mobile-push.ts";
-import { CcuHistory, LastHourCache, lastHourOf, milestoneBody, seriesMinutes, utcMidnight } from "./mobile-live.ts";
+import { CcuHistory, IconCache, LastHourCache, lastHourOf, milestoneBody, seriesMinutes, utcMidnight } from "./mobile-live.ts";
+import { MobileMetrics, parseMetricsParam } from "./mobile-metrics.ts";
 import type { SessionTimeResult } from "../queries/session-time.ts";
 import { mobileDevRedirectAllowed, type ServerConfig } from "./config.ts";
 import { DiskWatch, type DiskUsage } from "./disk.ts";
@@ -2897,6 +2898,10 @@ ${goesTo}
 		clock,
 		log,
 	);
+	// Widget stats (?metrics=): named queries over the warehouse, cached per source (mobile-metrics.ts).
+	const mobileMetrics = new MobileMetrics({ run: () => (warehouse && analytics === "ready" ? (name, filters, options) => (warehouse as Warehouse).query(name, filters, options) : undefined), clock, log });
+	// The game's icon at a widget's size (thumbnails.roblox.com through the place card's client), kept 6 hours.
+	const gameIcon = new IconCache((universeId) => robloxPlace.gameIcon(universeId), clock, log);
 
 	function fleetTotals(): Promise<{ servers: number; players: number }> {
 		const now = clock();
@@ -2945,30 +2950,37 @@ ${goesTo}
 		}
 	}
 
-	/** GET /v1/mobile/live?minutes=30 (a mobile app token). */
+	/** GET /v1/mobile/live?minutes=30&metrics=dau,d1,... (a mobile app token). */
 	async function mobileLive(req: Request, url: URL, ip: string): Promise<Response> {
 		const gate = mobileGate(req, ip);
 		if ("response" in gate) return gate.response;
 		const id = gate.principal.mobile.id;
 		if (!mobileLiveLimiter.take(id)) return tooMany(mobileLiveLimiter.retryAfter(id));
-		for (const key of url.searchParams.keys()) if (key !== "minutes") return json(400, { error: "only minutes" });
+		for (const key of url.searchParams.keys()) if (key !== "minutes" && key !== "metrics") return json(400, { error: "only minutes and metrics" });
+		if (url.searchParams.getAll("metrics").length > 1) return json(400, { error: "metrics once, comma-separated" });
 		const minutes = seriesMinutes(url.searchParams.get("minutes"));
 		if (minutes === undefined) return json(400, { error: "minutes is a whole number from 1 to 360" });
+		const asked = parseMetricsParam(url.searchParams.get("metrics"));
+		if (asked && "error" in asked) return json(400, { error: asked.error });
 		if (!fleet) return json(404, { error: "the fleet part is off on this server" });
 		const now = clock();
 		await ccuBackfill(now).catch((e) => log(`mobile live: the CCU backfill failed (${(e as Error).message.slice(0, 120)})`));
 		const [totals, game, hour] = await Promise.all([fleetTotals(), liveGame(), lastHour.get()]);
+		const iconUrl = await gameIcon.get(game.universeId);
 		const before = ccuHistory.at(now - 5 * 60_000);
-		const peak = ccuHistory.peakSince(utcMidnight(now));
+		const peakToday = Math.max(ccuHistory.peakSince(utcMidnight(now)) ?? 0, totals.players);
+		// Only when asked: without `metrics` the answer and its cost stay as before.
+		const metrics = asked ? await mobileMetrics.answer(asked.ids, { ccu: totals.players, ccuPrev: before, servers: totals.servers, peakToday }) : undefined;
 		return json(200, {
 			at: new Date(now).toISOString(),
-			game,
+			game: { ...game, iconUrl },
 			ccu: totals.players,
 			servers: totals.servers,
 			delta: before === null ? null : totals.players - before,
-			peakToday: Math.max(peak ?? 0, totals.players),
+			peakToday,
 			series: ccuHistory.series(now, minutes),
 			lastHour: hour,
+			...(metrics ? { metrics } : {}),
 		});
 	}
 
