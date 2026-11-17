@@ -11,12 +11,13 @@
 import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { EmptyState, LoadingBlock } from "@/components/common";
 import { BandControls } from "@/components/maps/BandControls";
+import { OffsetEditor, useCanEditMaps } from "@/components/maps/OffsetEditor";
 import { ToggleChip } from "@/components/ToggleChip";
 import { Button } from "@/components/ui/button";
 import { usePageParams } from "@/lib/hooks";
 import { mapCounts, mapForPosition, nearestDot, type LiveDot, liveLayers } from "@/lib/live-map";
 import { bandParam, readMapView, resolveBand, type BandChoice } from "@/lib/map-view";
-import { detectFloors, ROOT_HEIGHT, type MapLayer } from "@/lib/maps";
+import { detectFloors, ROOT_HEIGHT, type MapLayer, type Vec3 } from "@/lib/maps";
 import { bandChoiceFor, useMapExports, useMapGeometry, ViewSwitches } from "../recordings/RealMap";
 
 const MapScene = lazy(() => import("@/components/maps/MapScene"));
@@ -47,7 +48,10 @@ export function LiveMap({
 	const [picked, setPicked] = useState<string | null>(null);
 	const [followed, setFollowed] = useState<string | null>(null);
 	const [hover, setHover] = useState<{ name: string; left: number; top: number } | null>(null);
-	const list = maps ?? [];
+	const canEdit = useCanEditMaps();
+	// Owners' unsaved offset (OffsetEditor): drawn and used to place the dots until saved or reset.
+	const [preview, setPreview] = useState<{ name: string; offset: Vec3 } | null>(null);
+	const list = useMemo(() => (maps ?? []).map((m) => (preview && m.name === preview.name ? { ...m, offset: preview.offset } : m)), [maps, preview]);
 	const { counts, top } = useMemo(() => mapCounts(list, dots), [list, dots]);
 	const followedDot = followed ? dots.find((d) => d.key === followed) : undefined;
 	const followedMap = followedDot ? mapForPosition(list, followedDot.x, followedDot.z)?.name : undefined;
@@ -96,6 +100,17 @@ export function LiveMap({
 						</div>
 						<ViewSwitches real draw={false} />
 						{info ? <BandControls choice={choice} band={band} floors={floors} lo={lo} hi={hi} follow={following} onChange={setBand} className="max-w-xl" /> : null}
+						{info && canEdit ? (
+							<OffsetEditor
+								key={`${info.name}:${(maps?.find((m) => m.name === info.name)?.offset ?? info.offset).join(",")}`}
+								map={maps?.find((m) => m.name === info.name) ?? info}
+								onPreview={(offset) => {
+									setPreview(offset ? { name: info.name, offset } : null);
+									// Moving a map can move its players' count: keep this map on screen while lining it up.
+									if (offset && !followed) setPicked(info.name);
+								}}
+							/>
+						) : null}
 						<div className="relative h-[min(70vh,40rem)] min-h-80" data-testid="live-map" data-map={info?.name ?? ""} data-band={band ? band.join("..") : "all"} data-followed={followed ?? ""}>
 							{info && !geometry.error ? (
 								<Suspense fallback={<LoadingBlock rows={6} />}>
@@ -105,6 +120,7 @@ export function LiveMap({
 										mode={state.mode}
 										layers={layers}
 										offset={info.offset}
+										holdCamera
 										band={band}
 										label={label}
 										onPick={(p) => follow(nearestDot(here, p.x, p.z)?.key ?? null)}

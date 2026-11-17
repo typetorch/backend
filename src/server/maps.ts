@@ -9,7 +9,7 @@
  *                                      then version 2 with the texture section when the map has textures
  *   POST   /v1/maps/export             (owners, audited)       starts an export: `{ names?: string[] }` adds map names to
  *                                      the ones the events carry; 202 with the export's state, 409 while one runs
- *   PUT    /v1/maps/<name>/override    (owners, audited)       `{ path?, offset? }`: the model to use and/or an offset
+ *   PUT    /v1/maps/<name>/override    (owners, audited)       `{ path?, offset? }`: the model to use and/or an offset (the lobby, `(lobby)`: an offset only)
  *   DELETE /v1/maps/<name>/override    (owners, audited)       removes it
  *
  * The export needs OPENCLOUD_API_KEY (universe.place.luau-execution-session:read and :write) and TYPETORCH_UNIVERSE_ID;
@@ -99,7 +99,7 @@ export class MapsRoutes {
 		const positions = latest ? await this.positions() : { value: null };
 		const cells = positions.value?.cells ?? [];
 		const maps = (latest?.maps ?? []).map((m) => {
-			const override = m.kind === "map" ? overrideFor(store.overrides, m.name) : undefined;
+			const override = overrideFor(store.overrides, m.kind === "lobby" ? LOBBY : m.name);
 			const offset = override?.offset ?? [0, 0, 0];
 			const samples = m.kind === "map" ? cells.filter((c) => mapMatches(c.map, m.name)).map((c) => ({ x: c.x + (positions.value?.cell ?? 1) / 2, z: c.z + (positions.value?.cell ?? 1) / 2, y: c.ylo ?? c.y, n: c.n })) : [];
 			const align: Alignment = m.kind === "map" ? alignment(m.bounds, samples, offset) : { state: "unknown", samples: 0, inside: 0 };
@@ -198,7 +198,6 @@ export class MapsRoutes {
 	}
 
 	private async override(req: Request, name: string, who: string, caller: MapsCaller): Promise<Response> {
-		if (name === LOBBY) return json(400, { error: "the lobby has no override" });
 		let body: unknown = null;
 		if (req.method === "PUT") {
 			if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) return json(415, { error: "send JSON: { path?, offset? }" });

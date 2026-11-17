@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { downloadBinaryOutput, OpenCloudError, runLuauTask } from "../opencloud.ts";
 import { noteImageIds } from "../images/store.ts";
 import { type Bounds, mapBlob, parseExport, parseTextures, RECORD_BYTES, summarize, textureImages, type Vec3 } from "./format.ts";
-import { pickMaps } from "./match.ts";
+import { LOBBY, pickMaps } from "./match.ts";
 import { exportScript, mapKey } from "./script.ts";
 
 export const INDEX_VERSION = 1;
@@ -31,8 +31,7 @@ export const OFFSET_MAX = 1_000_000;
 export const MIN_EXPORT_GAP_MS = 30_000;
 /** The export task's own timeout (Luau Execution allows up to 300 s). */
 export const TASK_TIMEOUT_SECONDS = 180;
-/** The lobby's name in the list (the events never name it). */
-export const LOBBY = "(lobby)";
+export { LOBBY } from "./match.ts";
 
 export interface MapOverride {
 	/** The model's path from the DataModel ("ReplicatedStorage.assets.maps.Mall"). */
@@ -237,7 +236,8 @@ export class MapStore {
 		this.fresh();
 		const clean = name.trim();
 		if (!clean || clean.length > 100 || !mapKey(clean)) throw new MapsError(400, "the map name must have letters or digits (at most 100 characters)");
-		const existing = Object.keys(this.index.overrides).find((k) => mapKey(k) === mapKey(clean));
+		const lobby = clean === LOBBY;
+		const existing = Object.keys(this.index.overrides).find((k) => (lobby ? k === LOBBY : k !== LOBBY && mapKey(k) === mapKey(clean)));
 		if (input === null) {
 			if (existing) delete this.index.overrides[existing];
 			this.save();
@@ -247,6 +247,7 @@ export class MapStore {
 		const body = input as Record<string, unknown>;
 		for (const k of Object.keys(body)) if (k !== "path" && k !== "offset") throw new MapsError(400, `unknown field ${k}`);
 		const out: MapOverride = { by, at: this.clock() };
+		if (lobby && body.path !== undefined && body.path !== null && body.path !== "") throw new MapsError(400, "the lobby is the rest of Workspace: it takes an offset, not a model path");
 		if (body.path !== undefined && body.path !== null && body.path !== "") {
 			if (typeof body.path !== "string" || body.path.length > PATH_MAX || /[\u0000-\u001f]/.test(body.path) || body.path.split(".").some((s) => s === "")) {
 				throw new MapsError(400, `path is an instance path like ReplicatedStorage.assets.maps.Mall (at most ${PATH_MAX} characters)`);
@@ -288,9 +289,10 @@ export class MapStore {
 			this.current.step = s;
 		};
 		try {
-			const names = dedupe([...input.names, ...Object.keys(this.index.overrides)]).slice(0, NAMES_MAX);
+			// The lobby's override is an offset only: not a map name to look for.
+			const names = dedupe([...input.names, ...Object.keys(this.index.overrides).filter((k) => k !== LOBBY)]).slice(0, NAMES_MAX);
 			const overrides = Object.entries(this.index.overrides)
-				.filter(([, o]) => o.path)
+				.filter(([name, o]) => name !== LOBBY && o.path)
 				.map(([name, o]) => ({ name, path: o.path as string }));
 			const task = await runLuauTask({
 				apiKey: input.apiKey,

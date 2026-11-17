@@ -191,6 +191,17 @@ describe("the Maps page", () => {
 		expect(screen.queryByRole("group", { name: "Layers" })).toBeNull();
 	});
 
+	test("the lobby: an offset override (no model path, no alignment check)", async () => {
+		wrap(OWNER, "/maps?map=(lobby)");
+		await waitFor(() => expect(screen.getByTestId("alignment-lobby")).toBeTruthy(), { timeout: 8000 });
+		expect(screen.queryByLabelText("Model path")).toBeNull();
+		expect(screen.queryByText(/Alignment unknown/)).toBeNull();
+		fireEvent.change(screen.getByLabelText("Offset x"), { target: { value: "12" } });
+		fireEvent.change(screen.getByLabelText("Offset z"), { target: { value: "-340" } });
+		fireEvent.click(screen.getByRole("button", { name: "Save" }));
+		await waitFor(() => expect(calls.some((c) => c.url === "/api/v1/maps/(lobby)/override" && c.method === "PUT" && c.body === '{"offset":[12,0,-340]}')).toBe(true), { timeout: 8000 });
+	});
+
 	test("2D / 3D, the layer toggles, dots or heat cells", async () => {
 		wrap(OWNER);
 		await waitFor(() => expect(scene().dataset.layers).toBe("ev:custom:down,ev:custom:loot"), { timeout: 8000 });
