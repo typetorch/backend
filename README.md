@@ -320,9 +320,16 @@ value; an invalid one stops the start like every other setting:
 | `TYPETORCH_BACKEND_ALERTS` | on (default) / off: every rule |
 | `TYPETORCH_BACKEND_ALERTS_REPEAT_MINUTES` | the repeat window, 5 to 10,080 (default 180) |
 | `TYPETORCH_BACKEND_ALERTS_PER_HOUR` | the hourly cap, 1 to 120 (default 12) |
-| `TYPETORCH_ALERT_<RULE>` | on / off for one rule; `<RULE>` is `ERROR_SPIKE`, `ERROR_NEW`, `CCU_DROP`, `FLEET_SILENT`, `INGEST_STOPPED`, `LATENCY`, `MEMORY`, `LOOP_LAG`, `5XX`, `DISK_LOW`, `DISK_GROWTH` |
+| `TYPETORCH_ALERT_<RULE>` | on / off for one rule; `<RULE>` is `ERROR_SPIKE`, `ERROR_NEW`, `CCU_DROP`, `CCU_MILESTONE`, `FLEET_SILENT`, `INGEST_STOPPED`, `LATENCY`, `MEMORY`, `LOOP_LAG`, `5XX`, `DISK_LOW`, `DISK_GROWTH` |
 | `TYPETORCH_ALERT_<RULE>_LEVEL` | `critical`, `warning` or `info` |
 | `TYPETORCH_ALERT_<RULE>_<THRESHOLD>` | e.g. `TYPETORCH_ALERT_CCU_DROP_PERCENT=40`, `TYPETORCH_ALERT_DISK_LOW_GB=5`; the names and bounds are in `src/alerts/rules.ts` and on the Settings page (hover a field) |
+
+**Players online milestone** (`ccuMilestone`, level info): milestones from `START` (10), twice as many each step (10, 20,
+40, 80, ...); one fires when the fleet's players online first reach it, re-arms once they drop below `REARM_PERCENT` (70)
+% of it, and fires at most once per `COOLDOWN_MINUTES` (30) per milestone (that cooldown is its repeat window, in place of
+the general one). A jump past several fires only the highest; the first sample after a start only learns the level (a
+restart never announces it). Besides where alerts go, it is a push to every [mobile app](#mobile-app) registration with
+milestones on.
 
 A `PATCH /v1/admin/settings` may send part of the value (`{"backendAlerts":{"rules":{"ccuDrop":{"on":false}}}}`): the rest
 stays as it is. `GET /v1/admin/alert-rules` (admin) answers each rule's state (`ok`, `waiting`, `firing`, `off`,
@@ -644,6 +651,25 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   typetorch.dev label or the public URL's host), signed in or not, so the app can match a backend to a Roblox universe;
   signed out it also says `mobileLogin` (the browser sign-in is on). With a mobile token it adds `mobile: { id, expiresAt }`.
   The game's name and icon are `GET /v1/place`.
+- **Live numbers.** `GET /v1/mobile/live?minutes=30` (a mobile app token only; 20 a minute per token) is what the app's
+  live watch (every 30 s) and widgets (every 30 min) poll: `{ at, game: { name, universeId }, ccu, servers, delta,
+  peakToday, series: [{ t, ccu }], lastHour: { at, avgSessionSeconds, medianSessionSeconds, sessionsEnded, playtimeHours }
+  | null }`. Aggregates only, never a player. `ccu` and `servers` are the live fleet (the count of `GET /v1/fleet/servers`,
+  cached 5 s). The history is one point a minute in memory for 24 hours, taken by the alert evaluator's sample; after a
+  restart the 5-minute metrics rollups (since 00:00 UTC, 6 hours at least) fill in before the first sample, coarser and a
+  little high (each server's peak in the bucket; kernels 0.4.2+). `delta`: now minus the point nearest 5 minutes ago (null
+  without one); `peakToday`: since 00:00 UTC; `series`: the last `minutes` (1 to 360). `lastHour`: the Session time
+  query over the last 60 minutes (sessions that ended in it: mean, median, count; `playtimeHours`: time all players spent
+  in the game in it, running sessions included), cached 5 minutes; null without analytics.
+- **Push.** `POST /v1/mobile/push { token: "ExponentPushToken[...]", milestones }` registers the phone (one registration
+  per mobile app token, a second call replaces it; the same push token under another token is dropped there; SQLite
+  `mobile_push`, 2,000 at most) and answers `{ ok, milestones }`; `DELETE /v1/mobile/push` removes it. Logout, revoke,
+  revoke all and expiry remove it, a refresh moves it to the new token. `POST /v1/mobile/push/test` sends one push to the
+  caller's registration (`{ ok, ticket: { status, error? } }`, `409 { error: "not_registered" }`, 1 per 10 s). Pushes go
+  through Expo's push service (`https://exp.host/--/api/v2/push/send`, 100 a request, 10 s timeout): a
+  `DeviceNotRegistered` ticket or receipt (read 15 minutes later) removes the registration. The message's
+  `data.backendUrl` (the app opens that backend's Fleet page) is `TYPETORCH_PUBLIC_URL` (null without it). Push tokens are never
+  answered, logged or audited (the audit log has `mobile.push.register` / `mobile.push.remove` with the token's id).
 - **Streams.** The Server-Sent Events routes (`GET /v1/live`, `GET /v1/fleet/stream`) take the token as a Bearer header
   like every route; tokens are never read from the URL. Every keep-alive ping (15 s) checks the caller again: a revoked
   token or session, a role no longer held or an address off the allow list closes the stream (an explorer session's
@@ -758,6 +784,8 @@ scope, and a key outside its role's scopes gets `403 { error: "forbidden", need 
 | `GET /auth/mobile/start`, `GET`/`POST /auth/mobile/consent` | open (rate limited, lockout) | the [mobile app](#mobile-app)'s browser sign-in and its consent page |
 | `POST /v1/auth/mobile/token` | open: a sign-in code + PKCE verifier, or the admin token as Bearer | `{ token, id, expiresAt, role, user }` |
 | `POST /v1/auth/mobile/refresh`, `POST /v1/auth/mobile/logout` | a mobile app token | a new token (the old one revoked); revoke the caller's token |
+| `GET /v1/mobile/live?minutes=` | a mobile app token | the game's live numbers (aggregates) for the app's live watch and widgets |
+| `POST`, `DELETE /v1/mobile/push`; `POST /v1/mobile/push/test` | a mobile app token | this token's push registration `{ token, milestones }`; one test push |
 | `GET /v1/auth/mobile/tokens`, `DELETE /v1/auth/mobile/tokens/<id>` | admin, web (its own) | mobile app tokens (no secret); revoke one |
 | `POST /v1/auth/mobile/tokens/revoke-all` | admin | revoke every mobile app token (`{ ok, revoked, tokens }`) |
 | `GET /v1/access/keys` | admin | the signing keys a trust link may use |

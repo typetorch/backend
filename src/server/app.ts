@@ -3000,6 +3000,8 @@ ${goesTo}
 		const now = clock();
 		const last = pushTests.get(id);
 		if (last !== undefined && now - last < 10_000) return tooMany(Math.ceil((10_000 - (now - last)) / 1000));
+		// Nothing to send to: answered without using up the token's one test per 10 s.
+		if (!(await mobilePush.get(id))) return json(409, { error: "not_registered" });
 		if (pushTests.size >= 4096) for (const [k, t] of pushTests) if (now - t >= 10_000) pushTests.delete(k);
 		if (pushTests.size >= 4096) pushTests.delete(pushTests.keys().next().value as string);
 		pushTests.set(id, now);
