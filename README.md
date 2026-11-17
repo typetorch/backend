@@ -2019,7 +2019,8 @@ Basin facts this package relies on (from the docs, 2026-10-05; live checks need 
   same results as the DuckDB dialect.
 - **No DELETE.** Basin SQL is read-only. Rows can only be deleted through an Iceberg engine (Spark, or DuckDB's
   `iceberg` extension on unpartitioned tables). For Right to Erasure, deleting the player's `p/<UserId>` DataStore
-  link makes their Basin rows anonymous.
+  link unlinks their Basin rows from the UserId (not anonymous: a recording still shows any names that were on
+  screen).
 
 ## The analytics part (DuckDB)
 
@@ -2853,8 +2854,12 @@ username on the row: the explorer resolves pid -> user through `identities`.
 
 ## Privacy
 
-- Events carry a random pid, never a UserId, name or chat. The game keeps UserId -> pid in its DataStore
-  (`TypeTorchAnalytics` / `p/<UserId>`).
+- **Events and recordings are personal data.** They carry a random pid in place of the UserId, but the pid maps to
+  the UserId (the game's DataStore `TypeTorchAnalytics` / `p/<UserId>`, and the identity table below), so every row
+  can be traced to a Roblox account. The join row holds the player's country, locale, account age, membership and join
+  data; feedback rows hold the text the player wrote; `tt-ext-1` recordings (framework 0.7.2) store the game's
+  on-screen UI as drawn, so usernames, display names (the player's and other players') and TextBox text are in them.
+  Not collected: Roblox chat messages. Error logs have player names and UserIds replaced.
 - **UserIds are stored on the dev's own server**: the identity table above maps pids to UserIds so the dev can find a
   player (support) and answer Right to Erasure without a DataStore read. It is never part of the events, Parquet files,
   rollups, raw archives or Basin, and goes to one place only: Roblox itself, when an admin opens a player's detail (the
@@ -3005,7 +3010,7 @@ them, and nothing is published (the package is private).
   troubleshooting page says JSON functions aren't implemented); if they fail, extract the needed props into columns
   in the pipeline SQL. The stream schemas here mark only `v t kind name job art` required (the framework's suggested
   ones mark every column required; both accept what the framework sends).
-- **Basin erasure** deletes only the DataStore link (anonymous rows stay); a DuckDB `iceberg` DELETE job is possible
+- **Basin erasure** deletes only the DataStore link (the rows stay, unlinked but not anonymous); a DuckDB `iceberg` DELETE job is possible
   later.
 - **Not exercised by the tests:** the `Dockerfile` and `compose.yaml` (tests read them, nothing builds the image), the systemd
   unit and the Caddyfile, a real Coolify deploy, and Sign in with Roblox against Roblox itself (tests use a fake Roblox with a
