@@ -2936,7 +2936,13 @@ ${goesTo}
 	async function ccuBackfill(now: number): Promise<void> {
 		if (ccuHistory.hasBackfill || !fleet) return;
 		const since = Math.min(utcMidnight(now), now - 6 * 3_600_000);
-		ccuHistory.backfill((await fleet.playersPerBucket(since)).map((p) => ({ t: p.t, ccu: p.players })));
+		try {
+			ccuHistory.backfill((await fleet.playersPerBucket(since)).map((p) => ({ t: p.t, ccu: p.players })));
+		} catch (error) {
+			// Tried once: the per-minute samples alone from here on.
+			ccuHistory.backfill([]);
+			throw error;
+		}
 	}
 
 	/** GET /v1/mobile/live?minutes=30 (a mobile app token). */
