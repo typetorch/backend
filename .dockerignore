@@ -7,6 +7,10 @@ node_modules
 web/node_modules
 dist
 web/dist
+# the public demo (web/demo, demo.typetorch.dev): its data pack, build and deploy tool are never part of the image
+web/demo
+web/dist-demo
+web/vite.demo.config.ts
 data
 .loadtest
 *.log

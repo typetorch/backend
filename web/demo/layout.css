@@ -1,0 +1,25 @@
+/*
+ * The demo banner sits above the explorer (#demo-banner, then #root). It stays at the top (sticky), and the explorer's
+ * shell (AppShell: a min-h-svh row with a sticky h-svh sidebar and a sticky header) is fitted under it, so the page is
+ * never one banner taller than the window and the sidebar's bottom (the user, Sign out) stays on screen.
+ * --demo-banner-h is the banner's height, kept current by banner.tsx. If AppShell's markup changes, these rules simply
+ * stop matching and the page scrolls by the banner's height, as before.
+ */
+#demo-banner {
+	position: sticky;
+	top: 0;
+	z-index: 30;
+}
+
+#root div.flex.min-h-svh {
+	min-height: calc(100svh - var(--demo-banner-h, 0px));
+}
+
+#root div.flex.min-h-svh > aside.sticky {
+	top: var(--demo-banner-h, 0px);
+	height: calc(100svh - var(--demo-banner-h, 0px));
+}
+
+#root div.flex.min-h-svh > div > header.sticky {
+	top: var(--demo-banner-h, 0px);
+}

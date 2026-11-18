@@ -1,0 +1,12 @@
+{
+	"extends": "../tsconfig.app.json",
+	"compilerOptions": {
+		"tsBuildInfoFile": "../node_modules/.tmp/tsconfig.demo.tsbuildinfo",
+		"types": ["vite/client", "node"],
+		"resolveJsonModule": true,
+		"noUnusedParameters": false,
+		"noUnusedLocals": false
+	},
+	"include": [".", "../vite.demo.config.ts"],
+	"exclude": ["public", "deploy/node_modules", "deploy/.wrangler", "deploy/.cloudflare"]
+}
