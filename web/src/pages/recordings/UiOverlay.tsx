@@ -8,7 +8,16 @@
  *     negative y at the very top), so a node's top is `rect.y + inset` on the full screen.
  *   - Clipping (ClipsDescendants, ScrollingFrame, CanvasGroup): rects are absolute and drawn flat, so a node is cut by a
  *     clip-path to the intersection of its clipping ancestors' rects (rotation is ignored for the cut).
- *   - UIGradient multiplies the object's colour in Roblox: drawn as a CSS linear-gradient in place of the background.
+ *   - UIGradient multiplies the object's colour and transparency in Roblox: the background is drawn as a CSS
+ *     linear-gradient whose stops merge the colour and transparency keypoints (each interpolated at the other's times),
+ *     the colour multiplied with BackgroundColor3 and the alpha with the background's; the Offset shifts the stops along
+ *     the gradient's direction (its part across the direction changes nothing for a linear gradient). The transparency
+ *     also masks the node's text and image (ring gauges reveal arcs that way); the colour is not applied to them.
+ *   - CanvasGroup GroupTransparency multiplies into the group's and every descendant's opacity (each box faded on its
+ *     own, not composited as one layer: overlaps inside a fading group look a little different). GroupColor3 is listed
+ *     in Properties, not drawn.
+ *   - Text sizes are as recorded (framework 0.7.3+: TextSize × the UIScales above); rich text `<font size>` and the text
+ *     stroke are multiplied by the recorded `textScale`.
  *   - ImageColor3 (tint): a multiply layer masked by the image itself; ImageRect is in the image's pixels, assumed to be
  *     the thumbnail's (the backend's thumbnails keep the aspect, up to 700 px: big sprite sheets may be off).
  *   - Fonts: FontFace.Family (e.g. rbxasset://fonts/families/GothamSSm.json) to a CSS stack with web-safe fallbacks.
@@ -60,10 +69,87 @@ export function fontStack(family: string | undefined): string {
 const ALIGN = ["flex-start", "center", "flex-end"] as const;
 const TEXT_ALIGN = ["left", "center", "right"] as const;
 
-function gradientCss(g: NonNullable<ExtUiFields["gradient"]>, transparency: number): string | undefined {
-	if (!g.keys.length) return undefined;
-	const stops = g.keys.length === 1 ? [...g.keys, [1, g.keys[0]?.[1] ?? "#ffffff"] as [number, string]] : g.keys;
-	return `linear-gradient(${90 + g.rotation}deg, ${stops.map(([at, color]) => `${rgba(color, transparency)} ${Math.round(at * 1000) / 10}%`).join(", ")})`;
+const rgbOf = (hex: string | undefined): [number, number, number] => {
+	const m = /^#?([0-9a-f]{6})$/i.exec(hex ?? "");
+	const v = m ? Number.parseInt(m[1] as string, 16) : 0xffffff;
+	return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+};
+const toHex = ([r, g, b]: [number, number, number]) => `#${((1 << 24) | (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b)).toString(16).slice(1)}`;
+
+/** A keypoint list's value at `t` (linear between keypoints, the ends held), as Roblox's sequences evaluate. */
+function sample<T>(keys: readonly [number, T][], t: number, lerp: (a: T, b: T, k: number) => T): T | undefined {
+	if (!keys.length) return undefined;
+	const first = keys[0] as [number, T];
+	if (t <= first[0]) return first[1];
+	for (let k = 1; k < keys.length; k++) {
+		const [t1, v1] = keys[k] as [number, T];
+		if (t <= t1) {
+			const [t0, v0] = keys[k - 1] as [number, T];
+			return t1 > t0 ? lerp(v0, v1, (t - t0) / (t1 - t0)) : v1;
+		}
+	}
+	return (keys[keys.length - 1] as [number, T])[1];
+}
+
+/**
+ * One stop list for a UIGradient: [time, #rrggbb, transparency] at every colour and every transparency keypoint time,
+ * each sequence interpolated at the other's times. No colour keys = white; no transparency keys = opaque.
+ */
+export function gradientStops(colors: readonly [number, string][] = [], alphas: readonly [number, number][] = []): [number, string, number][] {
+	const times = [...new Set([...colors.map(([t]) => t), ...alphas.map(([t]) => t)])].sort((a, b) => a - b);
+	if (!times.length) return [];
+	const rgbKeys = colors.map(([t, c]) => [t, rgbOf(c)] as [number, [number, number, number]]);
+	const mix = (a: [number, number, number], b: [number, number, number], k: number): [number, number, number] => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+	return times.map((t) => [t, toHex(sample(rgbKeys, t, mix) ?? [255, 255, 255]), sample(alphas, t, (a, b, k) => a + (b - a) * k) ?? 0]);
+}
+
+/** The gradient's CSS angle (Roblox Rotation 0 runs left to right, clockwise) and the Offset's shift along it (0..1 of the box). */
+function gradientAxis(rotation: number, offset: readonly [number, number] | undefined): [number, number] {
+	const rad = (rotation * Math.PI) / 180;
+	const shift = offset ? offset[0] * Math.cos(rad) + offset[1] * Math.sin(rad) : 0;
+	return [90 + rotation, Math.abs(shift) < 1e-6 ? 0 : shift];
+}
+
+const pct = (v: number) => `${Math.round(v * 1000) / 10}%`;
+
+/**
+ * The background as a CSS linear-gradient: the UIGradient's colour × BackgroundColor3, its transparency combined with the
+ * background's (alpha = (1 − background) × (1 − gradient)), the stops shifted by the Offset. undefined when nothing to draw.
+ */
+export function gradientCss(g: ExtUiFields["gradient"], alpha: ExtUiFields["gradientAlpha"], background: { color: string; transparency: number }): string | undefined {
+	const stops = gradientStops(g?.keys, alpha?.keys);
+	if (!stops.length) return undefined;
+	if (stops.length === 1) stops.push([1, (stops[0] as [number, string, number])[1], (stops[0] as [number, string, number])[2]]);
+	const [angle, shift] = gradientAxis(g?.rotation ?? 0, alpha?.offset);
+	const base = rgbOf(background.color);
+	const list = stops.map(([at, color, transparency]) => {
+		const c = rgbOf(color);
+		const multiplied = toHex([(c[0] * base[0]) / 255, (c[1] * base[1]) / 255, (c[2] * base[2]) / 255]);
+		return `${rgba(multiplied, 1 - (1 - background.transparency) * (1 - transparency))} ${pct(at + shift)}`;
+	});
+	return `linear-gradient(${angle}deg, ${list.join(", ")})`;
+}
+
+/** The UIGradient's transparency as a CSS mask (for text and images), or undefined when it is opaque. */
+export function gradientMask(g: ExtUiFields["gradient"], alpha: ExtUiFields["gradientAlpha"]): string | undefined {
+	if (!alpha?.keys.length || alpha.keys.every(([, a]) => a === 0)) return undefined;
+	const stops = gradientStops(undefined, alpha.keys);
+	if (stops.length === 1) stops.push([1, "#000000", (stops[0] as [number, string, number])[2]]);
+	const [angle, shift] = gradientAxis(g?.rotation ?? 0, alpha.offset);
+	return `linear-gradient(${angle}deg, ${stops.map(([at, , transparency]) => `rgba(0, 0, 0, ${Number((1 - transparency).toFixed(3))}) ${pct(at + shift)}`).join(", ")})`;
+}
+
+/** The product of (1 − GroupTransparency) over the node and its CanvasGroup ancestors (1 = no group fades it). */
+export function groupOpacity(s: UiNodeState, byI: Map<number, UiNodeState>): number {
+	let opacity = 1;
+	const seen = new Set<number>();
+	let at: UiNodeState | undefined = s;
+	while (at && !seen.has(at.i)) {
+		seen.add(at.i);
+		if (at.cls === 9 && at.fields.group) opacity *= 1 - at.fields.group.transparency;
+		at = at.parent === null ? undefined : byI.get(at.parent);
+	}
+	return opacity;
 }
 
 /** Draws something (takes the pointer): a visible background, text, an image, a stroke, or a box class. */
@@ -103,7 +189,7 @@ export function UiOverlay({ ui, t, viewport, selected = null, onSelect, classNam
 		<div ref={host} className={cn("pointer-events-none absolute inset-0 overflow-hidden", className)} data-testid="ui-overlay" data-scale={scale.toFixed(3)}>
 			{nodes.map((s, z) =>
 				s.cls === 0 || !s.fields.rect ? null : (
-					<UiBox key={s.i} state={s} z={z + 1} scale={scale} inset={viewport.inset} clip={clipRect(s, byI)} selected={selected === s.i} onSelect={onSelect} />
+					<UiBox key={s.i} state={s} z={z + 1} scale={scale} inset={viewport.inset} clip={clipRect(s, byI)} opacity={groupOpacity(s, byI)} selected={selected === s.i} onSelect={onSelect} />
 				),
 			)}
 		</div>
@@ -126,8 +212,10 @@ function clipRect(s: UiNodeState, byI: Map<number, UiNodeState>): [number, numbe
 	return box;
 }
 
-function UiBox({ state, z, scale, inset, clip, selected, onSelect }: { state: UiNodeState; z: number; scale: number; inset: number; clip: [number, number, number, number] | null; selected: boolean; onSelect?: ((i: number | null) => void) | undefined }) {
+function UiBox({ state, z, scale, inset, clip, opacity = 1, selected, onSelect }: { state: UiNodeState; z: number; scale: number; inset: number; clip: [number, number, number, number] | null; opacity?: number; selected: boolean; onSelect?: ((i: number | null) => void) | undefined }) {
 	const f = state.fields;
+	// A CanvasGroup faded out entirely (GroupTransparency 1) draws nothing, and nothing in it takes the pointer.
+	if (opacity <= 0.001) return null;
 	const [x, y, w, h] = f.rect as [number, number, number, number];
 	const style: CSSProperties = {
 		left: x * scale,
@@ -138,11 +226,13 @@ function UiBox({ state, z, scale, inset, clip, selected, onSelect }: { state: Ui
 	};
 	if (f.rotation) style.transform = `rotate(${f.rotation}deg)`;
 	const bg = f.background;
-	if (bg && bg.transparency < 1) style.backgroundColor = rgba(bg.color, bg.transparency);
-	if (f.gradient && bg && bg.transparency < 1) {
-		const g = gradientCss(f.gradient, bg.transparency);
+	if (bg && bg.transparency < 1) {
+		// The UIGradient replaces the plain background (a transparent stop must not show the colour under it).
+		const g = f.gradient?.keys.length || f.gradientAlpha?.keys.length ? gradientCss(f.gradient, f.gradientAlpha, bg) : undefined;
 		if (g) style.backgroundImage = g;
+		else style.backgroundColor = rgba(bg.color, bg.transparency);
 	}
+	if (opacity < 1) style.opacity = Number(opacity.toFixed(3));
 	if (f.corner) style.borderRadius = f.corner * scale;
 	if (f.stroke && f.stroke.transparency < 1 && f.stroke.thickness > 0) style.boxShadow = `0 0 0 ${Math.max(0.5, f.stroke.thickness * scale)}px ${rgba(f.stroke.color, f.stroke.transparency)}`;
 	if (clip) {
@@ -163,7 +253,15 @@ function UiBox({ state, z, scale, inset, clip, selected, onSelect }: { state: Ui
 	let inner: ReactNode = null;
 	if (isImageClass(state.cls) && f.image) inner = <UiImage fields={f} scale={scale} />;
 	else if (state.cls === 8 || state.cls === 10) inner = <Placeholder label={uiClassName(state.cls)} />;
-	if (isTextClass(state.cls) && f.text) inner = <UiText fields={f} scale={scale} />;
+	if (isTextClass(state.cls) && f.text) inner = (f.textStyle?.size ?? 14) > 0 ? <UiText fields={f} scale={scale} /> : null;
+	const mask = inner ? gradientMask(f.gradient, f.gradientAlpha) : undefined;
+	if (mask) {
+		inner = (
+			<div className="absolute inset-0" style={{ borderRadius: "inherit", maskImage: mask, WebkitMaskImage: mask }} data-testid="ui-gradient-mask">
+				{inner}
+			</div>
+		);
+	}
 	return (
 		<div
 			className={cn("absolute box-border", interactive && "cursor-pointer")}
@@ -198,6 +296,8 @@ function UiText({ fields, scale }: { fields: ExtUiFields; scale: number }) {
 	const s = fields.textStyle;
 	const spans = useMemo<RichSpan[]>(() => (s?.rich ? richText(fields.text ?? "") : [{ text: fields.text ?? "" }]), [fields.text, s?.rich]);
 	const size = (s?.size ?? 14) * scale;
+	// The UIScales above the node (recorded since 0.7.3): rich text sizes and the stroke are in unscaled units.
+	const uiScale = fields.textScale ?? 1;
 	const style: CSSProperties = {
 		display: "flex",
 		width: "100%",
@@ -215,7 +315,7 @@ function UiText({ fields, scale }: { fields: ExtUiFields; scale: number }) {
 	};
 	if (s && s.strokeTransparency < 1) {
 		const c = rgba(s.strokeColor, s.strokeTransparency);
-		const d = Math.max(0.5, scale);
+		const d = Math.max(0.5, scale * uiScale);
 		style.textShadow = `${d}px 0 ${c}, -${d}px 0 ${c}, 0 ${d}px ${c}, 0 -${d}px ${c}`;
 	}
 	return (
@@ -230,7 +330,7 @@ function UiText({ fields, scale }: { fields: ExtUiFields; scale: number }) {
 					const deco = [rs.underline ? "underline" : "", rs.strike ? "line-through" : ""].filter(Boolean).join(" ");
 					if (deco) css.textDecoration = deco;
 					if (rs.color) css.color = rs.color;
-					if (rs.size) css.fontSize = rs.size * scale;
+					if (rs.size) css.fontSize = rs.size * uiScale * scale;
 					if (rs.face) css.fontFamily = fontStack(rs.face);
 					if (rs.uppercase) css.textTransform = "uppercase";
 					if (rs.smallcaps) css.fontVariant = "small-caps";
@@ -390,6 +490,13 @@ export function UiProperties({ ui, i, t, className }: { ui: ExtUiNode[]; i: numb
 	if (f.corner) rows.push(["Corner", `${f.corner} px`]);
 	if (f.clip) rows.push(["Clips descendants", "yes"]);
 	if (f.gradient) rows.push(["Gradient", <span className="inline-flex flex-wrap gap-1">{f.gradient.keys.map(([at, c], k) => <span key={k}>{Math.round(at * 100)}% <Swatch color={c} /></span>)} · {f.gradient.rotation} deg</span>]);
+	if (f.gradientAlpha && (f.gradientAlpha.keys.length || f.gradientAlpha.offset.some((v) => v !== 0))) {
+		const a = f.gradientAlpha;
+		const keys = a.keys.length ? a.keys.map(([at, tr]) => `${Math.round(at * 100)}%: ${Math.round(tr * 100)}%`).join(", ") : "opaque";
+		rows.push(["Gradient transparency", `${keys}${a.offset.some((v) => v !== 0) ? ` · offset ${a.offset.join(", ")}` : ""}`]);
+	}
+	if (f.group && (f.group.transparency > 0 || f.group.color.toLowerCase() !== "#ffffff")) rows.push(["Group", <span className="inline-flex items-center gap-1">{Math.round(f.group.transparency * 100)}% transparent · <Swatch color={f.group.color} /></span>]);
+	if (f.textScale !== undefined && f.textScale !== 1) rows.push(["UIScale", `${f.textScale}x`]);
 	return (
 		<div className={cn("max-h-80 overflow-auto rounded-md border bg-background p-2 text-xs", className)} data-testid="ui-properties">
 			<div className="mb-1 font-medium">Properties</div>
