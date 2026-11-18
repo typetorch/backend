@@ -654,7 +654,7 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
 - **Live numbers.** `GET /v1/mobile/live?minutes=30` (a mobile app token only; 20 a minute per token) is what the app's
   live watch (every 30 s) and widgets (every 30 min) poll: `{ at, game: { name, universeId, iconUrl }, ccu, servers, delta,
   peakToday, series: [{ t, ccu }], lastHour: { at, avgSessionSeconds, medianSessionSeconds, sessionsEnded, playtimeHours }
-  | null, releases }` (`releases`: the release garden, see Widget stats below). Aggregates only, never a player. `ccu` and `servers` are the live fleet (the count of `GET /v1/fleet/servers`,
+  | null, releases, health }` (`releases`: the release garden, see Widget stats below; `health`: the health card below). Aggregates only, never a player. `ccu` and `servers` are the live fleet (the count of `GET /v1/fleet/servers`,
   cached 5 s). The history is one point a minute in memory for 24 hours, taken by the alert evaluator's sample; after a
   restart the 5-minute metrics rollups (since 00:00 UTC, 6 hours at least) fill in before the first sample, coarser and a
   little high (each server's peak in the bucket; kernels 0.4.2+). `delta`: now minus the point nearest 5 minutes ago (null
@@ -706,6 +706,16 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   prev: null, unit, label }`. Every answer also carries the same object as a top-level `releases` (null without the
   fleet part), asked or not: the widget build in the field keeps only `value`, `prev`, `unit` and `label` of a metric,
   and a live watch's poll asks for no metrics.
+- **Health card.** Every answer carries `health: { errors1h, errorsPrev1h, servers, serversOk, alertsOpen, alerts:
+  [{ level, title, at }] }` (null without the fleet part), aggregates from the services behind the explorer's pages:
+  `errors1h` / `errorsPrev1h` are the **Errors** page's count with no filter (the error store keeps errors only, no
+  warnings) over the last 60 whole minutes, the current one included, and the 60 before; `servers` is the **Fleet**
+  page's live servers and `serversOk` those whose Health badge has no reasons (kernel health ok, a heartbeat within 75
+  s, TPS 50 or more, memory 3,000 MB or less: `src/fleet/health.ts`); `alertsOpen` counts the fleet alerts raised in
+  the last 24 hours that nobody acknowledged (the Alerts table's Acked column; 1,000 at most); `alerts` lists the
+  newest 3 of the last 24 hours, acknowledged or not, with the Message column as `title` (whitespace folded, cut to
+  80 characters with "..."). Cached 60 s, one computation at a time; a failure keeps the last good card (retried after
+  a minute), null before a first one (`src/server/mobile-health.ts`).
 - **Push.** `POST /v1/mobile/push { token: "ExponentPushToken[...]", milestones }` registers the phone (one registration
   per mobile app token, a second call replaces it; the same push token under another token is dropped there; SQLite
   `mobile_push`, 2,000 at most) and answers `{ ok, milestones }`; `DELETE /v1/mobile/push` removes it. Logout, revoke,

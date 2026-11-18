@@ -281,6 +281,8 @@ describe("mobile live and push through the app", () => {
 				// Inside the hour: p1 10 + p2 20 + p3 30 (running, up to now) + p5 15 = 75 min.
 				playtimeHours: 1.3,
 			},
+			// The health card: two live servers, both healthy; no errors or alerts here.
+			health: { errors1h: 0, errorsPrev1h: 0, servers: 2, serversOk: 2, alertsOpen: 0, alerts: [] },
 		});
 		// Aggregates only: no player or session id.
 		for (const pid of ["p1", "p2", "p3", "p5", "p1-s"]) expect(JSON.stringify(body)).not.toContain(`"${pid}"`);
