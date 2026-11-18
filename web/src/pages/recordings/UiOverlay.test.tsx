@@ -9,7 +9,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAssetImages } from "@/lib/asset-images";
 import type { ExtUiNode } from "@/lib/types";
-import { fontStack, rgba, UiOverlay, UiProperties } from "./UiOverlay";
+import { fontStack, gradientCss, gradientMask, gradientStops, rgba, UiOverlay, UiProperties } from "./UiOverlay";
 
 const textStyle = { color: "#ffffff", transparency: 0, size: 20, family: "rbxasset://fonts/families/GothamSSm.json", weight: 700, xAlign: 0, yAlign: 1, scaled: false, wrapped: false, rich: true, strokeTransparency: 1, strokeColor: "#000000" };
 
@@ -90,6 +90,107 @@ describe("UiOverlay", () => {
 		expect(node(2).style.outline).toContain("solid");
 		fireEvent.click(node(2));
 		expect(screen.queryByTestId("ui-properties")).toBeNull();
+	});
+});
+
+describe("framework 0.7.3 fields: gradient transparency, CanvasGroup, UIScale", () => {
+	// gnome's modal "Highlight" (prod sid 9801fd31): a white Frame, UIGradient white -> white, transparency 0.9 -> 1 (0.7) -> 1, rotation 90
+	const highlight = { keys: [[0, "#ffffff"], [1, "#ffffff"]] as [number, string][], rotation: 90 };
+	const highlightAlpha = { keys: [[0, 0.902], [0.702, 1], [1, 1]] as [number, number][], offset: [0, 0] as [number, number] };
+	const white = { color: "#ffffff", transparency: 0 };
+
+	it("merges colour and transparency keypoints onto one stop list, each interpolated at the other's times", () => {
+		expect(
+			gradientStops(
+				[
+					[0, "#ff0000"],
+					[1, "#0000ff"],
+				],
+				[
+					[0, 0],
+					[0.5, 1],
+					[1, 0.5],
+				],
+			),
+		).toEqual([
+			[0, "#ff0000", 0],
+			[0.5, "#800080", 1],
+			[1, "#0000ff", 0.5],
+		]);
+		expect(gradientStops(undefined, [[0.25, 0.5]])).toEqual([[0.25, "#ffffff", 0.5]]);
+		expect(gradientStops([], [])).toEqual([]);
+	});
+
+	it("draws gnome's Highlight as a faint sheen, not an opaque white sheet", () => {
+		expect(gradientCss(highlight, highlightAlpha, white)).toBe("linear-gradient(180deg, rgba(255, 255, 255, 0.098) 0%, rgba(255, 255, 255, 0) 70.2%, rgba(255, 255, 255, 0) 100%)");
+		// before 0.7.3 (no transparency recorded) the same gradient is opaque
+		expect(gradientCss(highlight, undefined, white)).toBe("linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 1) 100%)");
+	});
+
+	it("multiplies the gradient with the background colour and transparency, and shifts the stops by the Offset", () => {
+		expect(gradientCss({ keys: [[0, "#ffffff"], [1, "#808080"]], rotation: 0 }, { keys: [[0, 0.5], [1, 0.5]], offset: [0, 0] }, { color: "#ff0000", transparency: 0.5 })).toBe(
+			"linear-gradient(90deg, rgba(255, 0, 0, 0.25) 0%, rgba(128, 0, 0, 0.25) 100%)",
+		);
+		// Offset: along the direction moves the stops, across it changes nothing
+		expect(gradientCss({ keys: [[0, "#000000"], [1, "#ffffff"]], rotation: 0 }, { keys: [], offset: [0.25, 0.4] }, white)).toBe("linear-gradient(90deg, rgba(0, 0, 0, 1) 25%, rgba(255, 255, 255, 1) 125%)");
+		expect(gradientCss({ keys: [[0, "#000000"], [1, "#ffffff"]], rotation: 90 }, { keys: [], offset: [0, -0.25] }, white)).toBe("linear-gradient(180deg, rgba(0, 0, 0, 1) -25%, rgba(255, 255, 255, 1) 75%)");
+	});
+
+	it("masks text and images by the gradient's transparency (ring gauges)", () => {
+		expect(gradientMask(highlight, undefined)).toBeUndefined();
+		expect(gradientMask(highlight, { keys: [[0, 0], [1, 0]], offset: [0, 0] })).toBeUndefined();
+		expect(gradientMask({ keys: [], rotation: 0 }, { keys: [[0, 0], [0.5, 0], [0.501, 1], [1, 1]], offset: [0, 0] })).toBe(
+			"linear-gradient(90deg, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 1) 50%, rgba(0, 0, 0, 0) 50.1%, rgba(0, 0, 0, 0) 100%)",
+		);
+	});
+
+	const scene: ExtUiNode[] = [
+		{ i: 0, cls: 0, from: 0, to: null, parent: null, f: { order: 0, rect: [0, 0, 800, 600] } },
+		{ i: 1, cls: 1, from: 0, to: null, parent: 0, f: { rect: [0, 0, 800, 600], order: 1, background: white, gradient: highlight, gradientAlpha: highlightAlpha } },
+		{ i: 2, cls: 9, from: 0, to: null, parent: 0, f: { rect: [0, 0, 200, 200], order: 2, background: { color: "#000000", transparency: 0 }, group: { transparency: 0.5, color: "#ffffff" } } },
+		{ i: 3, cls: 9, from: 0, to: null, parent: 2, f: { rect: [0, 0, 100, 100], order: 3, background: { color: "#000000", transparency: 0 }, group: { transparency: 0.5, color: "#ff0000" } } },
+		{ i: 4, cls: 2, from: 0, to: null, parent: 3, f: { rect: [0, 0, 32, 32], order: 4, text: '$<font size="10">5</font>', textStyle: { ...textStyle, size: 32 }, textScale: 2 } },
+		{ i: 5, cls: 9, from: 0, to: null, parent: 0, f: { rect: [0, 0, 50, 50], order: 5, background: { color: "#000000", transparency: 0 }, group: { transparency: 1, color: "#ffffff" } } },
+		{ i: 6, cls: 2, from: 0, to: null, parent: 5, f: { rect: [0, 0, 50, 50], order: 6, text: "hidden", textStyle } },
+		// a HUD hidden by UIScale 0: a 0x0 box whose text size is 0
+		{ i: 7, cls: 2, from: 0, to: null, parent: 0, f: { rect: [300, 300, 0, 0], order: 7, text: "ghost", textStyle: { ...textStyle, size: 0 }, textScale: 0 } },
+		{ i: 8, cls: 5, from: 0, to: null, parent: 0, f: { rect: [400, 0, 50, 50], order: 8, image: "rbxasset://textures/ui/ring.png", imageStyle: { color: "#ffffff", transparency: 0, scaleType: 0 }, gradient: { keys: [], rotation: 0 }, gradientAlpha: { keys: [[0, 0], [0.5, 0], [0.501, 1], [1, 1]], offset: [0, 0] } } },
+	];
+
+	it("draws the sheen in place of the plain background, multiplies CanvasGroup opacity down the tree, scales rich text by textScale", () => {
+		render(<UiOverlay ui={scene} t={0} viewport={{ w: 800, h: 600, inset: 0 }} />);
+		const sheen = node(1);
+		expect(sheen.style.backgroundColor).toBe("");
+		expect(sheen.getAttribute("style")).toContain("linear-gradient");
+		expect(sheen.getAttribute("style")).not.toContain("rgba(255, 255, 255, 1)");
+		expect(node(2).style.opacity).toBe("0.5");
+		expect(node(3).style.opacity).toBe("0.25");
+		expect(node(4).style.opacity).toBe("0.25");
+		// a fully transparent group draws nothing
+		expect(node(5)).toBeNull();
+		expect(node(6)).toBeNull();
+		// TextSize 16 × UIScale 2 recorded as 32; the rich <font size="10"> × 2, all × the 0.5 overlay scale
+		const text = node(4).querySelector("[data-testid=ui-text]") as HTMLElement;
+		expect(text.style.fontSize).toBe("16px");
+		expect((text.querySelector("span span:last-child") as HTMLElement).style.fontSize).toBe("10px");
+		expect(node(7).querySelector("[data-testid=ui-text]")).toBeNull();
+		expect(node(8).querySelector("[data-testid=ui-gradient-mask]")).not.toBeNull();
+		expect(node(1).querySelector("[data-testid=ui-gradient-mask]")).toBeNull();
+	});
+
+	it("lists the new fields in Properties", () => {
+		render(
+			<div>
+				<UiProperties ui={scene} i={1} t={0} />
+				<UiProperties ui={scene} i={3} t={0} />
+				<UiProperties ui={scene} i={4} t={0} />
+			</div>,
+		);
+		const text = screen.getAllByTestId("ui-properties").map((p) => p.textContent);
+		expect(text[0]).toContain("Gradient transparency0%: 90%, 70%: 100%, 100%: 100%");
+		expect(text[1]).toContain("50% transparent");
+		expect(text[1]).toContain("#ff0000");
+		expect(text[2]).toContain("UIScale2x");
 	});
 });
 

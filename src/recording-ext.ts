@@ -63,6 +63,18 @@ export const UI_FIELD_BITS = {
 	parent: 11,
 	clip: 12,
 	gradient: 13,
+	/** UIGradient Transparency keypoints + Offset (framework 0.7.3). */
+	gradientAlpha: 14,
+	/** A u16 second mask follows, then its fields (framework 0.7.3). */
+	more: 15,
+} as const;
+
+/** Second-mask bits (UI bit 15 `more`). */
+export const UI_MORE_BITS = {
+	/** CanvasGroup GroupTransparency + GroupColor3. */
+	group: 0,
+	/** The product of the UIScales on a text node and its GuiObject ancestors. */
+	textScale: 1,
 } as const;
 
 export const UI_CLASSES = ["ScreenGui", "Frame", "TextLabel", "TextButton", "TextBox", "ImageLabel", "ImageButton", "ScrollingFrame", "ViewportFrame", "CanvasGroup", "VideoFrame"] as const;
@@ -147,6 +159,12 @@ export interface ExtUiFields {
 	parent?: number | null;
 	clip?: boolean;
 	gradient?: { keys: [number, string][]; rotation: number };
+	/** UIGradient Transparency keypoints [time, transparency] (empty = opaque) and Offset (framework 0.7.3). */
+	gradientAlpha?: { keys: [number, number][]; offset: [number, number] };
+	/** CanvasGroup GroupTransparency and GroupColor3 (framework 0.7.3). */
+	group?: { transparency: number; color: string };
+	/** A text node's UIScale product (framework 0.7.3; 1 when missing). textStyle.size already includes it. */
+	textScale?: number;
 }
 
 export interface ExtUiNode {
@@ -334,7 +352,24 @@ function readUiFields(p: Payload, mask: number): RawUiFields {
 		}
 		f.gradient = { keys, rotation: p.i16() };
 	}
-	// higher bits: fields this decoder doesn't know; they come last, the record's length skips them
+	if (has(14)) {
+		const n = p.u8();
+		const keys: [number, number][] = [];
+		for (let i = 0; i < n; i++) {
+			const time = unit(p.u8());
+			keys.push([time, unit(p.u8())]);
+		}
+		f.gradientAlpha = { keys, offset: [p.i16() / 1000, p.i16() / 1000] };
+	}
+	if (has(15)) {
+		const more = p.u16();
+		if (more & (1 << UI_MORE_BITS.group)) {
+			const transparency = unit(p.u8());
+			f.group = { transparency, color: p.rgb() };
+		}
+		if (more & (1 << UI_MORE_BITS.textScale)) f.textScale = p.u16() / 1000;
+	}
+	// higher second-mask bits: fields this decoder doesn't know; they come last, the record's length skips them
 	return f;
 }
 

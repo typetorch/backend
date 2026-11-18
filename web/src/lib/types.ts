@@ -629,7 +629,14 @@ export interface ExtUiFields {
 	/** Reparented (changes only): the parent node's `i`, null for none. */
 	parent?: number | null;
 	clip?: boolean;
+	/** UIGradient colour keypoints [time 0..1, #rrggbb] and Rotation (degrees). */
 	gradient?: { keys: [number, string][]; rotation: number };
+	/** UIGradient Transparency keypoints [time, transparency] (empty = opaque) and Offset (framework 0.7.3). */
+	gradientAlpha?: { keys: [number, number][]; offset: [number, number] };
+	/** CanvasGroup GroupTransparency and GroupColor3: multiply into the group and every descendant (framework 0.7.3). */
+	group?: { transparency: number; color: string };
+	/** A text node's UIScale product (framework 0.7.3; 1 when missing). textStyle.size already includes it. */
+	textScale?: number;
 }
 
 /** UI classes (tt-ext-1): 0 ScreenGui, 1 Frame, 2 TextLabel, 3 TextButton, 4 TextBox, 5 ImageLabel, 6 ImageButton, 7 ScrollingFrame, 8 ViewportFrame, 9 CanvasGroup, 10 VideoFrame. */

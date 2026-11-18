@@ -36,6 +36,14 @@ export interface UiFieldsIn {
 	parent?: number;
 	clip?: boolean;
 	gradient?: { keys: [number, number, number, number][]; rotation: number };
+	/** Bit 14 (framework 0.7.3): [time, transparency] keypoints and the Offset. */
+	gradientAlpha?: { keys: [number, number][]; offset: [number, number] };
+	/** Bit 15 second mask, bit 0: [transparency, r, g, b]. */
+	group?: [number, number, number, number];
+	/** Bit 15 second mask, bit 1. */
+	textScale?: number;
+	/** Bit 15 second mask bits this decoder doesn't know, with their bytes (a newer recorder). */
+	moreUnknown?: { bits: number; bytes: number[] };
 }
 
 class Bytes {
@@ -141,6 +149,20 @@ function uiFields(b: Bytes, f: UiFieldsIn): number {
 		b.u8(f.gradient.keys.length);
 		for (const [time, r, g, bl] of f.gradient.keys) b.u8(unitByte(time)).u8(r).u8(g).u8(bl);
 		b.i16(f.gradient.rotation);
+	}
+	if (f.gradientAlpha) {
+		set(14);
+		b.u8(f.gradientAlpha.keys.length);
+		for (const [time, transparency] of f.gradientAlpha.keys) b.u8(unitByte(time)).u8(unitByte(transparency));
+		b.i16(Math.round(f.gradientAlpha.offset[0] * 1000)).i16(Math.round(f.gradientAlpha.offset[1] * 1000));
+	}
+	if (f.group || f.textScale !== undefined || f.moreUnknown) {
+		set(15);
+		const more = (f.group ? 1 : 0) | (f.textScale !== undefined ? 2 : 0) | (f.moreUnknown?.bits ?? 0);
+		b.u16(more);
+		if (f.group) b.u8(unitByte(f.group[0])).u8(f.group[1]).u8(f.group[2]).u8(f.group[3]);
+		if (f.textScale !== undefined) b.u16(Math.round(f.textScale * 1000));
+		if (f.moreUnknown) b.raw(f.moreUnknown.bytes);
 	}
 	return mask;
 }

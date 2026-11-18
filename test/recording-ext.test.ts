@@ -187,6 +187,46 @@ describe("tt-ext-1 decoding", () => {
 		expect(x.ui.map((n) => n.to)).toEqual([null, 500, 500, null]);
 	});
 
+	test("framework 0.7.3 UI fields: gradient transparency + offset (bit 14), CanvasGroup group and text UIScale (bit 15)", () => {
+		// gnome's modal "Highlight": white, transparency 0.9 -> 1 (0.7) -> 1, rotation 90; a CanvasGroup; 2x-scaled text
+		const c = new ExtChunkWriter({ keyframe: true })
+			.keyframe()
+			.string(0, "$")
+			.uiNode(0, 65535, 0, { order: 1, rect: [0, 0, 1920, 1080] })
+			.uiNode(1, 0, 1, { rect: [0, 0, 400, 300], order: 1, background: [255, 255, 255, 0], gradient: { keys: [[0, 255, 255, 255], [1, 255, 255, 255]], rotation: 90 }, gradientAlpha: { keys: [[0, 0.9], [0.7, 1], [1, 1]], offset: [0, -0.25] } })
+			.uiNode(2, 0, 9, { rect: [0, 0, 100, 100], order: 2, background: [0, 0, 0, 1], group: [0.5, 255, 0, 0] })
+			.uiNode(3, 2, 2, { rect: [0, 0, 32, 32], order: 3, text: 0, textStyle: { rgb: [255, 255, 255], transparency: 0, size: 32, family: 0, weight: 400, xAlign: 1, yAlign: 1, flags: 4, strokeTransparency: 1, strokeRgb: [0, 0, 0] }, textScale: 2 })
+			.uiProps(2, { group: [0.25, 255, 255, 255] }, 100) // a second-mask field alone
+			.uiProps(1, { gradientAlpha: { keys: [], offset: [0, 0] } }, 100); // back to opaque
+		const x = decodeTtExt1([c.row(0, T0)], T0);
+		const [, sheen, group, dollar] = x.ui;
+		expect(sheen!.f.gradientAlpha).toEqual({ keys: [[0, 0.902], [0.702, 1], [1, 1]], offset: [0, -0.25] });
+		expect(sheen!.f.gradient).toEqual({ keys: [[0, "#ffffff"], [1, "#ffffff"]], rotation: 90 });
+		expect(sheen!.ch).toEqual([[200, { gradientAlpha: { keys: [], offset: [0, 0] } }]]);
+		expect(group!.f.group).toEqual({ transparency: 0.502, color: "#ff0000" });
+		expect(group!.ch).toEqual([[100, { group: { transparency: 0.251, color: "#ffffff" } }]]);
+		expect(dollar!.f.textScale).toBe(2);
+		expect(dollar!.f.textStyle?.size).toBe(32);
+		expect(dollar!.f.group).toBeUndefined();
+	});
+
+	test("compatibility: a 0.7.2 chunk decodes without the new fields; unknown second-mask bits are skipped by length", () => {
+		const old = new ExtChunkWriter({ keyframe: true }).keyframe().uiNode(0, 65535, 0, { order: 1, rect: [0, 0, 800, 600] }).uiNode(1, 0, 1, { rect: [1, 2, 3, 4], order: 1, background: [1, 2, 3, 0], gradient: { keys: [[0, 0, 0, 0]], rotation: 0 } });
+		const oldChunk = parseTtExt1Chunk(old.finish());
+		const node = oldChunk.records.find((r) => r.tag === 20 && r.id === 1) as Extract<(typeof oldChunk.records)[number], { tag: 20 }>;
+		expect(node.fields).toEqual({ rect: [1, 2, 3, 4], order: 1, background: { color: "#010203", transparency: 0 }, gradient: { keys: [[0, "#000000"]], rotation: 0 } });
+		// a newer recorder: second-mask bit 2 (two bytes this decoder can't read) after a known group; the next record decodes
+		const newer = new ExtChunkWriter({ keyframe: true })
+			.keyframe()
+			.uiNode(0, 65535, 9, { order: 1, rect: [0, 0, 10, 10], group: [0.2, 1, 2, 3], moreUnknown: { bits: 4, bytes: [7, 7] } })
+			.uiGone(0, 50);
+		const chunk = parseTtExt1Chunk(newer.finish());
+		expect(chunk.records.map((r) => r.tag)).toEqual([2, 20, 22]);
+		const first = chunk.records[1] as Extract<(typeof chunk.records)[number], { tag: 20 }>;
+		expect(first.fields).toEqual({ order: 1, rect: [0, 0, 10, 10], group: { transparency: 0.2, color: "#010203" } });
+		expect(chunk.skipped).toBe(0);
+	});
+
 	test("a lost chunk: everything alive ends at the last decoded moment; decoding resumes at the next keyframe chunk", () => {
 		const c0 = new ExtChunkWriter({ keyframe: true }).keyframe().string(0, "mob").spawn(1, 0, 0, [0, 0, 0], 0, [1, 1, 1]).uiNode(0, 65535, 0, {}).view(800, 600, 0, 70, 30, 2000);
 		// chunk 1 lost; chunk 2 has no keyframe (skipped: its string ids mean nothing without the table); chunk 3 resumes
