@@ -2899,7 +2899,13 @@ ${goesTo}
 		log,
 	);
 	// Widget stats (?metrics=): named queries over the warehouse, cached per source (mobile-metrics.ts).
-	const mobileMetrics = new MobileMetrics({ run: () => (warehouse && analytics === "ready" ? (name, filters, options) => (warehouse as Warehouse).query(name, filters, options) : undefined), clock, log });
+	// `releases`: the fleet's deploy history (the Deploys page's rows) per UTC day.
+	const mobileMetrics = new MobileMetrics({
+		run: () => (warehouse && analytics === "ready" ? (name, filters, options) => (warehouse as Warehouse).query(name, filters, options) : undefined),
+		releases: () => (fleet ? (from, to) => fleet.releasesBetween(from, to) : undefined),
+		clock,
+		log,
+	});
 	// The game's icon at a widget's size (thumbnails.roblox.com through the place card's client), kept 6 hours.
 	const gameIcon = new IconCache((universeId) => robloxPlace.gameIcon(universeId), clock, log);
 

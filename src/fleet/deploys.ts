@@ -309,3 +309,22 @@ export async function pruneDeploys(db: FleetDb, now: number, keepDays: number, m
 	await db.run("DELETE FROM deploys WHERE received < ?", [now - keepDays * 86_400_000]);
 	await db.run("DELETE FROM deploys WHERE seq IN (SELECT seq FROM deploys ORDER BY received DESC, seq DESC LIMIT -1 OFFSET ?)", [maxRows]);
 }
+
+/** A release as the widget stats count it (mobile-metrics.ts `releases`): when it started and its channel. */
+export interface ReleaseDay {
+	seq: number;
+	artifact: string | null;
+	channel: string | null;
+	/** deployAt: the CLI's time, else the row's arrival (unix ms). */
+	at: number;
+}
+
+/**
+ * Every release of the history (the rows GET /v1/fleet/deploys lists, every branch) that started in [from, to), oldest
+ * first. The start is deployAt's (the CLI's time in ms, or seconds on older rows; else the arrival), worked out in SQL;
+ * one read of a table bounded by DEPLOYS_MAX_ROWS, no reports.
+ */
+export async function releasesBetween(db: FleetDb, from: number, to: number): Promise<ReleaseDay[]> {
+	const at = "COALESCE(CASE WHEN t < 100000000000 THEN t * 1000 ELSE t END, received)";
+	return db.all<ReleaseDay>(`SELECT seq, artifact, channel, ${at} AS at FROM deploys WHERE ${at} >= ? AND ${at} < ? ORDER BY at, seq LIMIT ?`, [from, to, DEPLOYS_MAX_ROWS]);
+}

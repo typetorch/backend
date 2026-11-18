@@ -13,7 +13,7 @@ import { toMs, type ServerInfo, type ServerLocation } from "../queries/fleet.ts"
 import { columnValuesOf, parseColumnValues } from "./live-debug.ts";
 import type { FleetDb, SqlValue } from "./db.ts";
 import { GEO_OFF, IP_GEO_SCHEMA, type GeoSink, type GeoStatus } from "./geo.ts";
-import { ADDED_DEPLOY_HISTORY_COLUMNS, DEPLOY_ROW_COLUMNS, deployRecords, freezeSummaries, KEEP_DEPLOYS_DAYS, listDeploys, pruneDeploys, type DeployListOptions, type DeployRecord, type DeployRow } from "./deploys.ts";
+import { ADDED_DEPLOY_HISTORY_COLUMNS, DEPLOY_ROW_COLUMNS, deployRecords, freezeSummaries, KEEP_DEPLOYS_DAYS, listDeploys, pruneDeploys, releasesBetween, type DeployListOptions, type DeployRecord, type DeployRow, type ReleaseDay } from "./deploys.ts";
 import { healthReasons } from "./health.ts";
 import type { Notifier } from "./notify.ts";
 
@@ -1776,6 +1776,11 @@ export class FleetService {
 	/** The deploy history, newest first, one page at a time (see deploys.ts). */
 	deployHistory(options: DeployListOptions = {}): Promise<{ deploys: DeployRecord[]; next: number | null }> {
 		return listDeploys(this.db, this.clock(), STUCK_WINDOW_MS, options);
+	}
+
+	/** The history's releases that started in [from, to), oldest first (the mobile widget's `releases` stat). */
+	releasesBetween(from: number, to: number): Promise<ReleaseDay[]> {
+		return releasesBetween(this.db, from, to);
 	}
 
 	/** One release of the history with its report, alerts and neighbors; undefined when the deploys table doesn't have it. */

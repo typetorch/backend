@@ -11,13 +11,18 @@
  *   - `session:<w>` / `playtime:<w>` / `sessions:<w>`: `session-time` (by end, no merge: the Session time page's default)
  *     over the window; its `previous` is the window before;
  *   - `revenue:<w>` / `payers:<w>`: `monetization` (Robux players paid, payers) over the window, and the window before;
- *   - `ccu`, `servers`, `peakToday`: the endpoint's own top-level fields.
+ *   - `ccu`, `servers`, `peakToday`: the endpoint's own top-level fields;
+ *   - `releases`: the fleet's deploy history (the rows the Deploys page lists, every branch) per UTC day for the last
+ *     RELEASE_DAYS days, prod channel vs the rest (mobile docs WIDGET_RELEASES.md, section 1); its own cache entry
+ *     (SQLite, not the warehouse), same TTL and failure rules.
  * One computation ("source") serves every metric that reads it (`session:1h` and `playtime:1h` are one session-time run).
  * Each source is cached METRIC_TTL_MS (`mau` and `d7` METRIC_SLOW_TTL_MS), one computation at a time per source and at
  * most METRIC_CONCURRENCY at once; a failed one keeps the last good numbers (retried after a minute). A request waits at
  * most `waitMs` for a computation (the phone's timeout is 10 s); a slower one finishes in the background for the next
  * poll. At most METRIC_ENTRIES_MAX sources are kept (least recently asked go first).
  */
+
+import type { ReleaseDay } from "../fleet/deploys.ts";
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -46,6 +51,9 @@ export interface MetricValue {
 	unit: MetricUnit;
 	label: string;
 }
+
+/** A metric's answer: `releases` adds its counts and days (when known). */
+export type MetricAnswer = MetricValue & Partial<Omit<Releases, "value">>;
 
 /** A source's numbers by field; `<field>Prev` is the window before. */
 export type Numbers = Record<string, number | null>;
@@ -78,6 +86,7 @@ const FIXED: Record<string, Omit<MetricSpec, "id" | "ttlMs"> & { ttlMs?: number 
 	mau: { unit: "count", label: "MAU", source: `players:${30 * DAY}`, field: "players", ttlMs: METRIC_SLOW_TTL_MS },
 	d1: { unit: "ratio", label: "D1", source: "retention:1", field: "retention" },
 	d7: { unit: "ratio", label: "D7", source: "retention:7", field: "retention", ttlMs: METRIC_SLOW_TTL_MS },
+	releases: { unit: "count", label: "Releases", source: "releases", field: "value" },
 };
 
 const WINDOWED: Record<string, { unit: MetricUnit; label: string; source: "players" | "sessions" | "money"; field: string }> = {
@@ -120,16 +129,16 @@ export function parseMetricsParam(raw: string | null): { ids: string[] } | { err
 /** Runs a named query (warehouse.query). */
 export type RunQuery = (name: string, filters: { from: number; to: number }, options: object) => Promise<unknown>;
 
-interface Entry {
-	value?: Numbers;
+interface Entry<V> {
+	value?: V;
 	computedAt: number;
 	triedAt: number;
 	running?: Promise<void>;
 }
 
 /** Sources by key: fresh within the caller's TTL, else computed (one at a time per key, METRIC_CONCURRENCY at once). */
-export class MetricsCache {
-	private readonly entries = new Map<string, Entry>();
+export class MetricsCache<V = Numbers> {
+	private readonly entries = new Map<string, Entry<V>>();
 	private active = 0;
 	private readonly queue: (() => void)[] = [];
 	/** Computations started (tests). */
@@ -149,7 +158,7 @@ export class MetricsCache {
 	 * The source's numbers: fresh ones, else a computation started (unless one failed in the last minute) and waited
 	 * for up to `waitMs`; then whatever is known (the last good numbers, or undefined). Never throws.
 	 */
-	async get(key: string, ttlMs: number, compute: (now: number) => Promise<Numbers | undefined>, waitMs: number): Promise<Numbers | undefined> {
+	async get(key: string, ttlMs: number, compute: (now: number) => Promise<V | undefined>, waitMs: number): Promise<V | undefined> {
 		const now = this.clock();
 		let e = this.entries.get(key);
 		if (e) {
@@ -187,7 +196,7 @@ export class MetricsCache {
 		return false;
 	}
 
-	private async refresh(key: string, entry: Entry, compute: (now: number) => Promise<Numbers | undefined>): Promise<void> {
+	private async refresh(key: string, entry: Entry<V>, compute: (now: number) => Promise<V | undefined>): Promise<void> {
 		if (this.active >= this.limits.concurrency) await new Promise<void>((r) => this.queue.push(r));
 		this.active++;
 		const now = this.clock();
@@ -278,38 +287,137 @@ export function sourceCompute(source: string, run: RunQuery): (now: number) => P
 	throw new Error(`unknown metric source ${source}`);
 }
 
+// Releases ---------------------------------------------------------------------------------------------------------------
+
+/** `releases`: UTC days counted, today the last. */
+export const RELEASE_DAYS = 60;
+/** `prod30` / `dev30`: the last this many of them. */
+export const RELEASE_RECENT_DAYS = 30;
+
+/** One UTC day of the grid: prod and dev releases, and the widget's colour tokens for its cell. */
+export interface ReleaseCell {
+	date: string;
+	p: number;
+	d: number;
+	bg: string;
+	tri: string;
+}
+
+export interface Releases {
+	/** Prod releases in the RELEASE_DAYS days. */
+	value: number;
+	prod: number;
+	dev: number;
+	prod30: number;
+	dev30: number;
+	/** "today", "1 d ago", "12 d ago"; null without a prod release in the days. */
+	lastProd: string | null;
+	/** "#142 · <artifact>" (the Deploys page's Deploy and Artifact columns), "#142" without an artifact; null likewise. */
+	lastProdLabel: string | null;
+	/** Exactly RELEASE_DAYS, oldest first. */
+	days: ReleaseCell[];
+}
+
+/** 0 for 0, 1 for 1, 2 for 2-3, 3 for 4 and more. */
+export function releaseLevel(n: number): number {
+	return n <= 0 ? 0 : n === 1 ? 1 : n <= 3 ? 2 : 3;
+}
+
+/** A day's cell: green for prod (blue in the corner when dev too), blue for dev alone, r0 for neither. */
+export function releaseCell(date: string, p: number, d: number): ReleaseCell {
+	if (p > 0) return { date, p, d, bg: `rg${releaseLevel(p)}`, tri: d > 0 ? `rb${releaseLevel(d)}` : "rnone" };
+	if (d > 0) return { date, p, d, bg: `rb${releaseLevel(d)}`, tri: "rnone" };
+	return { date, p, d, bg: "r0", tri: "rnone" };
+}
+
+/** The `releases` numbers from the history's releases (any order): prod = channel "prod", anything else dev. */
+export function releasesFrom(rows: readonly ReleaseDay[], now: number): Releases {
+	const today = Math.floor(now / DAY);
+	const first = today - RELEASE_DAYS + 1;
+	const p = new Array<number>(RELEASE_DAYS).fill(0);
+	const d = new Array<number>(RELEASE_DAYS).fill(0);
+	let last: ReleaseDay | undefined;
+	for (const r of rows) {
+		const i = Math.floor(r.at / DAY) - first;
+		if (i < 0 || i >= RELEASE_DAYS) continue;
+		if (r.channel === "prod") {
+			p[i]++;
+			if (!last || r.at > last.at || (r.at === last.at && r.seq > last.seq)) last = r;
+		} else d[i]++;
+	}
+	const sum = (a: number[], from = 0) => a.slice(from).reduce((x, y) => x + y, 0);
+	const recent = RELEASE_DAYS - RELEASE_RECENT_DAYS;
+	const ago = last ? today - Math.floor(last.at / DAY) : null;
+	return {
+		value: sum(p),
+		prod: sum(p),
+		dev: sum(d),
+		prod30: sum(p, recent),
+		dev30: sum(d, recent),
+		lastProd: ago === null ? null : ago === 0 ? "today" : `${ago} d ago`,
+		lastProdLabel: last ? `#${last.seq}${last.artifact ? ` \u00b7 ${last.artifact}` : ""}` : null,
+		days: p.map((n, i) => releaseCell(isoDay(first + i), n, d[i] as number)),
+	};
+}
+
+/** Reads the history's releases that started in [from, to) (FleetService.releasesBetween). */
+export type ReadReleases = (from: number, to: number) => Promise<ReleaseDay[]>;
+
+/** The `releases` computation: the last RELEASE_DAYS UTC days up to the end of today. */
+export function releasesCompute(read: ReadReleases): (now: number) => Promise<Releases> {
+	return async (now) => {
+		const today = Math.floor(now / DAY);
+		return releasesFrom(await read((today - RELEASE_DAYS + 1) * DAY, (today + 1) * DAY), now);
+	};
+}
+
 /** The widget stats: parses the ids, reads (or computes) their sources, shapes the answer. */
 export class MobileMetrics {
 	readonly cache: MetricsCache;
+	/** `releases` (one entry, one computation at a time). */
+	readonly releasesCache: MetricsCache<Releases>;
 
 	constructor(
 		private readonly o: {
 			/** The named-query runner, or undefined while analytics aren't running (those metrics answer null). */
 			run: () => RunQuery | undefined;
+			/** The deploy history's reader, or undefined without the fleet part (`releases` answers null numbers). */
+			releases?: () => ReadReleases | undefined;
 			clock: () => number;
 			log?: (line: string) => void;
 			waitMs?: number;
 		},
 	) {
 		this.cache = new MetricsCache(o.clock, o.log);
+		this.releasesCache = new MetricsCache<Releases>(o.clock, o.log, { entries: 1, concurrency: 1 });
 	}
 
 	/** `metrics` for the asked ids, in order: unknown ids and ids past METRICS_MAX null. `live`: ccu, servers, peakToday (+Prev). */
-	async answer(ids: readonly string[], live: Numbers): Promise<Record<string, MetricValue | null>> {
+	async answer(ids: readonly string[], live: Numbers): Promise<Record<string, MetricAnswer | null>> {
 		const specs = ids.map((id, i) => (i < METRICS_MAX ? parseMetricId(id) : null));
 		const sources = new Map<string, number>();
-		for (const s of specs) if (s && s.source !== "live") sources.set(s.source, Math.min(sources.get(s.source) ?? Number.POSITIVE_INFINITY, s.ttlMs));
+		for (const s of specs) if (s && s.source !== "live" && s.source !== "releases") sources.set(s.source, Math.min(sources.get(s.source) ?? Number.POSITIVE_INFINITY, s.ttlMs));
 		const run = this.o.run();
+		const waitMs = this.o.waitMs ?? METRIC_WAIT_MS;
 		const read = new Map<string, Numbers | undefined>([["live", live]]);
+		const readReleases = specs.some((s) => s?.source === "releases") ? this.o.releases?.() : undefined;
+		const releasesRead = readReleases ? this.releasesCache.get("releases", METRIC_TTL_MS, releasesCompute(readReleases), waitMs) : Promise.resolve(undefined);
 		await Promise.all(
 			[...sources].map(async ([source, ttl]) => {
-				read.set(source, run ? await this.cache.get(source, ttl, sourceCompute(source, run), this.o.waitMs ?? METRIC_WAIT_MS) : undefined);
+				read.set(source, run ? await this.cache.get(source, ttl, sourceCompute(source, run), waitMs) : undefined);
 			}),
 		);
+		const releases = await releasesRead;
 		return Object.fromEntries(
 			ids.map((id, i) => {
 				const spec = specs[i];
 				if (!spec) return [id, null];
+				if (spec.source === "releases") {
+					const base = { value: null, prev: null, unit: spec.unit, label: spec.label };
+					if (!releases) return [id, base];
+					const { value, ...rest } = releases;
+					return [id, { ...base, value, ...rest }];
+				}
 				const numbers = read.get(spec.source);
 				return [id, { value: numbers?.[spec.field] ?? null, prev: numbers?.[`${spec.field}Prev`] ?? null, unit: spec.unit, label: spec.label }];
 			}),
