@@ -257,9 +257,10 @@ describe("mobile live and push through the app", () => {
 		expect(res.headers.get("cache-control")).toBe("no-store");
 		const body = await asJson(res);
 		if (process.env.TT_PRINT_LIVE) console.log(JSON.stringify(body));
-		// The release garden's copy rides on every answer (no deploys here: 60 empty days).
-		const { releases, ...rest } = body as { releases: { days: unknown[]; prod: number; dev: number } } & Record<string, unknown>;
-		expect(releases.days).toHaveLength(60);
+		// The release garden's copy rides on every answer (no deploy history here: 182 "no data" days).
+		const { releases, ...rest } = body as { releases: { days: { bg: string; tri: string }[]; prod: number; dev: number } } & Record<string, unknown>;
+		expect(releases.days).toHaveLength(182);
+		expect(releases.days.every((c) => c.bg === "rnone" && c.tri === "rnone")).toBe(true);
 		expect([releases.prod, releases.dev]).toEqual([0, 0]);
 		// 5 minutes ago (T0 - 5 min) job-1 had 9 players: 9 + 3 = 12; now 23.
 		expect(rest).toEqual({

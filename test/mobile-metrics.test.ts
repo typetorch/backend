@@ -2,14 +2,14 @@
  * The mobile app's widget stats (mobile docs WIDGET_STATS.md, section 1): GET /v1/mobile/live?metrics=... (every metric
  * on seeded sessions, its value and the window before), the parsing of ids and windows, the per-source cache (TTL, one
  * computation at a time, the last good numbers on a failure, bounded), `releases` (mobile docs WIDGET_RELEASES.md,
- * section 1: seeded deploys per UTC day, the cell tokens, lastProd) and `game.iconUrl` (6 h, null on failure). Every
+ * section 1: seeded deploys per UTC day over 26 weeks, the cell tokens, "rnone" before the history, lastProd) and `game.iconUrl` (6 h, null on failure). Every
  * token is made up; no player id ever shows in an answer.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { ICON_RETRY_MS, ICON_TTL_MS, IconCache } from "../src/server/mobile-live.ts";
 import type { ReleaseDay } from "../src/fleet/deploys.ts";
-import { METRICS_MAX, METRICS_PARAM_MAX, METRIC_SLOW_TTL_MS, METRIC_TTL_MS, MetricsCache, MobileMetrics, parseMetricId, parseMetricsParam, parseWindow, releaseCell, releaseLevel, releasesFrom, RELEASE_DAYS, type Numbers } from "../src/server/mobile-metrics.ts";
+import { METRICS_MAX, METRICS_PARAM_MAX, METRIC_SLOW_TTL_MS, METRIC_TTL_MS, MetricsCache, MobileMetrics, parseMetricId, parseMetricsParam, parseWindow, releaseCell, releaseLevel, releasesFrom, RELEASE_DAYS, type Numbers, type ReleaseCell } from "../src/server/mobile-metrics.ts";
 import { ADMIN, API, T0, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
@@ -431,6 +431,8 @@ describe("GET /v1/mobile/live?metrics= through the app", () => {
 describe("widget stats: releases", () => {
 	const day = (ago: number, hour = 12) => (Math.floor(T0 / DAY) - ago) * DAY + hour * HOUR;
 	const rel = (seq: number, channel: string | null, at: number, artifact: string | null = `art-${seq}`): ReleaseDay => ({ seq, artifact, channel, at });
+	/** The cell `ago` days before today (today the last). */
+	const on = (r: { days: ReleaseCell[] }, ago: number) => r.days[RELEASE_DAYS - 1 - ago];
 
 	test("level: 0, 1, 2 for 2-3, 3 for 4+", () => {
 		expect([0, 1, 2, 3, 4, 5, 50].map(releaseLevel)).toEqual([0, 1, 2, 2, 3, 3, 3]);
@@ -455,11 +457,12 @@ describe("widget stats: releases", () => {
 		expect(releaseCell("2026-10-09", 2, 5)).toEqual({ date: "2026-10-09", p: 2, d: 5, bg: "rg2", tri: "rb3" });
 	});
 
-	test("60 UTC days oldest first, today the last; counts over 60 and 30; older and later ones left out", () => {
+	test("182 UTC days (26 weeks) oldest first, today the last; counts over 182 and 30; older and later ones left out", () => {
+		expect(RELEASE_DAYS).toBe(182);
 		const r = releasesFrom(
 			[
-				rel(1, "prod", day(60)), // the day before the first: not counted
-				rel(2, "prod", day(59, 0)), // the first day, 00:00
+				rel(1, "prod", day(182)), // the day before the first: not counted
+				rel(2, "prod", day(181, 0)), // the first day, 00:00
 				rel(3, "dev", day(30, 23)), // just outside the last 30
 				rel(4, "dev", day(29, 0)), // the last 30's first day
 				rel(5, "staging", day(10)), // anything else is dev
@@ -470,19 +473,50 @@ describe("widget stats: releases", () => {
 			],
 			T0,
 		);
-		expect(r.days).toHaveLength(RELEASE_DAYS);
-		expect(r.days[0]?.date).toBe("2026-08-11");
+		expect(r.days).toHaveLength(182);
+		expect(r.days[0]?.date).toBe("2026-04-11");
 		expect(r.days.at(-1)?.date).toBe("2026-10-09");
 		// Consecutive days, oldest first.
 		for (let i = 1; i < r.days.length; i++) expect(Date.parse(r.days[i]?.date as string) - Date.parse(r.days[i - 1]?.date as string)).toBe(DAY);
-		expect(r.days[0]).toEqual({ date: "2026-08-11", p: 1, d: 0, bg: "rg1", tri: "rnone" });
-		expect(r.days[29]).toMatchObject({ p: 0, d: 1, bg: "rb1" });
-		expect(r.days[30]).toMatchObject({ p: 0, d: 1, bg: "rb1" });
-		expect(r.days[49]).toEqual({ date: "2026-09-29", p: 1, d: 2, bg: "rg1", tri: "rb2" });
-		expect(r.days[59]).toEqual({ date: "2026-10-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(r.days[0]).toEqual({ date: "2026-04-11", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		// No history start given: an empty day is r0.
+		expect(r.days[1]).toEqual({ date: "2026-04-12", p: 0, d: 0, bg: "r0", tri: "rnone" });
+		expect(on(r, 30)).toMatchObject({ date: "2026-09-09", p: 0, d: 1, bg: "rb1" });
+		expect(on(r, 29)).toMatchObject({ date: "2026-09-10", p: 0, d: 1, bg: "rb1" });
+		expect(on(r, 10)).toEqual({ date: "2026-09-29", p: 1, d: 2, bg: "rg1", tri: "rb2" });
+		expect(on(r, 0)).toEqual({ date: "2026-10-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
 		expect({ value: r.value, prod: r.prod, dev: r.dev, prod30: r.prod30, dev30: r.dev30 }).toEqual({ value: 3, prod: 3, dev: 4, prod30: 2, dev30: 3 });
 		expect(r.lastProd).toBe("today");
 		expect(r.lastProdLabel).toBe("#8 · art-8");
+	});
+
+	test("no data: days before the history's first release are rnone; its own day and later are normal; no history: all rnone", () => {
+		// The history began 20 days ago at 15:00 (a dev release); a prod release 3 days ago.
+		const r = releasesFrom([rel(1, "dev", day(20, 15)), rel(2, "prod", day(3))], T0, day(20, 15));
+		expect(r.days).toHaveLength(182);
+		for (let ago = 181; ago > 20; ago--) expect(on(r, ago)).toMatchObject({ p: 0, d: 0, bg: "rnone", tri: "rnone" });
+		expect(on(r, 21)).toEqual({ date: "2026-09-18", p: 0, d: 0, bg: "rnone", tri: "rnone" });
+		// The first release's own day, then empty days r0 again.
+		expect(on(r, 20)).toEqual({ date: "2026-09-19", p: 0, d: 1, bg: "rb1", tri: "rnone" });
+		expect(on(r, 19)).toEqual({ date: "2026-09-20", p: 0, d: 0, bg: "r0", tri: "rnone" });
+		expect(on(r, 3)).toMatchObject({ p: 1, bg: "rg1" });
+		expect(on(r, 0)).toMatchObject({ bg: "r0" });
+		expect(r.days.filter((c) => c.bg === "rnone")).toHaveLength(161);
+		expect(r).toMatchObject({ prod: 1, dev: 1, lastProd: "3 d ago" });
+
+		// A history that began before the 182 days: no rnone cell.
+		const old = releasesFrom([rel(2, "prod", day(3))], T0, day(400));
+		expect(old.days.some((c) => c.bg === "rnone")).toBe(false);
+		// It began today: only today is a normal cell.
+		const fresh = releasesFrom([rel(1, "prod", day(0, 0))], T0, day(0, 0));
+		expect(fresh.days.filter((c) => c.bg !== "rnone").map((c) => c.date)).toEqual(["2026-10-09"]);
+		expect(on(fresh, 0)).toMatchObject({ bg: "rg1" });
+
+		// No history at all: every one of the 182 days rnone, nothing counted.
+		const none = releasesFrom([], T0, null);
+		expect(none.days).toHaveLength(182);
+		expect(none.days.every((c) => c.bg === "rnone" && c.tri === "rnone" && c.p === 0 && c.d === 0)).toBe(true);
+		expect(none).toMatchObject({ value: 0, prod: 0, dev: 0, prod30: 0, dev30: 0, lastProd: null, lastProdLabel: null });
 	});
 
 	test("lastProd: today, 1 d ago, n d ago, none; the label without an artifact; the newest prod wins", () => {
@@ -492,18 +526,18 @@ describe("widget stats: releases", () => {
 		const twelve = at([rel(3, "prod", day(12)), rel(2, "prod", day(20)), rel(9, "dev", day(1))]);
 		expect(twelve.lastProd).toBe("12 d ago");
 		expect(twelve.lastProdLabel).toBe("#3 · art-3");
-		expect(at([rel(5, "prod", day(59, 0), null)])).toMatchObject({ lastProd: "59 d ago", lastProdLabel: "#5" });
+		expect(at([rel(5, "prod", day(181, 0), null)])).toMatchObject({ lastProd: "181 d ago", lastProdLabel: "#5" });
 		// Same start: the higher seq.
 		expect(at([rel(7, "prod", day(2)), rel(6, "prod", day(2))]).lastProdLabel).toBe("#7 · art-7");
-		// None in the 60 days (dev only, or prod older).
-		const none = at([rel(1, "prod", day(60)), rel(2, "dev", day(3))]);
+		// None in the 182 days (dev only, or prod older).
+		const none = at([rel(1, "prod", day(182)), rel(2, "dev", day(3))]);
 		expect(none).toMatchObject({ value: 0, prod: 0, dev: 1, lastProd: null, lastProdLabel: null });
 		const empty = at([]);
 		expect(empty.days).toHaveLength(RELEASE_DAYS);
 		expect(empty.days.every((c) => c.bg === "r0" && c.tri === "rnone" && c.p === 0 && c.d === 0)).toBe(true);
 	});
 
-	test("answer(): cached 5 minutes, one read at a time, a failure keeps the last good value; no fleet: null numbers; counts toward 12", async () => {
+	test("answer(): reads the whole history from 0, cached 5 minutes, one read at a time, a failure keeps the last good value; no fleet: null numbers; counts toward 12", async () => {
 		let now = T0;
 		let rows: ReleaseDay[] = [rel(1, "prod", day(1))];
 		let fail = false;
@@ -521,18 +555,30 @@ describe("widget stats: releases", () => {
 		const [a, b] = await Promise.all([ask(), ask()]);
 		expect(a).toMatchObject({ value: 1, prev: null, unit: "count", label: "Releases", lastProd: "1 d ago" });
 		expect(b).toEqual(a);
-		expect(reads).toEqual([[Date.UTC(2026, 7, 11), Date.UTC(2026, 9, 10)]]);
-		rows = [rel(1, "prod", day(1)), rel(2, "prod", day(0))];
+		// From 0 to the end of today: the history's first release is its earliest row.
+		expect(reads).toEqual([[0, Date.UTC(2026, 9, 10)]]);
+		expect(a?.days?.at(-3)?.bg).toBe("rnone");
+		expect(a?.days?.at(-2)?.bg).toBe("rg1");
+		expect(a?.days?.at(-1)?.bg).toBe("r0");
+		// An older first release (before the 182 days): no rnone.
+		rows = [rel(9, "dev", day(300)), rel(1, "prod", day(1)), rel(2, "prod", day(0))];
 		now += METRIC_TTL_MS - 1;
 		expect((await ask())?.value).toBe(1);
 		now += 1;
-		expect(await ask()).toMatchObject({ value: 2, lastProd: "today", lastProdLabel: "#2 · art-2" });
+		const c = await ask();
+		expect(c).toMatchObject({ value: 2, dev: 0, lastProd: "today", lastProdLabel: "#2 · art-2" });
+		expect(c?.days?.some((cell) => cell.bg === "rnone")).toBe(false);
 		fail = true;
 		now += METRIC_TTL_MS;
 		expect(await ask()).toMatchObject({ value: 2, lastProd: "today" });
 		expect(reads).toHaveLength(3);
 		// The key order of the answer.
 		expect(Object.keys((await ask()) as object)).toEqual(["value", "prev", "unit", "label", "prod", "dev", "prod30", "dev30", "lastProd", "lastProdLabel", "days"]);
+		// No history at all: every day rnone.
+		const empty = new MobileMetrics({ clock: () => T0, run: () => undefined, releases: () => async () => [] });
+		const e = (await empty.answer(["releases"], {})).releases;
+		expect(e?.days).toHaveLength(182);
+		expect(e?.days?.every((cell) => cell.bg === "rnone" && cell.tri === "rnone")).toBe(true);
 
 		// Past the 12th id: null, never read.
 		const many = [...Array.from({ length: 12 }, (_, i) => `ccu${i}`), "releases"];
@@ -551,6 +597,7 @@ describe("GET /v1/mobile/live?metrics=releases through the app", () => {
 	let token = "";
 	const N = T0;
 	const day = (ago: number, hour = 12) => (Math.floor(N / DAY) - ago) * DAY + hour * HOUR;
+	const on = (r: { days: ReleaseCell[] }, ago: number) => r.days[RELEASE_DAYS - 1 - ago];
 	/** The CLI's POST /v1/fleet/deploy at `at` (the backend's clock there too), processed before the next. */
 	const deploy = async (seq: number, ch: string | null, at: number, o: { t?: number } = {}) => {
 		h.setNow(at);
@@ -561,12 +608,12 @@ describe("GET /v1/mobile/live?metrics=releases through the app", () => {
 
 	beforeAll(async () => {
 		h = await harness();
-		// 61 and 60 days ago: before the first day (2026-08-11), not counted.
+		// The history's first release, 61 days ago; one 60 days ago.
 		await deploy(1, "prod", day(61));
 		await deploy(2, "prod", day(60, 23));
-		// The first day: one dev.
+		// 59 days ago: one dev.
 		await deploy(3, "dev", day(59, 0) + MIN);
-		// 40 days ago: one prod (in the 60, not in the last 30).
+		// 40 days ago: one prod (not in the last 30).
 		await deploy(4, "prod", day(40));
 		// 10 days ago: two prod and a dev without a channel (the dashboard shows "–": dev).
 		await deploy(5, "prod", day(10, 9));
@@ -594,22 +641,30 @@ describe("GET /v1/mobile/live?metrics=releases through the app", () => {
 		return asJson(res);
 	};
 
-	test("counted per UTC day from the Deploys page's rows: prod vs the rest, 60 days, today the last", async () => {
+	test("counted per UTC day from the Deploys page's rows: prod vs the rest, 182 days, today the last, rnone before the history", async () => {
 		const body = await live("?metrics=releases,ccu");
 		expect(Object.keys(body.metrics)).toEqual(["releases", "ccu"]);
 		const r = body.metrics.releases;
-		if (process.env.TT_PRINT_LIVE) console.log(JSON.stringify({ ...r, days: r.days.slice(-12) }, null, 2));
-		expect(r).toMatchObject({ value: 4, prev: null, unit: "count", label: "Releases", prod: 4, dev: 9, prod30: 3, dev30: 8, lastProd: "today", lastProdLabel: "#15 · a1b2c3d-000015" });
-		expect(r.days).toHaveLength(60);
-		expect(r.days[0]).toEqual({ date: "2026-08-11", p: 0, d: 1, bg: "rb1", tri: "rnone" });
-		const on = (ago: number) => r.days[59 - ago];
-		expect(on(40)).toEqual({ date: "2026-08-30", p: 1, d: 0, bg: "rg1", tri: "rnone" });
-		expect(on(10)).toEqual({ date: "2026-09-29", p: 2, d: 1, bg: "rg2", tri: "rb1" });
-		expect(on(5)).toEqual({ date: "2026-10-04", p: 0, d: 6, bg: "rb3", tri: "rnone" });
-		expect(on(4)).toMatchObject({ p: 0, d: 0, bg: "r0" });
-		expect(on(2)).toEqual({ date: "2026-10-07", p: 0, d: 1, bg: "rb1", tri: "rnone" });
-		expect(on(0)).toEqual({ date: "2026-10-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
-		expect(r.days.reduce((n: number, c: { p: number; d: number }) => n + c.p + c.d, 0)).toBe(13);
+		if (process.env.TT_PRINT_LIVE) console.log(JSON.stringify({ ...r, days: [...r.days.slice(118, 123), "...", ...r.days.slice(-12)] }, null, 2));
+		expect(r).toMatchObject({ value: 6, prev: null, unit: "count", label: "Releases", prod: 6, dev: 9, prod30: 3, dev30: 8, lastProd: "today", lastProdLabel: "#15 · a1b2c3d-000015" });
+		// The top-level copy (the widgets draw from it) is the same.
+		expect(body.releases).toEqual(r);
+		expect(r.days).toHaveLength(182);
+		expect(r.days[0]).toEqual({ date: "2026-04-11", p: 0, d: 0, bg: "rnone", tri: "rnone" });
+		// Before the history's first release (61 days ago): no data.
+		expect(r.days.filter((c: ReleaseCell) => c.bg === "rnone")).toHaveLength(181 - 61);
+		expect(on(r, 62)).toEqual({ date: "2026-08-08", p: 0, d: 0, bg: "rnone", tri: "rnone" });
+		expect(on(r, 61)).toEqual({ date: "2026-08-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(on(r, 60)).toEqual({ date: "2026-08-10", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(on(r, 59)).toEqual({ date: "2026-08-11", p: 0, d: 1, bg: "rb1", tri: "rnone" });
+		expect(on(r, 58)).toEqual({ date: "2026-08-12", p: 0, d: 0, bg: "r0", tri: "rnone" });
+		expect(on(r, 40)).toEqual({ date: "2026-08-30", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(on(r, 10)).toEqual({ date: "2026-09-29", p: 2, d: 1, bg: "rg2", tri: "rb1" });
+		expect(on(r, 5)).toEqual({ date: "2026-10-04", p: 0, d: 6, bg: "rb3", tri: "rnone" });
+		expect(on(r, 4)).toMatchObject({ p: 0, d: 0, bg: "r0" });
+		expect(on(r, 2)).toEqual({ date: "2026-10-07", p: 0, d: 1, bg: "rb1", tri: "rnone" });
+		expect(on(r, 0)).toEqual({ date: "2026-10-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(r.days.reduce((n: number, c: { p: number; d: number }) => n + c.p + c.d, 0)).toBe(15);
 
 		// The same rows the Deploys page lists: all 15, the channel as it shows it.
 		const page = await asJson(await h.call("/v1/fleet/deploys?limit=100", { headers: bearer(ADMIN) }));
@@ -620,17 +675,27 @@ describe("GET /v1/mobile/live?metrics=releases through the app", () => {
 	test("cached 5 minutes; a new day moves the grid", async () => {
 		await deploy(16, "prod", N + MIN);
 		h.setNow(N + 4 * MIN);
-		expect((await live("?metrics=releases")).metrics.releases.prod).toBe(4);
+		expect((await live("?metrics=releases")).metrics.releases.prod).toBe(6);
 		h.setNow(N + 6 * MIN);
 		const r = (await live("?metrics=releases")).metrics.releases;
-		expect(r).toMatchObject({ prod: 5, prod30: 4, lastProd: "today", lastProdLabel: "#16 · a1b2c3d-000016" });
+		expect(r).toMatchObject({ prod: 7, prod30: 4, lastProd: "today", lastProdLabel: "#16 · a1b2c3d-000016" });
 		expect(r.days.at(-1)).toMatchObject({ p: 2, bg: "rg2" });
-		// Tomorrow: today's releases are 1 d ago, the first day drops off.
+		// Tomorrow: today's releases are 1 d ago, the grid starts a day later.
 		h.setNow(N + DAY);
 		const next = (await live("?metrics=releases")).metrics.releases;
-		expect(next.days).toHaveLength(60);
-		expect(next.days[0].date).toBe("2026-08-12");
+		expect(next.days).toHaveLength(182);
+		expect(next.days[0].date).toBe("2026-04-12");
 		expect(next.days.at(-1)).toEqual({ date: "2026-10-10", p: 0, d: 0, bg: "r0", tri: "rnone" });
-		expect(next).toMatchObject({ prod: 5, dev: 8, lastProd: "1 d ago" });
+		expect(next).toMatchObject({ prod: 7, dev: 9, lastProd: "1 d ago" });
+		expect(next.days.filter((c: ReleaseCell) => c.bg === "rnone")).toHaveLength(181 - 62);
+	});
+
+	test("a release older than the 182 days: not counted, but the history starts before the grid (no rnone left)", async () => {
+		await deploy(100, "prod", day(200));
+		h.setNow(N + DAY + 10 * MIN);
+		const r = (await live("?metrics=releases")).metrics.releases;
+		expect(r).toMatchObject({ prod: 7, dev: 9, lastProd: "1 d ago", lastProdLabel: "#16 · a1b2c3d-000016" });
+		expect(r.days.some((c: ReleaseCell) => c.bg === "rnone")).toBe(false);
+		expect(r.days[0]).toEqual({ date: "2026-04-12", p: 0, d: 0, bg: "r0", tri: "rnone" });
 	});
 });

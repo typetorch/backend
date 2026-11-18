@@ -13,7 +13,8 @@
  *   - `revenue:<w>` / `payers:<w>`: `monetization` (Robux players paid, payers) over the window, and the window before;
  *   - `ccu`, `servers`, `peakToday`: the endpoint's own top-level fields;
  *   - `releases`: the fleet's deploy history (the rows the Deploys page lists, every branch) per UTC day for the last
- *     RELEASE_DAYS days, prod channel vs the rest (mobile docs WIDGET_RELEASES.md, section 1); its own cache entry
+ *     RELEASE_DAYS days (26 weeks), prod channel vs the rest, days before its first release "rnone" (no data) (mobile
+ *     docs WIDGET_RELEASES.md, section 1); its own cache entry
  *     (SQLite, not the warehouse), same TTL and failure rules.
  * One computation ("source") serves every metric that reads it (`session:1h` and `playtime:1h` are one session-time run).
  * Each source is cached METRIC_TTL_MS (`mau` and `d7` METRIC_SLOW_TTL_MS), one computation at a time per source and at
@@ -289,8 +290,8 @@ export function sourceCompute(source: string, run: RunQuery): (now: number) => P
 
 // Releases ---------------------------------------------------------------------------------------------------------------
 
-/** `releases`: UTC days counted, today the last. */
-export const RELEASE_DAYS = 60;
+/** `releases`: UTC days counted, today the last (26 weeks: the widget lays them out in columns of 7). */
+export const RELEASE_DAYS = 182;
 /** `prod30` / `dev30`: the last this many of them. */
 export const RELEASE_RECENT_DAYS = 30;
 
@@ -304,7 +305,7 @@ export interface ReleaseCell {
 }
 
 export interface Releases {
-	/** Prod releases in the RELEASE_DAYS days. */
+	/** Prod releases in the RELEASE_DAYS days (prod / dev likewise; prod30 / dev30 the last 30). */
 	value: number;
 	prod: number;
 	dev: number;
@@ -314,7 +315,7 @@ export interface Releases {
 	lastProd: string | null;
 	/** "#142 · <artifact>" (the Deploys page's Deploy and Artifact columns), "#142" without an artifact; null likewise. */
 	lastProdLabel: string | null;
-	/** Exactly RELEASE_DAYS, oldest first. */
+	/** Exactly RELEASE_DAYS, oldest first; days before the deploy history began have bg and tri "rnone" (no data). */
 	days: ReleaseCell[];
 }
 
@@ -330,8 +331,11 @@ export function releaseCell(date: string, p: number, d: number): ReleaseCell {
 	return { date, p, d, bg: "r0", tri: "rnone" };
 }
 
-/** The `releases` numbers from the history's releases (any order): prod = channel "prod", anything else dev. */
-export function releasesFrom(rows: readonly ReleaseDay[], now: number): Releases {
+/**
+ * The `releases` numbers from the history's releases (any order): prod = channel "prod", anything else dev. Days before
+ * [historyStart] (the history's first release, ms; null: no history at all) are "no data" cells.
+ */
+export function releasesFrom(rows: readonly ReleaseDay[], now: number, historyStart?: number | null): Releases {
 	const today = Math.floor(now / DAY);
 	const first = today - RELEASE_DAYS + 1;
 	const p = new Array<number>(RELEASE_DAYS).fill(0);
@@ -356,18 +360,27 @@ export function releasesFrom(rows: readonly ReleaseDay[], now: number): Releases
 		dev30: sum(d, recent),
 		lastProd: ago === null ? null : ago === 0 ? "today" : `${ago} d ago`,
 		lastProdLabel: last ? `#${last.seq}${last.artifact ? ` \u00b7 ${last.artifact}` : ""}` : null,
-		days: p.map((n, i) => releaseCell(isoDay(first + i), n, d[i] as number)),
+		days: p.map((n, i) => {
+			const cell = releaseCell(isoDay(first + i), n, d[i] as number);
+			const before = historyStart === null || (historyStart !== undefined && first + i < Math.floor(historyStart / DAY));
+			return before ? { ...cell, bg: "rnone", tri: "rnone" } : cell;
+		}),
 	};
 }
 
 /** Reads the history's releases that started in [from, to) (FleetService.releasesBetween). */
 export type ReadReleases = (from: number, to: number) => Promise<ReleaseDay[]>;
 
-/** The `releases` computation: the last RELEASE_DAYS UTC days up to the end of today. */
+/**
+ * The `releases` computation: the last RELEASE_DAYS UTC days up to the end of today. It reads the whole kept history
+ * (at most DEPLOYS_MAX_ROWS small rows, every 5 minutes) so the days before its first release can be told apart.
+ */
 export function releasesCompute(read: ReadReleases): (now: number) => Promise<Releases> {
 	return async (now) => {
 		const today = Math.floor(now / DAY);
-		return releasesFrom(await read((today - RELEASE_DAYS + 1) * DAY, (today + 1) * DAY), now);
+		const rows = await read(0, (today + 1) * DAY);
+		const start = rows.reduce<number | null>((min, r) => (min === null || r.at < min ? r.at : min), null);
+		return releasesFrom(rows, now, start);
 	};
 }
 

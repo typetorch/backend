@@ -654,7 +654,7 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
 - **Live numbers.** `GET /v1/mobile/live?minutes=30` (a mobile app token only; 20 a minute per token) is what the app's
   live watch (every 30 s) and widgets (every 30 min) poll: `{ at, game: { name, universeId, iconUrl }, ccu, servers, delta,
   peakToday, series: [{ t, ccu }], lastHour: { at, avgSessionSeconds, medianSessionSeconds, sessionsEnded, playtimeHours }
-  | null }`. Aggregates only, never a player. `ccu` and `servers` are the live fleet (the count of `GET /v1/fleet/servers`,
+  | null, releases }` (`releases`: the release garden, see Widget stats below). Aggregates only, never a player. `ccu` and `servers` are the live fleet (the count of `GET /v1/fleet/servers`,
   cached 5 s). The history is one point a minute in memory for 24 hours, taken by the alert evaluator's sample; after a
   restart the 5-minute metrics rollups (since 00:00 UTC, 6 hours at least) fill in before the first sample, coarser and a
   little high (each server's peak in the bucket; kernels 0.4.2+). `delta`: now minus the point nearest 5 minutes ago (null
@@ -681,7 +681,7 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   | `sessions:<w>` | sessions that ended in the window | `session-time` |
   | `revenue:<w>` | Robux players paid (server-sent purchases) | `monetization` |
   | `payers:<w>` | unique paying players | `monetization` |
-  | `releases` | prod-channel releases in the last 60 UTC days (prev null), with the per-day grid below | the fleet's deploy history |
+  | `releases` | prod-channel releases in the last 182 UTC days (26 weeks; prev null), with the per-day grid below | the fleet's deploy history |
 
   Metrics that read the same query and window share one computation (`session:1h`, `playtime:1h`). Each is cached 5
   minutes (`mau` and `d7` 15), one computation at a time per source and two at once; a failure keeps the last good
@@ -693,14 +693,19 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   fleet's `deploys` table, every branch, releases known only from server reports too) on the UTC day each started (the
   CLI's time, else when the backend first heard of it). A release is prod when its channel is `prod` (the channel the
   deploy page shows), anything else, no channel included, is dev. Next to `value`, `prev`, `unit`, `label` it carries
-  `prod`, `dev` (the 60 days), `prod30`, `dev30` (the last 30), `lastProd` (`"today"`, `"1 d ago"`, `"12 d ago"`; null
-  without a prod release in the 60 days), `lastProdLabel` (`"#142 · <artifact>"`, the Deploy and Artifact columns;
-  `"#142"` without an artifact; null likewise) and `days`: exactly 60 `{ date, p, d, bg, tri }`, oldest first, the
-  last today. `bg` / `tri` are the widget's colour tokens, with level 0 for 0, 1 for 1, 2 for 2-3, 3 for 4+: a day with
-  prod releases is `rg<level p>` with `rb<level d>` in the corner (`rnone` without dev ones), a dev-only day `rb<level
-  d>` / `rnone`, an empty one `r0` / `rnone`. One SQLite read (no reports), cached 5 minutes in its own entry (one
-  computation at a time, a failure keeps the last good value); it counts toward the 12 ids like any other. Without the
-  fleet part it answers `{ value: null, prev: null, unit, label }`.
+  `prod`, `dev` (the 182 days), `prod30`, `dev30` (the last 30), `lastProd` (`"today"`, `"1 d ago"`, `"12 d ago"`;
+  null without a prod release in the 182 days), `lastProdLabel` (`"#142 · <artifact>"`, the Deploy and Artifact
+  columns; `"#142"` without an artifact; null likewise) and `days`: exactly 182 `{ date, p, d, bg, tri }` (26 weeks, the
+  widget draws columns of 7), oldest first, the last today. `bg` / `tri` are the widget's colour tokens, with level 0
+  for 0, 1 for 1, 2 for 2-3, 3 for 4+: a day with prod releases is `rg<level p>` with `rb<level d>` in the corner
+  (`rnone` without dev ones), a dev-only day `rb<level d>` / `rnone`, an empty one `r0` / `rnone`. Days before the
+  history's first kept release (its UTC day) are "no data", `rnone` / `rnone` (drawn as nothing); a game with no deploy
+  history at all has all 182 so. It reads the whole kept history (one SQLite read of at most 10,000 small rows, no
+  reports) to find that first release, cached 5 minutes in its own entry (one computation at a time, a failure keeps
+  the last good value); it counts toward the 12 ids like any other. Without the fleet part it answers `{ value: null,
+  prev: null, unit, label }`. Every answer also carries the same object as a top-level `releases` (null without the
+  fleet part), asked or not: the widget build in the field keeps only `value`, `prev`, `unit` and `label` of a metric,
+  and a live watch's poll asks for no metrics.
 - **Push.** `POST /v1/mobile/push { token: "ExponentPushToken[...]", milestones }` registers the phone (one registration
   per mobile app token, a second call replaces it; the same push token under another token is dropped there; SQLite
   `mobile_push`, 2,000 at most) and answers `{ ok, milestones }`; `DELETE /v1/mobile/push` removes it. Logout, revoke,
