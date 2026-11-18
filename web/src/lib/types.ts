@@ -766,6 +766,8 @@ export interface PlayerSummary {
 	/** Robux spent in the range (server-sent purchase rows, each once); 0 for none. Older backends leave it out. */
 	robux?: number;
 	newInRange: boolean;
+	/** When their latest session in the range started. Older backends leave it out. */
+	lastSessionStart?: string;
 	/** The UserId, when the server knows it (identity rows). */
 	uid?: number;
 }

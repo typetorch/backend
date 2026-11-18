@@ -220,6 +220,23 @@ describe("the server page", () => {
 		expect(JSON.stringify(client.getQueryCache().getAll().map((q) => q.state.data))).not.toContain(MARKER);
 	});
 
+	it("Players: the name links to the player's page, with the session, session count and all-time playtime", async () => {
+		mockApi();
+		const identity = vi.spyOn(api, "identity").mockImplementation(async () => [{ pid: "pid777001aa", uid: 777001, firstSeen: "", lastSeen: "" }]);
+		const start = new Date(Date.now() - 12 * 60_000).toISOString();
+		const query = vi.spyOn(api, "query").mockImplementation((async () => ({
+			players: [{ pid: "pid777001aa", firstSeen: start, lastSeen: start, sessions: 14, events: 9, playtimeMinutes: 185, robux: 0, newInRange: false, lastSessionStart: start }],
+		})) as never);
+		mount(`/servers/${JOB}?tab=players`);
+		const link = await screen.findByRole("link", { name: `Marker (@${MARKER})` });
+		expect(link.getAttribute("href")).toContain("pid=pid777001aa");
+		expect(identity).toHaveBeenCalledWith({ uid: 777001 }, expect.anything());
+		expect(query).toHaveBeenCalledWith("players", { from: "2000-01-01" }, { pids: ["pid777001aa"], limit: 1 }, expect.anything());
+		expect(await screen.findByText("14")).toBeTruthy();
+		expect(screen.getByText("3.1 h")).toBeTruthy();
+		expect(screen.getByText(/^12m \d\ds$/)).toBeTruthy();
+	});
+
 	it("the Logs tab fetches the server's newest lines, then only newer ones", async () => {
 		const { remoteCommand } = mockApi();
 		mount(`/servers/${JOB}?tab=logs`);
