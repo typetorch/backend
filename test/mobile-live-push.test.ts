@@ -257,8 +257,12 @@ describe("mobile live and push through the app", () => {
 		expect(res.headers.get("cache-control")).toBe("no-store");
 		const body = await asJson(res);
 		if (process.env.TT_PRINT_LIVE) console.log(JSON.stringify(body));
+		// The release garden's copy rides on every answer (no deploys here: 60 empty days).
+		const { releases, ...rest } = body as { releases: { days: unknown[]; prod: number; dev: number } } & Record<string, unknown>;
+		expect(releases.days).toHaveLength(60);
+		expect([releases.prod, releases.dev]).toEqual([0, 0]);
 		// 5 minutes ago (T0 - 5 min) job-1 had 9 players: 9 + 3 = 12; now 23.
-		expect(body).toEqual({
+		expect(rest).toEqual({
 			at: new Date(T0).toISOString(),
 			// No icon from the fake thumbnails service: null.
 			game: { name: "The Prison", universeId: 123456789, iconUrl: null },

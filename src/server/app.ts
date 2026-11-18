@@ -2977,6 +2977,10 @@ ${goesTo}
 		const peakToday = Math.max(ccuHistory.peakSince(utcMidnight(now)) ?? 0, totals.players);
 		// Only when asked: without `metrics` the answer and its cost stay as before.
 		const metrics = asked ? await mobileMetrics.answer(asked.ids, { ccu: totals.players, ccuPrev: before, servers: totals.servers, peakToday }) : undefined;
+		// The release garden's data on every answer (cached 5 min, one cheap read): the widget APK in the field keeps
+		// unknown top-level fields but only value / prev / unit / label of a metric, and a live watch's poll asks for no
+		// metrics; this copy is what the widgets draw from.
+		const garden = metrics?.releases !== undefined ? metrics.releases : ((await mobileMetrics.answer(["releases"], { ccu: totals.players, ccuPrev: before, servers: totals.servers, peakToday }).catch(() => undefined))?.releases ?? null);
 		return json(200, {
 			at: new Date(now).toISOString(),
 			game: { ...game, iconUrl },
@@ -2986,6 +2990,7 @@ ${goesTo}
 			peakToday,
 			series: ccuHistory.series(now, minutes),
 			lastHour: hour,
+			releases: garden,
 			...(metrics ? { metrics } : {}),
 		});
 	}
