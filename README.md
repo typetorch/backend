@@ -681,12 +681,26 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   | `sessions:<w>` | sessions that ended in the window | `session-time` |
   | `revenue:<w>` | Robux players paid (server-sent purchases) | `monetization` |
   | `payers:<w>` | unique paying players | `monetization` |
+  | `releases` | prod-channel releases in the last 60 UTC days (prev null), with the per-day grid below | the fleet's deploy history |
 
   Metrics that read the same query and window share one computation (`session:1h`, `playtime:1h`). Each is cached 5
   minutes (`mau` and `d7` 15), one computation at a time per source and two at once; a failure keeps the last good
   numbers (retried after a minute). A request waits up to 8 s for a computation and otherwise answers the last good
   numbers (or null) while it finishes for the next poll; at most 64 sources are kept. Without analytics those metrics
   answer `{ value: null, prev: null, unit, label }`. Aggregates only, never a player.
+
+  `releases` (the mobile app's release garden widget) counts the rows the explorer's **Deploys** page lists (the
+  fleet's `deploys` table, every branch, releases known only from server reports too) on the UTC day each started (the
+  CLI's time, else when the backend first heard of it). A release is prod when its channel is `prod` (the channel the
+  deploy page shows), anything else, no channel included, is dev. Next to `value`, `prev`, `unit`, `label` it carries
+  `prod`, `dev` (the 60 days), `prod30`, `dev30` (the last 30), `lastProd` (`"today"`, `"1 d ago"`, `"12 d ago"`; null
+  without a prod release in the 60 days), `lastProdLabel` (`"#142 · <artifact>"`, the Deploy and Artifact columns;
+  `"#142"` without an artifact; null likewise) and `days`: exactly 60 `{ date, p, d, bg, tri }`, oldest first, the
+  last today. `bg` / `tri` are the widget's colour tokens, with level 0 for 0, 1 for 1, 2 for 2-3, 3 for 4+: a day with
+  prod releases is `rg<level p>` with `rb<level d>` in the corner (`rnone` without dev ones), a dev-only day `rb<level
+  d>` / `rnone`, an empty one `r0` / `rnone`. One SQLite read (no reports), cached 5 minutes in its own entry (one
+  computation at a time, a failure keeps the last good value); it counts toward the 12 ids like any other. Without the
+  fleet part it answers `{ value: null, prev: null, unit, label }`.
 - **Push.** `POST /v1/mobile/push { token: "ExponentPushToken[...]", milestones }` registers the phone (one registration
   per mobile app token, a second call replaces it; the same push token under another token is dropped there; SQLite
   `mobile_push`, 2,000 at most) and answers `{ ok, milestones }`; `DELETE /v1/mobile/push` removes it. Logout, revoke,

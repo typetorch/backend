@@ -1,14 +1,16 @@
 /**
  * The mobile app's widget stats (mobile docs WIDGET_STATS.md, section 1): GET /v1/mobile/live?metrics=... (every metric
  * on seeded sessions, its value and the window before), the parsing of ids and windows, the per-source cache (TTL, one
- * computation at a time, the last good numbers on a failure, bounded) and `game.iconUrl` (6 h, null on failure). Every
+ * computation at a time, the last good numbers on a failure, bounded), `releases` (mobile docs WIDGET_RELEASES.md,
+ * section 1: seeded deploys per UTC day, the cell tokens, lastProd) and `game.iconUrl` (6 h, null on failure). Every
  * token is made up; no player id ever shows in an answer.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { ICON_RETRY_MS, ICON_TTL_MS, IconCache } from "../src/server/mobile-live.ts";
-import { METRICS_MAX, METRICS_PARAM_MAX, METRIC_SLOW_TTL_MS, METRIC_TTL_MS, MetricsCache, MobileMetrics, parseMetricId, parseMetricsParam, parseWindow, type Numbers } from "../src/server/mobile-metrics.ts";
-import { ADMIN, API, T0, asJson, bearer, harness, type Harness } from "./harness.ts";
+import type { ReleaseDay } from "../src/fleet/deploys.ts";
+import { METRICS_MAX, METRICS_PARAM_MAX, METRIC_SLOW_TTL_MS, METRIC_TTL_MS, MetricsCache, MobileMetrics, parseMetricId, parseMetricsParam, parseWindow, releaseCell, releaseLevel, releasesFrom, RELEASE_DAYS, type Numbers } from "../src/server/mobile-metrics.ts";
+import { ADMIN, API, T0, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -423,5 +425,212 @@ describe("GET /v1/mobile/live?metrics= through the app", () => {
 		expect((await live(`?metrics=${"x".repeat(1001)}`)).status).toBe(400);
 		expect((await live("?metrics=dau&metrics=d1")).status).toBe(400);
 		expect((await live("?metrics=dau&other=1")).status).toBe(400);
+	});
+});
+
+describe("widget stats: releases", () => {
+	const day = (ago: number, hour = 12) => (Math.floor(T0 / DAY) - ago) * DAY + hour * HOUR;
+	const rel = (seq: number, channel: string | null, at: number, artifact: string | null = `art-${seq}`): ReleaseDay => ({ seq, artifact, channel, at });
+
+	test("level: 0, 1, 2 for 2-3, 3 for 4+", () => {
+		expect([0, 1, 2, 3, 4, 5, 50].map(releaseLevel)).toEqual([0, 1, 2, 2, 3, 3, 3]);
+	});
+
+	test("cell tokens: every case", () => {
+		const t = (p: number, d: number) => {
+			const c = releaseCell("2026-10-09", p, d);
+			return `${c.bg}/${c.tri}`;
+		};
+		// Neither.
+		expect(t(0, 0)).toBe("r0/rnone");
+		// Dev alone: blue background, no corner.
+		expect([1, 2, 3, 4, 9].map((d) => t(0, d))).toEqual(["rb1/rnone", "rb2/rnone", "rb2/rnone", "rb3/rnone", "rb3/rnone"]);
+		// Prod alone: green background, no corner.
+		expect([1, 2, 3, 4, 9].map((p) => t(p, 0))).toEqual(["rg1/rnone", "rg2/rnone", "rg2/rnone", "rg3/rnone", "rg3/rnone"]);
+		// Both: green background, the dev level in the corner.
+		expect(t(1, 1)).toBe("rg1/rb1");
+		expect(t(4, 2)).toBe("rg3/rb2");
+		expect(t(2, 5)).toBe("rg2/rb3");
+		expect(t(3, 3)).toBe("rg2/rb2");
+		expect(releaseCell("2026-10-09", 2, 5)).toEqual({ date: "2026-10-09", p: 2, d: 5, bg: "rg2", tri: "rb3" });
+	});
+
+	test("60 UTC days oldest first, today the last; counts over 60 and 30; older and later ones left out", () => {
+		const r = releasesFrom(
+			[
+				rel(1, "prod", day(60)), // the day before the first: not counted
+				rel(2, "prod", day(59, 0)), // the first day, 00:00
+				rel(3, "dev", day(30, 23)), // just outside the last 30
+				rel(4, "dev", day(29, 0)), // the last 30's first day
+				rel(5, "staging", day(10)), // anything else is dev
+				rel(6, null, day(10)), // no channel (known from reports): dev
+				rel(7, "prod", day(10)),
+				rel(8, "prod", day(0, 1)),
+				rel(9, "dev", (Math.floor(T0 / DAY) + 1) * DAY), // tomorrow (a clock ahead): not counted
+			],
+			T0,
+		);
+		expect(r.days).toHaveLength(RELEASE_DAYS);
+		expect(r.days[0]?.date).toBe("2026-08-11");
+		expect(r.days.at(-1)?.date).toBe("2026-10-09");
+		// Consecutive days, oldest first.
+		for (let i = 1; i < r.days.length; i++) expect(Date.parse(r.days[i]?.date as string) - Date.parse(r.days[i - 1]?.date as string)).toBe(DAY);
+		expect(r.days[0]).toEqual({ date: "2026-08-11", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(r.days[29]).toMatchObject({ p: 0, d: 1, bg: "rb1" });
+		expect(r.days[30]).toMatchObject({ p: 0, d: 1, bg: "rb1" });
+		expect(r.days[49]).toEqual({ date: "2026-09-29", p: 1, d: 2, bg: "rg1", tri: "rb2" });
+		expect(r.days[59]).toEqual({ date: "2026-10-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect({ value: r.value, prod: r.prod, dev: r.dev, prod30: r.prod30, dev30: r.dev30 }).toEqual({ value: 3, prod: 3, dev: 4, prod30: 2, dev30: 3 });
+		expect(r.lastProd).toBe("today");
+		expect(r.lastProdLabel).toBe("#8 · art-8");
+	});
+
+	test("lastProd: today, 1 d ago, n d ago, none; the label without an artifact; the newest prod wins", () => {
+		const at = (rows: ReleaseDay[]) => releasesFrom(rows, T0);
+		expect(at([rel(3, "prod", day(0, 0))]).lastProd).toBe("today");
+		expect(at([rel(3, "prod", day(1, 23)), rel(4, "dev", day(0))]).lastProd).toBe("1 d ago");
+		const twelve = at([rel(3, "prod", day(12)), rel(2, "prod", day(20)), rel(9, "dev", day(1))]);
+		expect(twelve.lastProd).toBe("12 d ago");
+		expect(twelve.lastProdLabel).toBe("#3 · art-3");
+		expect(at([rel(5, "prod", day(59, 0), null)])).toMatchObject({ lastProd: "59 d ago", lastProdLabel: "#5" });
+		// Same start: the higher seq.
+		expect(at([rel(7, "prod", day(2)), rel(6, "prod", day(2))]).lastProdLabel).toBe("#7 · art-7");
+		// None in the 60 days (dev only, or prod older).
+		const none = at([rel(1, "prod", day(60)), rel(2, "dev", day(3))]);
+		expect(none).toMatchObject({ value: 0, prod: 0, dev: 1, lastProd: null, lastProdLabel: null });
+		const empty = at([]);
+		expect(empty.days).toHaveLength(RELEASE_DAYS);
+		expect(empty.days.every((c) => c.bg === "r0" && c.tri === "rnone" && c.p === 0 && c.d === 0)).toBe(true);
+	});
+
+	test("answer(): cached 5 minutes, one read at a time, a failure keeps the last good value; no fleet: null numbers; counts toward 12", async () => {
+		let now = T0;
+		let rows: ReleaseDay[] = [rel(1, "prod", day(1))];
+		let fail = false;
+		const reads: [number, number][] = [];
+		const metrics = new MobileMetrics({
+			clock: () => now,
+			run: () => undefined,
+			releases: () => async (from, to) => {
+				reads.push([from, to]);
+				if (fail) throw new Error("db closed");
+				return rows;
+			},
+		});
+		const ask = async () => (await metrics.answer(["releases"], {})).releases;
+		const [a, b] = await Promise.all([ask(), ask()]);
+		expect(a).toMatchObject({ value: 1, prev: null, unit: "count", label: "Releases", lastProd: "1 d ago" });
+		expect(b).toEqual(a);
+		expect(reads).toEqual([[Date.UTC(2026, 7, 11), Date.UTC(2026, 9, 10)]]);
+		rows = [rel(1, "prod", day(1)), rel(2, "prod", day(0))];
+		now += METRIC_TTL_MS - 1;
+		expect((await ask())?.value).toBe(1);
+		now += 1;
+		expect(await ask()).toMatchObject({ value: 2, lastProd: "today", lastProdLabel: "#2 · art-2" });
+		fail = true;
+		now += METRIC_TTL_MS;
+		expect(await ask()).toMatchObject({ value: 2, lastProd: "today" });
+		expect(reads).toHaveLength(3);
+		// The key order of the answer.
+		expect(Object.keys((await ask()) as object)).toEqual(["value", "prev", "unit", "label", "prod", "dev", "prod30", "dev30", "lastProd", "lastProdLabel", "days"]);
+
+		// Past the 12th id: null, never read.
+		const many = [...Array.from({ length: 12 }, (_, i) => `ccu${i}`), "releases"];
+		expect((await metrics.answer(many, {})).releases).toBeNull();
+		expect(reads).toHaveLength(3);
+
+		const off = new MobileMetrics({ clock: () => T0, run: () => undefined, releases: () => undefined });
+		expect(await off.answer(["releases"], {})).toEqual({ releases: { value: null, prev: null, unit: "count", label: "Releases" } });
+		expect(parseMetricId("releases")).toEqual({ id: "releases", unit: "count", label: "Releases", source: "releases", field: "value", ttlMs: METRIC_TTL_MS });
+		for (const bad of ["releases:7d", "Releases", "release"]) expect(parseMetricId(bad)).toBeNull();
+	});
+});
+
+describe("GET /v1/mobile/live?metrics=releases through the app", () => {
+	let h: Harness;
+	let token = "";
+	const N = T0;
+	const day = (ago: number, hour = 12) => (Math.floor(N / DAY) - ago) * DAY + hour * HOUR;
+	/** The CLI's POST /v1/fleet/deploy at `at` (the backend's clock there too), processed before the next. */
+	const deploy = async (seq: number, ch: string | null, at: number, o: { t?: number } = {}) => {
+		h.setNow(at);
+		const body = { j: "cli", s: seq, b: ch === "prod" ? "prod" : "dev", a: `a1b2c3d-${String(seq).padStart(6, "0")}`, ...(ch ? { ch } : {}), k: "deploy", t: o.t ?? at };
+		expect((await h.call("/v1/fleet/deploy", post(API, body))).status).toBe(202);
+		await h.app.bus.idle(2000);
+	};
+
+	beforeAll(async () => {
+		h = await harness();
+		// 61 and 60 days ago: before the first day (2026-08-11), not counted.
+		await deploy(1, "prod", day(61));
+		await deploy(2, "prod", day(60, 23));
+		// The first day: one dev.
+		await deploy(3, "dev", day(59, 0) + MIN);
+		// 40 days ago: one prod (in the 60, not in the last 30).
+		await deploy(4, "prod", day(40));
+		// 10 days ago: two prod and a dev without a channel (the dashboard shows "–": dev).
+		await deploy(5, "prod", day(10, 9));
+		await deploy(6, "prod", day(10, 10));
+		await deploy(7, null, day(10, 11));
+		// 5 days ago: five dev.
+		for (let i = 0; i < 5; i++) await deploy(8 + i, "dev", day(5, 8) + i * MIN);
+		// Posted at 00:10 on day 4 with the CLI's time 23:55 on day 5... counted on its start's day (day 5).
+		await deploy(13, "dev", day(4, 0) + 10 * MIN, { t: day(5, 23) + 55 * MIN });
+		// A release known only from a server's report (no CLI post, no channel): dev, 2 days ago.
+		h.setNow(day(2));
+		expect((await h.call("/v1/fleet/report", post(API, { s: 14, j: "job-1", r: "swapped", b: "prod", a: "a1b2c3d-000014" }))).status).toBe(202);
+		await h.app.bus.idle(2000);
+		// Today: one prod.
+		await deploy(15, "prod", day(0, 9));
+		h.setNow(N);
+		const mint = await h.call("/v1/auth/mobile/token", { method: "POST", body: JSON.stringify({ device: "Pixel 9" }), headers: { "content-type": "application/json", ...bearer(ADMIN) }, ip: "10.89.0.1" });
+		token = (await asJson(mint)).token as string;
+	});
+	afterAll(() => h.close());
+
+	const live = async (query: string) => {
+		const res = await h.call(`/v1/mobile/live${query}`, { headers: bearer(token), ip: "10.89.0.2" });
+		expect(res.status).toBe(200);
+		return asJson(res);
+	};
+
+	test("counted per UTC day from the Deploys page's rows: prod vs the rest, 60 days, today the last", async () => {
+		const body = await live("?metrics=releases,ccu");
+		expect(Object.keys(body.metrics)).toEqual(["releases", "ccu"]);
+		const r = body.metrics.releases;
+		if (process.env.TT_PRINT_LIVE) console.log(JSON.stringify({ ...r, days: r.days.slice(-12) }, null, 2));
+		expect(r).toMatchObject({ value: 4, prev: null, unit: "count", label: "Releases", prod: 4, dev: 9, prod30: 3, dev30: 8, lastProd: "today", lastProdLabel: "#15 · a1b2c3d-000015" });
+		expect(r.days).toHaveLength(60);
+		expect(r.days[0]).toEqual({ date: "2026-08-11", p: 0, d: 1, bg: "rb1", tri: "rnone" });
+		const on = (ago: number) => r.days[59 - ago];
+		expect(on(40)).toEqual({ date: "2026-08-30", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(on(10)).toEqual({ date: "2026-09-29", p: 2, d: 1, bg: "rg2", tri: "rb1" });
+		expect(on(5)).toEqual({ date: "2026-10-04", p: 0, d: 6, bg: "rb3", tri: "rnone" });
+		expect(on(4)).toMatchObject({ p: 0, d: 0, bg: "r0" });
+		expect(on(2)).toEqual({ date: "2026-10-07", p: 0, d: 1, bg: "rb1", tri: "rnone" });
+		expect(on(0)).toEqual({ date: "2026-10-09", p: 1, d: 0, bg: "rg1", tri: "rnone" });
+		expect(r.days.reduce((n: number, c: { p: number; d: number }) => n + c.p + c.d, 0)).toBe(13);
+
+		// The same rows the Deploys page lists: all 15, the channel as it shows it.
+		const page = await asJson(await h.call("/v1/fleet/deploys?limit=100", { headers: bearer(ADMIN) }));
+		expect(page.deploys).toHaveLength(15);
+		expect(page.deploys.filter((d: { channel: string | null }) => d.channel === "prod").map((d: { seq: number }) => d.seq)).toEqual([15, 6, 5, 4, 2, 1]);
+	});
+
+	test("cached 5 minutes; a new day moves the grid", async () => {
+		await deploy(16, "prod", N + MIN);
+		h.setNow(N + 4 * MIN);
+		expect((await live("?metrics=releases")).metrics.releases.prod).toBe(4);
+		h.setNow(N + 6 * MIN);
+		const r = (await live("?metrics=releases")).metrics.releases;
+		expect(r).toMatchObject({ prod: 5, prod30: 4, lastProd: "today", lastProdLabel: "#16 · a1b2c3d-000016" });
+		expect(r.days.at(-1)).toMatchObject({ p: 2, bg: "rg2" });
+		// Tomorrow: today's releases are 1 d ago, the first day drops off.
+		h.setNow(N + DAY);
+		const next = (await live("?metrics=releases")).metrics.releases;
+		expect(next.days).toHaveLength(60);
+		expect(next.days[0].date).toBe("2026-08-12");
+		expect(next.days.at(-1)).toEqual({ date: "2026-10-10", p: 0, d: 0, bg: "r0", tri: "rnone" });
+		expect(next).toMatchObject({ prod: 5, dev: 8, lastProd: "1 d ago" });
 	});
 });
