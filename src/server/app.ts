@@ -141,6 +141,7 @@ import { Auth, CSRF_HEADER, SESSION_COOKIE, Sessions, cookieMutationProblem, isH
 import { MOBILE_ID_PATTERN, MOBILE_REFRESHED, MobileTokenError, MobileTokens, deviceName, sameUser, viewOf, type MobileTokenRecord, type MobileUser } from "./mobile-tokens.ts";
 import { MobilePush, MobilePushError, type ExpoMessage } from "./mobile-push.ts";
 import { CcuHistory, IconCache, LastHourCache, lastHourOf, milestoneBody, seriesMinutes, utcMidnight } from "./mobile-live.ts";
+import { MobileHealth } from "./mobile-health.ts";
 import { MobileMetrics, parseMetricsParam } from "./mobile-metrics.ts";
 import type { SessionTimeResult } from "../queries/session-time.ts";
 import { mobileDevRedirectAllowed, type ServerConfig } from "./config.ts";
@@ -2906,6 +2907,8 @@ ${goesTo}
 		clock,
 		log,
 	});
+	// The health card (`health`): the Errors page's count, the Fleet page's servers and alerts, cached 60 s (mobile-health.ts).
+	const mobileHealth = new MobileHealth({ sources: () => (fleet ? { errors, fleet } : undefined), clock, log });
 	// The game's icon at a widget's size (thumbnails.roblox.com through the place card's client), kept 6 hours.
 	const gameIcon = new IconCache((universeId) => robloxPlace.gameIcon(universeId), clock, log);
 
@@ -2981,6 +2984,8 @@ ${goesTo}
 		// unknown top-level fields but only value / prev / unit / label of a metric, and a live watch's poll asks for no
 		// metrics; this copy is what the widgets draw from.
 		const garden = metrics?.releases !== undefined ? metrics.releases : ((await mobileMetrics.answer(["releases"], { ccu: totals.players, ccuPrev: before, servers: totals.servers, peakToday }).catch(() => undefined))?.releases ?? null);
+		// The health card on every answer (cached 60 s, one computation at a time), null without the fleet part.
+		const health = await mobileHealth.get();
 		return json(200, {
 			at: new Date(now).toISOString(),
 			game: { ...game, iconUrl },
@@ -2991,6 +2996,7 @@ ${goesTo}
 			series: ccuHistory.series(now, minutes),
 			lastHour: hour,
 			releases: garden,
+			health,
 			...(metrics ? { metrics } : {}),
 		});
 	}
