@@ -2248,7 +2248,7 @@ section it still writes for kernels before 0.4), so it works even when a game's 
 | `POST /v1/fleet/closing` | game | the heartbeat body + `closing: true` (or `{ j, t }`): a clean close, not a lost server |
 | `POST /v1/fleet/deploy` | game | `{ s, b, a, ch, t, k?, fr?, m?, by? }` from the CLI after a release (stuck detection's start time, a chart mark and a deploy history row): `k` = `deploy`, `rollback`, `promote`, `resign`; `fr` the build the branch ran before; `m` the note (200); `by` who or what started it (64: a user, `ci`, `auto_rollback`); `t` unix ms or s (a clock a day off is replaced by the backend's) |
 | `POST /v1/fleet/mark` | game | `{ j: "cli", k: kernel\|backup, v?, pv?, b?, s?, a?, ch?, m?, t? }` from the CLI after `kernel deploy` / `kernel restore` (`v` kernel version, `pv` place version) and a backup refresh (`b`/`s`/`a` the build that became the backup). Only `j = "cli"` (one limiter key, 30 a minute) |
-| `GET /v1/fleet/servers?branch=&maxAge=` | admin, web | `{ servers: [...], players, byArtifact, byHealth, geo }` (live: seen in the last 90 s, not closed). Each server has `location` and, for the admin role only, `ip`, `firstIp`, `ipChangedAt` ([addresses and locations](#game-server-addresses-and-locations)); `geo` = `{ state: ready\|missing\|off, source, attribution, attributionUrl, built }` |
+| `GET /v1/fleet/servers?branch=&maxAge=` | admin, web | `{ servers: [...], players, byArtifact, byHealth, geo }` (live: seen in the last 90 s, not closed). Each server has `location`, `region` and `geoSource` and, for the admin role only, `ip`, `firstIp`, `ipChangedAt` ([addresses and locations](#game-server-addresses-and-locations)); `geo` = `{ state: ready\|missing\|off, source, attribution, attributionUrl, built }` |
 | `GET /v1/fleet/servers?gone=1&branch=&limit=` | admin, web | `{ servers: [...rows + closedAt, lostAt, state: closed\|lost, firstSeen] }`: servers that closed or were lost (kept 30 days), the most recently gone first (`limit` 200, at most 1,000) |
 | `GET /v1/fleet/servers/<jobId>/metrics?since=<unix ms>` | admin, web | `{ points: [{ t, tps, tpsMin, physFps, memMb, luaMb, players }] }`, oldest first, one per heartbeat; `t` = when it arrived (unix ms), only points after `since`; an unknown JobId gives `{ points: [] }`. A `since` older than the 2-hour raw window adds the 5-minute rollups before it (one point per bucket, `t` = the bucket's start) and `rolledUntil` (unix ms: where the raw points take over) |
 | `GET /v1/fleet/reports?seq=N` / `?artifact=ID` / `?latest` (`&branch=`) | admin, web | `{ reports: [...rows], seq, branch, artifact, startedAt, reported, results, errors, behind, stuck }` |
@@ -2322,6 +2322,18 @@ nothing changes in the kernel. Behind a proxy without `TYPETORCH_TRUST_PROXY`, e
 address and no location. Roblox game servers reach the internet through Roblox's own egress, so the location is the
 data center's region, which is what it is for: where the fleet runs.
 
+**Roblox region first.** A kernel that knows `game.ServerRegion` (the IATA code of the airport nearest the hosting data
+center: `IAD`, `LHR`, `SYD`...) sends it as the heartbeat's (and the closing request's) optional top-level `region`. Only
+three uppercase letters count (`^[A-Z]{3}$`); anything else, `""` from Studio or a missing field is ignored (never a
+reason to refuse the heartbeat) and the latest good code stays on the row (`server_region`, added to older fleet files at
+start). It is a display hint only, never trusted for anything security-related. When a server has one, its `location`
+comes from a built-in airport table (`src/fleet/regions.ts`: the city, state, country and metro coordinates of about 70
+data-center airports in the Americas, Europe, the Middle East, Asia and Oceania) and `geoSource` is `"roblox"`; the
+network (`asn`, `org`) still comes from the IP lookup. A code the table doesn't know yet (Roblox adds new ones) is still
+returned as `region`, with no city or coordinates (never the IP estimate's). Without a region (older kernels) the
+location is the IP lookup below, exactly as before, and `geoSource` is `"ip"` (`null`: no location at all). Every server
+response carries `region` (or null) and `geoSource` next to `location`, for every signed-in role.
+
 Locations come from an offline IP database, so no address is sent anywhere: `TYPETORCH_GEOIP=dbip` (the default in the
 image) uses DB-IP's free [IP to City Lite and IP to ASN Lite](https://db-ip.com/db/lite.php) databases (CC BY 4.0: the
 explorer credits DB-IP wherever it shows a location). The server keeps them in `<data dir>/geoip/` (about 140 MB on the
@@ -2339,9 +2351,10 @@ wait (more are dropped until their next heartbeat), and `ip_geo` only keeps addr
 hourly). Without a database (missing, still downloading, `off`) locations are null and `geo.state` says why; when one is
 loaded, the stored servers' addresses are looked up then.
 
-The Fleet page shows a Country column (sortable, filterable; City, Network and, for owners, IP columns in the column
-picker), a Countries tile and a **By country** table; a server's page shows its location, network and, for owners, its
-address and the one it started from.
+The Fleet page shows a Country column (sortable, filterable; City, Region, Network and, for owners, IP columns in the
+column picker), a Countries tile and a **By country** table; a server's page shows its location, network and, for owners,
+its address and the one it started from. A location reads `IAD · [US] Ashburn  Roblox` from a Roblox region and
+`[US] Sterling, Virginia  IP est.` from the IP database (the DB-IP credit line only shows under IP estimates).
 
 ### Deploy history
 

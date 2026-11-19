@@ -2,7 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FleetServer, ServerLocation } from "@/lib/types";
-import { countryCounts, GeoCredit, LocationLabel, locationText, locationTitle, networkText, placeText } from "./ServerLocation";
+import { countryCounts, GeoCredit, hasLocation, isIpEstimate, LocationLabel, locationText, locationTitle, networkText, placeText } from "./ServerLocation";
 
 afterEach(cleanup);
 
@@ -17,7 +17,7 @@ describe("location text", () => {
 		expect(locationText(null)).toBe("–");
 		expect(networkText(loc())).toBe("AS22697 Roblox");
 		expect(networkText(loc({ asn: null, org: null }))).toBeNull();
-		expect(locationTitle(loc())).toBe("Sterling, Virginia, United States | about 39.01, -77.43 | network AS22697 Roblox");
+		expect(locationTitle(loc())).toBe("estimated from the server's IP address | Sterling, Virginia, United States | about 39.01, -77.43 | network AS22697 Roblox");
 	});
 
 	it("shows the country as a code chip (no flag emoji) with its name for screen readers", () => {
@@ -25,6 +25,42 @@ describe("location text", () => {
 		expect(screen.getByLabelText("United States (US)").textContent).toBe("US");
 		expect(screen.getByText("Sterling, Virginia")).toBeTruthy();
 		expect(document.body.textContent).not.toMatch(/\p{Regional_Indicator}/u);
+	});
+});
+
+describe("the Roblox region", () => {
+	const ashburn = loc({ city: "Ashburn", lat: 39.04, lon: -77.49 });
+
+	it("leads with the airport code, then the city and country; an unknown code alone", () => {
+		expect(locationText(ashburn, "IAD")).toBe("IAD · Ashburn, US");
+		expect(locationText(null, "QQQ")).toBe("QQQ");
+		expect(locationText(loc({ city: null, country: null, countryName: null, region: null, lat: null, lon: null }), "QQQ")).toBe("QQQ");
+		expect(locationTitle(ashburn, "IAD")).toMatch(/^Roblox server region IAD \| Ashburn, Virginia, United States/);
+		expect(locationTitle(null, "QQQ")).toContain("QQQ");
+	});
+
+	it("shows the code with a quiet Roblox note, and an IP estimate with its own note", () => {
+		const { rerender, container } = render(<LocationLabel location={ashburn} region="IAD" geoSource="roblox" />);
+		expect(screen.getByText("IAD")).toBeTruthy();
+		expect(screen.getByText("Ashburn")).toBeTruthy();
+		expect(screen.getByText("Roblox")).toBeTruthy();
+		expect(container.textContent).not.toContain("IP est.");
+		rerender(<LocationLabel location={loc()} geoSource="ip" />);
+		expect(screen.getByText("IP est.")).toBeTruthy();
+		expect(screen.getByText("Sterling, Virginia")).toBeTruthy();
+		rerender(<LocationLabel location={null} region="QQQ" geoSource="roblox" />);
+		expect(container.textContent).toBe("QQQRoblox");
+		rerender(<LocationLabel location={null} />);
+		expect(container.textContent).toBe("unknown");
+	});
+
+	it("credits the IP database only for IP estimates (older backends send no geoSource: an estimate)", () => {
+		expect(isIpEstimate({ location: ashburn, region: "IAD", geoSource: "roblox" })).toBe(false);
+		expect(isIpEstimate({ location: loc(), geoSource: "ip" })).toBe(true);
+		expect(isIpEstimate({ location: loc() })).toBe(true);
+		expect(isIpEstimate({ location: null })).toBe(false);
+		expect(hasLocation({ location: null, region: "QQQ" })).toBe(true);
+		expect(hasLocation({ location: null, region: null })).toBe(false);
 	});
 });
 

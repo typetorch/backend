@@ -1,7 +1,9 @@
 /**
- * Where a game server is (the backend looks its public address up in an offline IP database, fleet/geo.ts): the country
- * as its ISO code in a small chip (no flag emoji), the city and region next to it, and the credit line the database's
- * licence asks for (DB-IP Lite: CC BY 4.0) wherever locations are shown.
+ * Where a game server is: its Roblox region (game.ServerRegion, an airport code like "IAD", the backend maps it to a
+ * city) when the kernel sends one, else the backend's lookup of its public address in an offline IP database
+ * (fleet/geo.ts). The region code first, then the country as its ISO code in a small chip (no flag emoji) and the
+ * place, a quiet note of the source, and the credit line the IP database's licence asks for (DB-IP Lite: CC BY 4.0)
+ * wherever its locations are shown.
  */
 import type { FleetServer, GeoStatus, ServerLocation } from "@/lib/types";
 
@@ -14,18 +16,37 @@ export function placeText(loc: ServerLocation | null | undefined): string | null
 	return unique.length ? unique.join(", ") : null;
 }
 
-/** One line: "Sterling, Virginia, US", "Japan", or "–". */
-export function locationText(loc: ServerLocation | null | undefined): string {
+/** What the location helpers need from a server. */
+export type Located = Pick<FleetServer, "location" | "region" | "geoSource">;
+
+/** One line: "IAD · Ashburn, US" with a region, "Sterling, Virginia, US", "Japan", "QQQ" (an unknown code), or "–". */
+export function locationText(loc: ServerLocation | null | undefined, region?: string | null): string {
+	if (region) {
+		const place = loc ? (loc.city ? (loc.country ? `${loc.city}, ${loc.country}` : loc.city) : (loc.countryName ?? loc.country)) : null;
+		return place ? `${region} · ${place}` : region;
+	}
 	if (!loc) return "–";
 	const place = placeText(loc);
 	if (place) return loc.country ? `${place}, ${loc.country}` : place;
 	return loc.countryName ?? loc.country ?? "–";
 }
 
-/** The tooltip: the full country name, the place, the coordinates and the network. */
-export function locationTitle(loc: ServerLocation | null | undefined): string | undefined {
-	if (!loc) return undefined;
-	const lines = [[placeText(loc), loc.countryName ?? loc.country].filter(Boolean).join(", ")];
+/** Whether the location is the IP database's estimate (older backends send no geoSource: theirs always is). */
+export function isIpEstimate(s: Located): boolean {
+	return !!s.location && !s.region && s.geoSource !== "roblox";
+}
+
+/** Whether a server has anything to show where (a location, or a region code alone). */
+export function hasLocation(s: Located): boolean {
+	return !!s.location || !!s.region;
+}
+
+/** The tooltip: the source, the full country name, the place, the coordinates and the network. */
+export function locationTitle(loc: ServerLocation | null | undefined, region?: string | null): string | undefined {
+	if (!loc && !region) return undefined;
+	const source = region ? `Roblox server region ${region}` : "estimated from the server's IP address";
+	if (!loc) return `${source} (an airport code this backend has no city for yet)`;
+	const lines = [source, [placeText(loc), loc.countryName ?? loc.country].filter(Boolean).join(", ")];
 	if (loc.lat !== null && loc.lon !== null) lines.push(`about ${loc.lat.toFixed(2)}, ${loc.lon.toFixed(2)}`);
 	if (loc.asn !== null || loc.org) lines.push(`network ${[loc.asn !== null ? `AS${loc.asn}` : null, loc.org].filter(Boolean).join(" ")}`);
 	return lines.filter(Boolean).join(" | ");
@@ -46,14 +67,25 @@ export function CountryCode({ code, name }: { code: string | null | undefined; n
 	);
 }
 
-/** The country chip and the place: "[US] Sterling, Virginia". */
-export function LocationLabel({ location }: { location: ServerLocation | null | undefined }) {
-	if (!location) return <span className="text-muted-foreground">unknown</span>;
-	const place = placeText(location);
+/**
+ * The region code, the country chip and the place, and a quiet source note: "IAD · [US] Ashburn  Roblox" from a Roblox
+ * region, "[US] Sterling, Virginia  IP est." from the IP database, "QQQ  Roblox" for a code with no city yet.
+ */
+export function LocationLabel({ location, region, geoSource }: { location: ServerLocation | null | undefined; region?: string | null; geoSource?: Located["geoSource"] }) {
+	if (!location && !region) return <span className="text-muted-foreground">unknown</span>;
+	const fromRoblox = !!region || geoSource === "roblox";
+	const place = location ? (region ? (location.city ?? location.countryName) : (placeText(location) ?? location.countryName)) : null;
 	return (
-		<span className="inline-flex items-center gap-1.5" title={locationTitle(location)}>
-			<CountryCode code={location.country} name={location.countryName} />
-			<span>{place ?? location.countryName ?? ""}</span>
+		<span className="inline-flex items-center gap-1.5" title={locationTitle(location, region)}>
+			{region ? (
+				<>
+					<span className="font-mono text-[11px] font-medium">{region}</span>
+					{location ? <span className="text-muted-foreground" aria-hidden="true">·</span> : null}
+				</>
+			) : null}
+			{location ? <CountryCode code={location.country} name={location.countryName} /> : null}
+			{place ? <span>{place}</span> : null}
+			<span className="text-[10px] text-muted-foreground">{fromRoblox ? "Roblox" : "IP est."}</span>
 		</span>
 	);
 }

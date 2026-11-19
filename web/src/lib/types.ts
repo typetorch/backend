@@ -1645,8 +1645,15 @@ export interface FleetServer {
 	ip?: string | null;
 	firstIp?: string | null;
 	ipChangedAt?: string | null;
-	/** Where the latest address is (the backend's offline IP database); null or missing while unknown. */
+	/**
+	 * Where the server is: from its Roblox region when it sent one (geoSource "roblox"), else the latest address in the
+	 * backend's offline IP database (geoSource "ip"); null or missing while unknown.
+	 */
 	location?: ServerLocation | null;
+	/** game.ServerRegion: the hosting data center's IATA airport code ("IAD"); null or missing from older kernels and backends. */
+	region?: string | null;
+	/** Where `location` came from; missing from older backends (then it is the IP estimate). */
+	geoSource?: "roblox" | "ip" | null;
 	/** Plans/34: the game's custom column values from its latest heartbeat (GET /v1/fleet/columns names them); null or missing: none. */
 	cv?: Record<string, GameColumnValue> | null;
 }

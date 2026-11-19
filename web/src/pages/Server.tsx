@@ -18,7 +18,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ErrorState, KeyValue, LoadingBlock, PageHeader, Section } from "@/components/common";
 import { HealthBadge, ReasonList, reasonLines } from "@/components/HealthReasons";
-import { GeoCredit, LocationLabel, networkText } from "@/components/ServerLocation";
+import { GeoCredit, isIpEstimate, LocationLabel, networkText } from "@/components/ServerLocation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -140,7 +140,7 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 					<KeyValue label="Last heartbeat">{fmtAgo(s.lastSeen)}</KeyValue>
 					<KeyValue label="Type">{s.serverType ?? "–"}</KeyValue>
 					<KeyValue label="Location">
-						<LocationLabel location={s.location} />
+						<LocationLabel location={s.location} region={s.region} geoSource={s.geoSource} />
 					</KeyValue>
 					{networkText(s.location) ? <KeyValue label="Network">{networkText(s.location)}</KeyValue> : null}
 					{/* Owners only: the backend leaves the addresses out for the read-only role. */}
@@ -163,7 +163,7 @@ function Header({ job, detail, placeVersion }: { job: string; detail?: FleetServ
 					</KeyValue>
 				</div>
 			) : null}
-			{s?.location ? <GeoCredit geo={detail?.geo} /> : null}
+			{s && isIpEstimate(s) ? <GeoCredit geo={detail?.geo} /> : null}
 			{s && live && reasonLines(s).length ? (
 				<section aria-label="Why this server needs a look" className="space-y-1">
 					<div className="text-xs font-medium text-muted-foreground">Why it is {s.health && s.health !== "ok" ? s.health : "flagged"}</div>

@@ -71,35 +71,39 @@ export function noise(key: string, t: number, every: number): number {
 
 // Places a server can run in (Roblox's data centers; the address itself is from a documentation range) ------------------
 
-const DATA_CENTERS: (Omit<ServerLocation, "asn" | "org"> & { w: number })[] = [
-	{ country: "US", countryName: "United States", region: "Virginia", city: "Ashburn", lat: 39.04, lon: -77.49, w: 6 },
-	{ country: "US", countryName: "United States", region: "Texas", city: "Dallas", lat: 32.78, lon: -96.8, w: 4 },
-	{ country: "US", countryName: "United States", region: "California", city: "Los Angeles", lat: 34.05, lon: -118.24, w: 4 },
-	{ country: "US", countryName: "United States", region: "Illinois", city: "Chicago", lat: 41.88, lon: -87.63, w: 3 },
-	{ country: "US", countryName: "United States", region: "Florida", city: "Miami", lat: 25.76, lon: -80.19, w: 2 },
-	{ country: "DE", countryName: "Germany", region: "Hesse", city: "Frankfurt am Main", lat: 50.11, lon: 8.68, w: 4 },
-	{ country: "NL", countryName: "Netherlands", region: "North Holland", city: "Amsterdam", lat: 52.37, lon: 4.9, w: 3 },
-	{ country: "GB", countryName: "United Kingdom", region: "England", city: "London", lat: 51.51, lon: -0.13, w: 3 },
-	{ country: "FR", countryName: "France", region: "Île-de-France", city: "Paris", lat: 48.86, lon: 2.35, w: 2 },
-	{ country: "SG", countryName: "Singapore", region: "Singapore", city: "Singapore", lat: 1.29, lon: 103.85, w: 2 },
-	{ country: "JP", countryName: "Japan", region: "Tokyo", city: "Tokyo", lat: 35.68, lon: 139.69, w: 1 },
-	{ country: "AU", countryName: "Australia", region: "New South Wales", city: "Sydney", lat: -33.87, lon: 151.21, w: 1 },
-	{ country: "BR", countryName: "Brazil", region: "São Paulo", city: "São Paulo", lat: -23.55, lon: -46.63, w: 1 },
-	{ country: "IN", countryName: "India", region: "Maharashtra", city: "Mumbai", lat: 19.08, lon: 72.88, w: 1 },
+// iata: game.ServerRegion's code for the data center (newer kernels send it; the backend maps it to the city).
+const DATA_CENTERS: (Omit<ServerLocation, "asn" | "org"> & { iata: string; w: number })[] = [
+	{ country: "US", countryName: "United States", region: "Virginia", city: "Ashburn", iata: "IAD", lat: 39.04, lon: -77.49, w: 6 },
+	{ country: "US", countryName: "United States", region: "Texas", city: "Dallas", iata: "DFW", lat: 32.78, lon: -96.8, w: 4 },
+	{ country: "US", countryName: "United States", region: "California", city: "Los Angeles", iata: "LAX", lat: 34.05, lon: -118.24, w: 4 },
+	{ country: "US", countryName: "United States", region: "Illinois", city: "Chicago", iata: "ORD", lat: 41.88, lon: -87.63, w: 3 },
+	{ country: "US", countryName: "United States", region: "Florida", city: "Miami", iata: "MIA", lat: 25.76, lon: -80.19, w: 2 },
+	{ country: "DE", countryName: "Germany", region: "Hesse", city: "Frankfurt am Main", iata: "FRA", lat: 50.11, lon: 8.68, w: 4 },
+	{ country: "NL", countryName: "Netherlands", region: "North Holland", city: "Amsterdam", iata: "AMS", lat: 52.37, lon: 4.9, w: 3 },
+	{ country: "GB", countryName: "United Kingdom", region: "England", city: "London", iata: "LHR", lat: 51.51, lon: -0.13, w: 3 },
+	{ country: "FR", countryName: "France", region: "Île-de-France", city: "Paris", iata: "CDG", lat: 48.86, lon: 2.35, w: 2 },
+	{ country: "SG", countryName: "Singapore", region: "Singapore", city: "Singapore", iata: "SIN", lat: 1.29, lon: 103.85, w: 2 },
+	{ country: "JP", countryName: "Japan", region: "Tokyo", city: "Tokyo", iata: "NRT", lat: 35.68, lon: 139.69, w: 1 },
+	{ country: "AU", countryName: "Australia", region: "New South Wales", city: "Sydney", iata: "SYD", lat: -33.87, lon: 151.21, w: 1 },
+	{ country: "BR", countryName: "Brazil", region: "São Paulo", city: "São Paulo", iata: "GRU", lat: -23.55, lon: -46.63, w: 1 },
+	{ country: "IN", countryName: "India", region: "Maharashtra", city: "Mumbai", iata: "BOM", lat: 19.08, lon: 72.88, w: 1 },
 ];
 
 const DOC_RANGES = ["192.0.2", "198.51.100", "203.0.113"];
 
 export const GEO_STATUS: GeoStatus = { state: "ready", source: "DB-IP Lite (demo copy)", attribution: "IP geolocation by DB-IP (demo data)", attributionUrl: null, built: "2026-11-01T00:00:00.000Z" };
 
-function locationOf(job: string): { ip: string; firstIp: string; ipChangedAt: number | null; location: ServerLocation } {
+function locationOf(job: string): { ip: string; firstIp: string; ipChangedAt: number | null; location: ServerLocation; region: string | null; geoSource: "roblox" | "ip" } {
 	const r = rng(`fleet:geo:${job}`);
 	const dc = r.weighted(DATA_CENTERS.map((d) => [d, d.w] as const));
 	const range = r.pick(DOC_RANGES);
 	const ip = `${range}.${r.int(2, 254)}`;
 	const moved = r.chance(0.04);
-	const { w: _w, ...place } = dc;
-	return { ip, firstIp: moved ? `${r.pick(DOC_RANGES)}.${r.int(2, 254)}` : ip, ipChangedAt: null, location: { ...place, asn: 22697, org: "Roblox" } };
+	const { w: _w, iata, ...place } = dc;
+	const firstIp = moved ? `${r.pick(DOC_RANGES)}.${r.int(2, 254)}` : ip;
+	// Most servers run a kernel that sends the Roblox region; the rest are located by their address.
+	const region = r.chance(0.85) ? iata : null;
+	return { ip, firstIp, ipChangedAt: null, location: { ...place, asn: 22697, org: "Roblox" }, region, geoSource: region ? "roblox" : "ip" };
 }
 
 // The game's own columns (plans/34): game state only, never player names or ids --------------------------------------
@@ -338,6 +342,8 @@ export function serverInfo(m: Model, j: PackJob, ips = true): FleetServer {
 		...(ips ? { ip: geo.ip, firstIp: geo.firstIp } : {}),
 		ipChangedAt: geo.firstIp !== geo.ip ? iso(startOf(j) + 41 * 60_000) : null,
 		location: geo.location,
+		region: geo.region,
+		geoSource: geo.geoSource,
 		cv: columnValuesAt(j, live ? lastSeen : j.lastAt, players),
 	};
 }

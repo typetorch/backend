@@ -7,7 +7,7 @@ import { DataTable, type DataColumn } from "@/components/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { HealthBadge } from "@/components/HealthReasons";
-import { CountryCode, countryCounts, GeoCredit, LocationLabel, locationText, networkText, placeText, type CountryCount } from "@/components/ServerLocation";
+import { CountryCode, countryCounts, GeoCredit, hasLocation, isIpEstimate, LocationLabel, locationText, networkText, placeText, type CountryCount } from "@/components/ServerLocation";
 import { api } from "@/lib/api";
 import { isReadOnly, useAuth } from "@/lib/auth";
 import { fmtAgo, fmtDuration, fmtInt, fmtNum, fmtTime, plural, shortId } from "@/lib/format";
@@ -277,19 +277,21 @@ export const SERVER_COLUMNS: DataColumn<FleetServer>[] = [
 		className: "tabular-nums",
 	},
 	{ id: "kernel", header: "Kernel", type: "enum", accessor: (s) => s.kernel, className: "text-xs" },
-	// Where the server is: its address looked up in the backend's offline IP database (the country, then the place).
+	// Where the server is: its Roblox region (an airport code) when known, else its address looked up in the backend's
+	// offline IP database (the country, then the place).
 	{
 		id: "country",
 		header: "Country",
 		type: "enum",
 		accessor: (s) => s.location?.country ?? null,
-		cell: (s) => (s.location ? <LocationLabel location={s.location} /> : <span className="text-muted-foreground">–</span>),
-		format: (_v, s) => locationText(s.location),
-		searchText: (s) => [s.location?.countryName, placeText(s.location)].filter(Boolean).join(" "),
+		cell: (s) => (hasLocation(s) ? <LocationLabel location={s.location} region={s.region} geoSource={s.geoSource} /> : <span className="text-muted-foreground">–</span>),
+		format: (_v, s) => locationText(s.location, s.region),
+		searchText: (s) => [s.region, s.location?.countryName, placeText(s.location)].filter(Boolean).join(" "),
 		exportValue: (s) => s.location?.country ?? null,
 		className: "text-xs whitespace-nowrap",
 	},
 	{ id: "place", header: "City", type: "text", filter: "text", accessor: (s) => placeText(s.location), defaultHidden: true, className: "text-xs" },
+	{ id: "region", header: "Region", type: "enum", accessor: (s) => s.region ?? null, defaultHidden: true, className: "font-mono text-xs" },
 	{ id: "network", header: "Network", type: "text", filter: "text", accessor: (s) => networkText(s.location), defaultHidden: true, className: "max-w-60 truncate text-xs" },
 	// Owners only: the backend leaves addresses out for the read-only role, and serverColumns drops the column there.
 	{
@@ -567,8 +569,8 @@ export const GONE_COLUMNS: DataColumn<GoneServer>[] = [
 		header: "Country",
 		type: "enum",
 		accessor: (s) => s.location?.country ?? null,
-		cell: (s) => (s.location ? <LocationLabel location={s.location} /> : <span className="text-muted-foreground">–</span>),
-		format: (_v, s) => locationText(s.location),
+		cell: (s) => (hasLocation(s) ? <LocationLabel location={s.location} region={s.region} geoSource={s.geoSource} /> : <span className="text-muted-foreground">–</span>),
+		format: (_v, s) => locationText(s.location, s.region),
 		className: "text-xs whitespace-nowrap",
 	},
 	{ id: "players", header: "Players", accessor: (s) => s.players, defaultHidden: true },
@@ -615,9 +617,9 @@ const COUNTRY_COLUMNS: DataColumn<CountryCount>[] = [
 export function ByCountry({ data }: { data: FleetServers }) {
 	if (!data.servers.some((s) => s.location)) return null;
 	return (
-		<Section title="By country" description="Live servers grouped by where their address is.">
+		<Section title="By country" description="Live servers grouped by where they are (their Roblox region, else their address).">
 			<DataTable id="fleet-countries" label="Servers by country" columns={COUNTRY_COLUMNS} data={countryCounts(data.servers)} rowId={(c) => c.country} defaultSort={[{ id: "servers", desc: true }]} maxHeight="20rem" />
-			<GeoCredit geo={data.geo} />
+			{data.servers.some(isIpEstimate) ? <GeoCredit geo={data.geo} /> : null}
 		</Section>
 	);
 }
@@ -704,12 +706,12 @@ export default function Fleet() {
 							<Metric
 								label="Countries"
 								value={fmtInt(countryCounts(data.servers).filter((c) => c.country !== "??").length)}
-								sub={data.geo?.state === "off" ? "locations are off" : data.geo?.state === "missing" ? "no IP database yet" : countriesText(data.servers)}
+								sub={data.servers.some((s) => s.region) ? countriesText(data.servers) : data.geo?.state === "off" ? "locations are off" : data.geo?.state === "missing" ? "no IP database yet" : countriesText(data.servers)}
 							/>
 						</div>
 						<Section title="Servers">
 							<Servers data={data} />
-							{data.servers.some((s) => s.location) ? <GeoCredit geo={data.geo} /> : null}
+							{data.servers.some(isIpEstimate) ? <GeoCredit geo={data.geo} /> : null}
 						</Section>
 						<ByCountry data={data} />
 					</>
@@ -750,7 +752,7 @@ export default function Fleet() {
 					{(data) => (
 						<>
 							<RecentlyGone servers={data} />
-							{data.some((s) => s.location) ? <GeoCredit geo={servers.data?.geo} /> : null}
+							{data.some(isIpEstimate) ? <GeoCredit geo={servers.data?.geo} /> : null}
 						</>
 					)}
 				</QueryState>

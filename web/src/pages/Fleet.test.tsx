@@ -180,9 +180,15 @@ describe("server locations", () => {
 
 	it("shows the country chip and the place, and sorts by the country code (unknown last)", () => {
 		mount(located);
-		expect(cells("Country")).toEqual(["USSterling, Virginia", "DEFrankfurt am Main, Hesse", "–", "USSterling, Virginia"]);
+		expect(cells("Country")).toEqual(["USSterling, VirginiaIP est.", "DEFrankfurt am Main, HesseIP est.", "–", "USSterling, VirginiaIP est."]);
 		sortBy("Country");
 		expect(jobs()).toEqual(["job-b", "job-a", "job-d", "job-c"]);
+	});
+
+	it("a Roblox region leads with its airport code and says Roblox; a code with no city still shows", () => {
+		const ASHBURN = { ...US, city: "Ashburn" };
+		mount([server("job-r", { location: ASHBURN, region: "IAD", geoSource: "roblox" }), server("job-q", { location: null, region: "QQQ", geoSource: "roblox" })]);
+		expect(cells("Country")).toEqual(["IAD·USAshburnRoblox", "QQQRoblox"]);
 	});
 
 	it("owners get an IP column (a moved server says so); the read-only role's columns have none", () => {
