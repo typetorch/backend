@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { ICON_RETRY_MS, ICON_TTL_MS, IconCache } from "../src/server/mobile-live.ts";
 import type { ReleaseDay } from "../src/fleet/deploys.ts";
-import { METRICS_MAX, METRICS_PARAM_MAX, METRIC_SLOW_TTL_MS, METRIC_TTL_MS, MetricsCache, MobileMetrics, parseMetricId, parseMetricsParam, parseWindow, releaseCell, releaseLevel, releasesFrom, RELEASE_DAYS, type Numbers, type ReleaseCell } from "../src/server/mobile-metrics.ts";
+import { METRICS_MAX, METRICS_PARAM_MAX, METRIC_SLOW_TTL_MS, METRIC_TTL_MS, MetricsCache, MobileMetrics, parseMetricId, sourceCompute, parseMetricsParam, parseWindow, releaseCell, releaseLevel, releasesFrom, RELEASE_DAYS, type Numbers, type ReleaseCell } from "../src/server/mobile-metrics.ts";
 import { ADMIN, API, T0, asJson, bearer, harness, post, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
@@ -28,7 +28,7 @@ describe("widget stats: ids and windows", () => {
 	test("ids: units, labels, sources and TTLs; unknown ones null", () => {
 		expect(parseMetricId("dau")).toEqual({ id: "dau", unit: "count", label: "DAU", source: `players:${DAY}`, field: "players", ttlMs: METRIC_TTL_MS });
 		expect(parseMetricId("mau")).toMatchObject({ unit: "count", label: "MAU", source: `players:${30 * DAY}`, ttlMs: METRIC_SLOW_TTL_MS });
-		expect(parseMetricId("d1")).toMatchObject({ unit: "ratio", label: "D1", source: "retention:1", ttlMs: METRIC_TTL_MS });
+		expect(parseMetricId("d1")).toMatchObject({ unit: "ratio", label: "D1", source: "retention-live:1", ttlMs: METRIC_TTL_MS });
 		expect(parseMetricId("d7")).toMatchObject({ unit: "ratio", label: "D7", source: "retention:7", ttlMs: METRIC_SLOW_TTL_MS });
 		expect(parseMetricId("ccu")).toMatchObject({ unit: "count", label: "CCU", source: "live" });
 		expect(parseMetricId("peakToday")).toMatchObject({ unit: "count", label: "Peak today", source: "live" });
@@ -284,7 +284,7 @@ describe("GET /v1/mobile/live?metrics= through the app", () => {
 	beforeAll(async () => {
 		fake = new FakeRoblox();
 		h = await harness({ TYPETORCH_UNIVERSE_ID: "123456789" }, { fetch: fake.fetch });
-		// N = 2026-10-09 12:00 UTC: today is 10-09, the latest complete D1 cohort joined 10-07, D7's 10-01.
+		// N = 2026-10-09 12:00 UTC: today is 10-09, the D1 cohort in progress joined 10-08, the latest complete one 10-07, D7's 10-01.
 		await ingest([
 			// The last hours (as the live test): p1, p2 new; p3 still running; p6 ended in the hour before.
 			...session("p1", N - 40 * MIN, 10, { newp: true, buys: [100] }),
@@ -367,7 +367,8 @@ describe("GET /v1/mobile/live?metrics= through the app", () => {
 			"new:24h": { value: 2, prev: 3, unit: "count", label: "New 24h" },
 			"new:7d": { value: 7, prev: 3, unit: "count", label: "New 7d" },
 			// 10-07's cohort: c1 of 3 back on 10-08; 10-06's: d1p of 2.
-			d1: { value: 0.3333, prev: 0.5, unit: "ratio", label: "D1" },
+			// D1 is the cohort in progress (joined 10-08: nobody here) against 10-07's final one.
+			d1: { value: null, prev: 0.3333, unit: "ratio", label: "D1" },
 			// 10-01's cohort: a1 of 2 back on 10-08; 09-30's: b1 of 1.
 			d7: { value: 0.5, prev: 1, unit: "ratio", label: "D7" },
 			// Ended in the hour: p1 10, p2 20, p5 45 min (mean 25 min); the hour before: p6 30 min.
@@ -697,5 +698,26 @@ describe("GET /v1/mobile/live?metrics=releases through the app", () => {
 		expect(r).toMatchObject({ prod: 7, dev: 9, lastProd: "1 d ago", lastProdLabel: "#16 · a1b2c3d-000016" });
 		expect(r.days.some((c: ReleaseCell) => c.bg === "rnone")).toBe(false);
 		expect(r.days[0]).toEqual({ date: "2026-04-12", p: 0, d: 0, bg: "r0", tri: "rnone" });
+	});
+});
+
+describe("d1: the in-progress cohort", () => {
+	test("today's partial D1 of yesterday's joiners, against the day before's final D1", async () => {
+		const DAY = 86_400_000;
+		const now = Date.UTC(2026, 10, 20, 15, 0);
+		const today = Math.floor(now / DAY);
+		const iso = (d: number) => new Date(d * DAY).toISOString().slice(0, 10);
+		const asked: unknown[] = [];
+		const compute = sourceCompute("retention-live:1", async (name, range, options) => {
+			asked.push({ name, range, options });
+			return {
+				cohorts: [
+					{ date: iso(today - 2), size: 100, kept: { "1": 0.05 }, partial: {} },
+					{ date: iso(today - 1), size: 80, kept: { "1": null }, partial: { "1": 0.0375 } },
+				],
+			};
+		});
+		expect(await compute(now)).toEqual({ retention: 0.0375, retentionPrev: 0.05 });
+		expect(asked).toEqual([{ name: "retention", range: { from: (today - 2) * DAY, to: today * DAY }, options: { days: [1] } }]);
 	});
 });

@@ -7,7 +7,9 @@
  * channel or audience filter; the queries' own Studio rules):
  *   - `dau` / `wau` / `mau` / `new:<w>`: `overview` (players, new players) over the last 24 h / 7 d / 30 d / the window,
  *     and again over the window before;
- *   - `d1` / `d7`: `retention` (days [1] / [7]) over the two latest complete join-day cohorts;
+ *   - `d1`: `retention` (days [1]) of the cohort whose day 1 is today, so far (the in-progress number, the Retention
+ *     page's partial cell; it grows through the day), against yesterday's final D1 (the latest complete cohort);
+ *   - `d7`: `retention` (days [7]) over the two latest complete join-day cohorts;
  *   - `session:<w>` / `playtime:<w>` / `sessions:<w>`: `session-time` (by end, no merge: the Session time page's default)
  *     over the window; its `previous` is the window before;
  *   - `revenue:<w>` / `payers:<w>`: `monetization` (Robux players paid, payers) over the window, and the window before;
@@ -85,7 +87,7 @@ const FIXED: Record<string, Omit<MetricSpec, "id" | "ttlMs"> & { ttlMs?: number 
 	dau: { unit: "count", label: "DAU", source: `players:${DAY}`, field: "players" },
 	wau: { unit: "count", label: "WAU", source: `players:${7 * DAY}`, field: "players" },
 	mau: { unit: "count", label: "MAU", source: `players:${30 * DAY}`, field: "players", ttlMs: METRIC_SLOW_TTL_MS },
-	d1: { unit: "ratio", label: "D1", source: "retention:1", field: "retention" },
+	d1: { unit: "ratio", label: "D1", source: "retention-live:1", field: "retention" },
 	d7: { unit: "ratio", label: "D7", source: "retention:7", field: "retention", ttlMs: METRIC_SLOW_TTL_MS },
 	releases: { unit: "count", label: "Releases", source: "releases", field: "value" },
 };
@@ -238,12 +240,12 @@ interface MonetizationLike {
 	totals: { robux: number; payers: number };
 }
 interface RetentionLike {
-	cohorts: { date: string; size: number; kept: Record<string, number | null> }[];
+	cohorts: { date: string; size: number; kept: Record<string, number | null>; partial?: Record<string, number> }[];
 }
 
 const isoDay = (day: number) => new Date(day * DAY).toISOString().slice(0, 10);
 
-/** A source's computation: `players:<ms>`, `sessions:<ms>`, `money:<ms>`, `retention:<d>`. */
+/** A source's computation: `players:<ms>`, `sessions:<ms>`, `money:<ms>`, `retention:<d>`, `retention-live:<d>`. */
 export function sourceCompute(source: string, run: RunQuery): (now: number) => Promise<Numbers> {
 	const [kind, arg] = source.split(":") as [string, string];
 	const n = Number(arg);
@@ -283,6 +285,16 @@ export function sourceCompute(source: string, run: RunQuery): (now: number) => P
 			const r = (await run("retention", { from: (today - n - 2) * DAY, to: (today - n) * DAY }, { days: [n] })) as RetentionLike;
 			const kept = (day: number) => r.cohorts.find((c) => c.date === isoDay(day))?.kept[String(n)] ?? null;
 			return { retention: kept(today - n - 1), retentionPrev: kept(today - n - 2) };
+		};
+	}
+	if (kind === "retention-live") {
+		// The cohort whose day n is today joined n days ago: its share back so far (`partial`); the one before it, whose
+		// day n ended at midnight, gives the comparison. The range holds exactly those two join days.
+		return async (now) => {
+			const today = Math.floor(now / DAY);
+			const r = (await run("retention", { from: (today - n - 1) * DAY, to: (today - n + 1) * DAY }, { days: [n] })) as RetentionLike;
+			const cohort = (day: number) => r.cohorts.find((c) => c.date === isoDay(day));
+			return { retention: cohort(today - n)?.partial?.[String(n)] ?? null, retentionPrev: cohort(today - n - 1)?.kept[String(n)] ?? null };
 		};
 	}
 	throw new Error(`unknown metric source ${source}`);

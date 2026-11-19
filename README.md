@@ -675,7 +675,8 @@ then calls the same `/v1/...` routes as the explorer with `Authorization: Bearer
   | `ccu`, `servers`, `peakToday` | the fields above (`ccu`'s prev: 5 minutes ago; the others none) | the fleet |
   | `dau`, `wau`, `mau` | unique players in the last 24 h, 7 days, 30 days | `overview` |
   | `new:<w>` | new players (a first-ever session) in the window | `overview` |
-  | `d1`, `d7` | retention of the latest complete join-day cohort (D1: joined two UTC days ago, back the next day); prev: the cohort a day older | `retention` |
+  | `d1` | retention so far of the cohort whose day 1 is today (joined yesterday UTC; it grows through the day, the Retention page's partial cell); prev: the latest complete cohort's D1 (joined two UTC days ago) | `retention` |
+  | `d7` | retention of the latest complete join-day cohort (joined eight UTC days ago, back on day 7); prev: the cohort a day older | `retention` |
   | `session:<w>` | mean length of the sessions that ended in the window, seconds | `session-time` (by end, no merge) |
   | `playtime:<w>` | time played in the window, running sessions included, hours | `session-time` |
   | `sessions:<w>` | sessions that ended in the window | `session-time` |
