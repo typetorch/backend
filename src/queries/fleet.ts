@@ -100,10 +100,19 @@ export interface ServerInfo {
 	firstIp?: string | null;
 	ipChangedAt?: string | null;
 	/**
-	 * Fleet API only: where the latest address is, from the backend's offline IP database (fleet/geo.ts); null while
-	 * unknown (no database, not looked up yet, or a private address).
+	 * Fleet API only: where the server is: from its Roblox region when it sent one (fleet/regions.ts), else where the
+	 * latest address is in the backend's offline IP database (fleet/geo.ts); null while unknown (no region and no
+	 * database, not looked up yet, or a private address).
 	 */
 	location?: ServerLocation | null;
+	/**
+	 * Fleet API only: game.ServerRegion, the hosting data center's IATA airport code ("IAD", "LHR"; kernel heartbeat
+	 * `region`), or null (older kernels, Studio). When set it is the source of `location` (an unknown code: no city or
+	 * coordinates, the code says it all).
+	 */
+	region?: string | null;
+	/** Fleet API only: where `location` came from: "roblox" (the region), "ip" (the IP database estimate), null (unknown). */
+	geoSource?: "roblox" | "ip" | null;
 	/**
 	 * Fleet API only, plans/34: the game's custom column values from its latest heartbeat (`cv`: name -> string, number,
 	 * bool or null); null when the game declares none. The Fleet page's Columns button shows them (GET /v1/fleet/columns).

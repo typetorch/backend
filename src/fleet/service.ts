@@ -12,6 +12,7 @@ import { DEPLOY_RESULTS } from "../schema.ts";
 import { toMs, type ServerInfo, type ServerLocation } from "../queries/fleet.ts";
 import { columnValuesOf, parseColumnValues } from "./live-debug.ts";
 import type { FleetDb, SqlValue } from "./db.ts";
+import { parseRegion, regionAirport } from "./regions.ts";
 import { GEO_OFF, IP_GEO_SCHEMA, type GeoSink, type GeoStatus } from "./geo.ts";
 import { ADDED_DEPLOY_HISTORY_COLUMNS, DEPLOY_ROW_COLUMNS, deployRecords, freezeSummaries, KEEP_DEPLOYS_DAYS, listDeploys, pruneDeploys, releasesBetween, type DeployListOptions, type DeployRecord, type DeployRow, type ReleaseDay } from "./deploys.ts";
 import { healthReasons } from "./health.ts";
@@ -295,6 +296,12 @@ export interface ParsedHeartbeat {
 	 * edge sets it from the connection (trusted proxies, Cloudflare). Null or missing: unknown (kept as it was).
 	 */
 	ip?: string | null;
+	/**
+	 * game.ServerRegion (fleet/regions.ts): the hosting data center's IATA code ("IAD"), from the body's optional top-level
+	 * `region` when it matches ^[A-Z]{3}$; null (missing, "" in Studio, malformed) keeps the stored one. A display hint
+	 * only, never trusted for anything security-related.
+	 */
+	region?: string | null;
 }
 
 /** One point of a server's metrics history (`GET /v1/fleet/servers/<job>/metrics`); t = when it arrived (unix ms). */
@@ -392,6 +399,7 @@ export function parseHeartbeat(raw: unknown, jobHeader?: string | null): ParsedH
 		budget: parseBudget(b.bu),
 		...parseMetrics(b.pf, b.bu),
 		columns: parseColumnValues(b.cv),
+		region: parseRegion(b.region),
 	};
 }
 
@@ -781,6 +789,8 @@ interface ServerRow {
 	first_ip?: string | null;
 	ip_changed_at?: number | null;
 	cv?: string | null;
+	/** game.ServerRegion's IATA code (the latest non-empty one), or null (older kernels, Studio). */
+	server_region?: string | null;
 	/** From the ip_geo join on the latest address (null: no lookup stored). */
 	geo_country?: string | null;
 	geo_country_name?: string | null;
@@ -799,7 +809,7 @@ interface ServerRow {
  */
 const SERVER_COLUMNS =
 	"job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, place_version, experiment, kernel, applied_seq, generation, health, last_error, server_version, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, first_seen, last_seen, closed_at, lost_at, " +
-	"servers.ip AS ip, first_ip, ip_changed_at, cv, g.country AS geo_country, g.country_name AS geo_country_name, g.region AS geo_region, g.city AS geo_city, g.lat AS geo_lat, g.lon AS geo_lon, g.asn AS geo_asn, g.org AS geo_org, g.looked_up AS geo_at";
+	"servers.ip AS ip, first_ip, ip_changed_at, cv, server_region, g.country AS geo_country, g.country_name AS geo_country_name, g.region AS geo_region, g.city AS geo_city, g.lat AS geo_lat, g.lon AS geo_lon, g.asn AS geo_asn, g.org AS geo_org, g.looked_up AS geo_at";
 
 /** servers with the stored lookup of each row's latest address (ip_geo, fleet/geo.ts). */
 const SERVERS_FROM = "servers LEFT JOIN ip_geo g ON g.ip = servers.ip";
@@ -819,10 +829,12 @@ const ADDED_SERVER_COLUMNS: [string, string][] = [
 	["ip_changed_at", "INTEGER"],
 	// Plans/34: the game's column values (`cv`, JSON text).
 	["cv", "TEXT"],
+	// game.ServerRegion (fleet/regions.ts): the data center's IATA code, the location's source of truth when known.
+	["server_region", "TEXT"],
 ];
 
-/** The stored lookup as the API's location, or null (none stored, or the database knew nothing). */
-function locationOfRow(r: ServerRow): ServerLocation | null {
+/** The stored IP lookup as the API's location, or null (none stored, or the database knew nothing). */
+function ipLocationOfRow(r: ServerRow): ServerLocation | null {
 	if (r.geo_at === null || r.geo_at === undefined) return null;
 	const loc: ServerLocation = {
 		country: r.geo_country ?? null,
@@ -835,6 +847,30 @@ function locationOfRow(r: ServerRow): ServerLocation | null {
 		org: r.geo_org ?? null,
 	};
 	return Object.values(loc).some((v) => v !== null) ? loc : null;
+}
+
+/**
+ * Where the server is and who said so. A Roblox region (game.ServerRegion) wins: its airport's city, country and
+ * coordinates (an unknown code: none of them, the code alone says where), with the network (asn, org) still from the IP
+ * lookup since the region says nothing about it. No region (older kernels): the IP lookup exactly as before.
+ */
+function locationOf(r: ServerRow): { location: ServerLocation | null; geoSource: "roblox" | "ip" | null } {
+	const ip = ipLocationOfRow(r);
+	if (r.server_region) {
+		const airport = regionAirport(r.server_region);
+		const loc: ServerLocation = {
+			country: airport?.country ?? null,
+			countryName: airport?.countryName ?? null,
+			region: airport?.subdivision ?? null,
+			city: airport?.city ?? null,
+			lat: airport?.lat ?? null,
+			lon: airport?.lon ?? null,
+			asn: ip?.asn ?? null,
+			org: ip?.org ?? null,
+		};
+		return { location: Object.values(loc).some((v) => v !== null) ? loc : null, geoSource: "roblox" };
+	}
+	return { location: ip, geoSource: ip ? "ip" : null };
 }
 
 /**
@@ -880,7 +916,8 @@ function serverInfo(r: ServerRow, now: number): ServerInfo {
 		ip: r.ip ?? null,
 		firstIp: r.first_ip ?? null,
 		ipChangedAt: iso(r.ip_changed_at),
-		location: locationOfRow(r),
+		region: r.server_region ?? null,
+		...locationOf(r),
 		cv: columnValuesOf(r.cv),
 	};
 }
@@ -985,7 +1022,7 @@ CREATE TABLE IF NOT EXISTS servers (
 	job TEXT PRIMARY KEY, server_type TEXT, branch TEXT, channel TEXT, artifact TEXT, players INTEGER, max_players INTEGER, started_at INTEGER,
 	last_write INTEGER, place_id INTEGER, experiment INTEGER, kernel TEXT, applied_seq INTEGER, generation INTEGER, health TEXT,
 	last_error TEXT, server_version INTEGER, sent_at INTEGER, budget TEXT, tps REAL, tps_min REAL, phys_fps REAL, mem_mb REAL, lua_mb REAL,
-	place_version INTEGER, ip TEXT, first_ip TEXT, ip_changed_at INTEGER, cv TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
+	place_version INTEGER, ip TEXT, first_ip TEXT, ip_changed_at INTEGER, cv TEXT, server_region TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, closed_at INTEGER, lost_at INTEGER);
 CREATE INDEX IF NOT EXISTS servers_branch ON servers (branch, last_seen);
 CREATE INDEX IF NOT EXISTS servers_seen ON servers (last_seen);
 CREATE INDEX IF NOT EXISTS servers_open ON servers (last_seen) WHERE closed_at IS NULL AND lost_at IS NULL;
@@ -1220,14 +1257,14 @@ export class FleetService {
 		const job = p.job;
 		const before = await this.db.first<ServerRow>(`SELECT ${SERVER_COLUMNS} FROM ${SERVERS_FROM} WHERE job = ?`, [job]);
 		const experiment = p.experiment;
-		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, p.keepColumns ? (before?.cv ?? null) : (p.columns ?? null), ip, ip, now, now];
+		const row: SqlValue[] = [p.job, p.serverType, p.branch, p.channel, p.artifact, p.players, p.maxPlayers, p.startedAt, p.lastWrite, p.placeId, experiment, p.kernel, p.appliedSeq, p.generation, p.health, p.lastError, p.serverVersion, p.sentAt, p.budget, p.tps, p.tpsMin, p.physFps, p.memMb, p.luaMb, p.placeVersion, p.keepColumns ? (before?.cv ?? null) : (p.columns ?? null), ip, ip, p.region ?? null, now, now];
 		// One commit: the row, the history point (kernel 0.4.2: one per heartbeat) and the per-server cap on points.
 		// The address: an unknown one (null) keeps the stored one; first_ip is set once; ip_changed_at when it moves.
 		await this.db.transaction((tx) => {
 			tx.run(
-				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, place_version, cv, ip, first_ip, first_seen, last_seen) ` +
-					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
-					`ip = COALESCE(excluded.ip, servers.ip), first_ip = COALESCE(servers.first_ip, excluded.ip), ` +
+				`INSERT INTO servers (job, server_type, branch, channel, artifact, players, max_players, started_at, last_write, place_id, experiment, kernel, applied_seq, generation, health, last_error, server_version, sent_at, budget, tps, tps_min, phys_fps, mem_mb, lua_mb, place_version, cv, ip, first_ip, server_region, first_seen, last_seen) ` +
+					`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job) DO UPDATE SET server_type = excluded.server_type, branch = excluded.branch, channel = excluded.channel, ` +
+					`ip = COALESCE(excluded.ip, servers.ip), server_region = COALESCE(excluded.server_region, servers.server_region), first_ip = COALESCE(servers.first_ip, excluded.ip), ` +
 					`ip_changed_at = CASE WHEN excluded.ip IS NOT NULL AND servers.ip IS NOT NULL AND excluded.ip <> servers.ip THEN excluded.last_seen ELSE servers.ip_changed_at END, ` +
 					`artifact = excluded.artifact, players = excluded.players, max_players = excluded.max_players, started_at = excluded.started_at, ` +
 					`last_write = excluded.last_write, place_id = excluded.place_id, experiment = excluded.experiment, kernel = excluded.kernel, ` +
@@ -1248,7 +1285,7 @@ export class FleetService {
 		if (!before || before.closed_at !== null) change = "new";
 		else if (before.lost_at !== null) change = "back";
 		else {
-			const keys: (keyof ServerRow)[] = ["branch", "artifact", "players", "applied_seq", "generation", "health", "last_error", "kernel", "experiment", "ip", "cv"];
+			const keys: (keyof ServerRow)[] = ["branch", "artifact", "players", "applied_seq", "generation", "health", "last_error", "kernel", "experiment", "ip", "cv", "server_region"];
 			if (keys.some((k) => before[k] !== after[k])) change = "update";
 		}
 		if (change) this.emit({ type: "server", change, server: serverInfo(after, now) });

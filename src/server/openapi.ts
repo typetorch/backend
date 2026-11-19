@@ -76,7 +76,7 @@ const SCHEMAS: Record<string, Schema> = {
 	},
 	ServerLocation: {
 		type: "object",
-		description: "Where a server's latest address is, from the backend's offline IP database (city level at best). Credit the source GeoStatus names (DB-IP Lite: CC BY 4.0).",
+		description: "Where a server is (city level at best): its Roblox region's airport when the kernel sent one (FleetServer.geoSource roblox), else its latest address in the backend's offline IP database (geoSource ip; credit the source GeoStatus names, DB-IP Lite: CC BY 4.0).",
 		properties: {
 			country: nullable("string", "ISO 3166-1 alpha-2"),
 			countryName: nullable("string"),
@@ -109,7 +109,9 @@ const SCHEMAS: Record<string, Schema> = {
 			ip: nullable("string", "admin role only: the public address its heartbeats come from (latest; resolved through the trusted proxies / Cloudflare)"),
 			firstIp: nullable("string", "admin role only: the first address it was seen from"),
 			ipChangedAt: nullable("string", "ISO time the address last changed (null: never)"),
-			location: { oneOf: [ref("ServerLocation"), { type: "null" }], description: "every signed-in role; null while unknown" },
+			location: { oneOf: [ref("ServerLocation"), { type: "null" }], description: "every signed-in role; from the Roblox region when known, else the IP database; null while unknown" },
+			region: nullable("string", "game.ServerRegion: the hosting data center's IATA airport code (IAD, LHR...); null from older kernels and Studio"),
+			geoSource: { type: ["string", "null"], enum: ["roblox", "ip", null], description: "where location came from: roblox (the region), ip (the IP database estimate), null (unknown)" },
 			cv: { type: ["object", "null"], description: "plans/34: the game's custom column values (name -> string, number, bool or null); null when it declares none" },
 		},
 	},
