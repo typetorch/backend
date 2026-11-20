@@ -134,6 +134,14 @@ export interface WarehouseStats {
 
 const TABLES = ["events", "recordings"] as const;
 
+/**
+ * Rows per Parquet row group in a day file. DuckDB's Parquet writer holds a whole row group in memory, and a recording
+ * row carries a base64 chunk of up to 64 KB (8 KB typical): 122880 of them was hundreds of MB, so the nightly export of a
+ * recordings day failed with "Out of Memory" under the ~400 MB memory_limit every night (2026-11-20, extended recordings),
+ * the day never left live.duckdb and the file kept growing. 1024 recording rows = 8 MB typical, 64 MB at worst.
+ */
+const ROW_GROUP_ROWS: Record<(typeof TABLES)[number], number> = { events: 122880, recordings: 1024 };
+
 export class Warehouse {
 	readonly layout: DataLayout;
 	readonly raw: RawLog;
@@ -437,7 +445,7 @@ export class Warehouse {
 				.map((field) => `"${field.name}"`)
 				.join(", ");
 			await this.writer.run(
-				`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${source}) x GROUP BY ALL ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)`,
+				`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${source}) x GROUP BY ALL ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE ${ROW_GROUP_ROWS[table]})`,
 			);
 			// The rows leave the live file and the export is recorded in one transaction; a crash after it is finished
 			// by recover() (rename tmp -> target), so no row is lost or written twice.
@@ -756,7 +764,7 @@ export class Warehouse {
 			const tmp = `${target}.merge.tmp`;
 			rmSync(tmp, { force: true });
 			const written = await this.writer.run(
-				`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${parts.join(" UNION ALL ")}) x GROUP BY ALL ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)`,
+				`COPY (SELECT ${contract}, MIN(rt) AS rt FROM (${parts.join(" UNION ALL ")}) x GROUP BY ALL ORDER BY pid, t) TO ${pathLit(tmp)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE ${ROW_GROUP_ROWS[table]})`,
 			);
 			const after = written.rowsChanged;
 			if (after === 0 && !had) {
