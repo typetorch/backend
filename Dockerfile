@@ -42,6 +42,9 @@ USER bun
 # then finishes the requests running, closes DuckDB and SQLite and exits within seconds (20 s at most; give the container
 # a stop grace period of 30 s). A rolling update's new container meanwhile serves the fleet and waits for DuckDB.
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD bun -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# The health check is a plain HTTP request from bash (/dev/tcp), not a new bun process: on a small host that is swapping,
+# starting bun alone took longer than the old 5 s timeout and marked a working server unhealthy, so the proxy dropped it
+# (503). 15 s and 5 retries ride out a busy minute; a server that stays stuck is still caught within ~3 minutes.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=30s --retries=5 \
+    CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${PORT:-8787} && printf 'GET /healthz HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r -t 14 _ code _ <&3 && [ \"$code\" = 200 ]"]
 CMD ["bun", "src/server/main.ts"]
