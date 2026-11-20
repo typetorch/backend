@@ -28,7 +28,12 @@ CREATE TABLE IF NOT EXISTS notify_intents (user_id INTEGER NOT NULL, kind TEXT N
 CREATE INDEX IF NOT EXISTS notify_intents_due ON notify_intents (status, at);
 CREATE INDEX IF NOT EXISTS notify_intents_until ON notify_intents (status, until);
 CREATE INDEX IF NOT EXISTS notify_intents_updated ON notify_intents (updated);
-CREATE INDEX IF NOT EXISTS notify_intents_user ON notify_intents (user_id, status);
+-- (user_id, status, at): the planner's candidates query checks "this user has a pending intent that is due" per user.
+-- With only (user_id, status) SQLite picked notify_intents_due (status, at) for that EXISTS and scanned every due
+-- pending intent for every user: 34 s per tick on 11k users / 23k pending (2026-11-20), the event loop blocked every
+-- 30 s. This one answers it from the index alone (29 ms); it replaces the (user_id, status) index, its prefix.
+DROP INDEX IF EXISTS notify_intents_user;
+CREATE INDEX IF NOT EXISTS notify_intents_user_due ON notify_intents (user_id, status, at);
 CREATE TABLE IF NOT EXISTS notify_users (user_id INTEGER PRIMARY KEY, online INTEGER NOT NULL DEFAULT 0, presence_at INTEGER NOT NULL DEFAULT 0, left_at INTEGER, last_seen INTEGER, hours TEXT NOT NULL DEFAULT '[]', sent_at INTEGER, unopened INTEGER NOT NULL DEFAULT 0, backoff_at INTEGER, mute_until INTEGER, capped_until INTEGER, optin TEXT, optin_at INTEGER, next_check INTEGER NOT NULL DEFAULT 0, busy TEXT, created INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS notify_users_check ON notify_users (next_check);
 CREATE INDEX IF NOT EXISTS notify_users_seen ON notify_users (last_seen);
