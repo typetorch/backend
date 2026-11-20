@@ -190,6 +190,53 @@ describe("roblox numbers and retention", () => {
 		expect(r.todayElapsed).toBeLessThan(1);
 	});
 
+	test("retention: the day in progress predicted from when returners came back on the last complete days", async () => {
+		const r = await store.query("retention", {}, { days: [1, 2] });
+		const { cohort } = reference(1);
+		// First session start per player and day over the 28 complete days before today.
+		const first = new Map<string, number>();
+		for (const x of sessions(fx.events).values()) {
+			const d = day(x.t0);
+			if (d < TODAY - 28 || d >= TODAY) continue;
+			const key = `${x.pid}:${d}`;
+			first.set(key, Math.min(first.get(key) ?? Infinity, x.t0));
+		}
+		let samples = 0;
+		let early = 0;
+		for (const [key, t0] of first) {
+			const [pid, d] = [key.slice(0, key.lastIndexOf(":")), Number(key.slice(key.lastIndexOf(":") + 1))];
+			const cday = cohort.get(pid);
+			if (cday === undefined || (d - cday !== 1 && d - cday !== 2)) continue;
+			samples++;
+			if (t0 - d * DAY < NOW - TODAY * DAY) early++;
+		}
+		expect(samples).toBeGreaterThanOrEqual(30);
+		expect(r.forecast).toMatchObject({ method: "history", samples, lookbackDays: 28 });
+		expect(r.forecast.arrived).toBe(Math.round(Math.max(0.02, early / samples) * 10_000) / 10_000);
+		let seen = 0;
+		for (const c of r.cohorts) {
+			for (const d of ["1", "2"]) {
+				const so = c.partialPlayers[d];
+				if (so === undefined) {
+					expect(c.forecast[d]).toBeUndefined();
+					continue;
+				}
+				seen++;
+				const want = Math.min(c.size, Math.max(so, Math.round(so / r.forecast.arrived)));
+				expect(c.forecastPlayers[d]).toBe(want);
+				expect(c.forecast[d]).toBe(Math.round((want / c.size) * 10_000) / 10_000);
+			}
+		}
+		expect(seen).toBeGreaterThan(0);
+	});
+
+	test("retention forecast: too little history falls back to the share of the day over", async () => {
+		const { forecastOf } = await import("../src/queries/overview.ts");
+		expect(forecastOf({ total: 10, early: 9 }, 0.5)).toMatchObject({ method: "linear", arrived: 0.5, samples: 10 });
+		expect(forecastOf(undefined, 0.001)).toMatchObject({ method: "linear", arrived: 0.02, samples: 0 });
+		expect(forecastOf({ total: 100, early: 25 }, 0.5)).toMatchObject({ method: "history", arrived: 0.25 });
+	});
+
 	test("retention: every day from 1 to 30 (the Retention page's columns); more than 31 offsets refused", async () => {
 		const all = Array.from({ length: 30 }, (_, i) => i + 1);
 		const r = await store.query("retention", {}, { days: all });

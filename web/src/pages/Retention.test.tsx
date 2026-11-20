@@ -48,6 +48,41 @@ describe("Retention page", () => {
 		expect(screen.getAllByText("1.04%").length).toBe(2);
 	});
 
+	it("in-progress cells: orange so far, a click switches to the gray prediction for midnight UTC and back", async () => {
+		const result: RetentionResult = {
+			from: "2026-11-10T00:00:00.000Z",
+			to: "2026-11-19T12:37:00.000Z",
+			days: [1],
+			cohorts: [{ date: "2026-11-18", size: 1307, kept: { "1": null }, keptPlayers: { "1": null }, partial: { "1": 0.0321 }, partialPlayers: { "1": 42 }, forecast: { "1": 0.0505 }, forecastPlayers: { "1": 66 } }],
+			todayElapsed: 0.526,
+			average: { "1": null },
+			forecast: { method: "history", arrived: 0.6364, samples: 900, lookbackDays: 28 },
+		};
+		vi.spyOn(api, "query").mockImplementation((async () => result) as typeof api.query);
+		render(
+			<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+				<MemoryRouter>
+					<TooltipProvider>
+						<Retention />
+					</TooltipProvider>
+				</MemoryRouter>
+			</QueryClientProvider>,
+		);
+		const cell = (await screen.findByText("3.21%")).closest("button") as HTMLButtonElement;
+		expect(cell.getAttribute("aria-pressed")).toBe("false");
+		expect(cell.title).toContain("42 players back so far");
+		expect(cell.title).toContain("predicted ~5.05% (66 players)");
+		expect(cell.title).toContain("64% of returners were back by this time of day");
+		cell.click();
+		expect(await screen.findByText("~5.05%")).toBeTruthy();
+		expect(cell.getAttribute("aria-pressed")).toBe("true");
+		expect(cell.textContent).toContain("~");
+		expect(cell.textContent).toContain("(66)");
+		expect(cell.title).toContain("Predicted by midnight UTC: ~5.05%");
+		cell.click();
+		expect(await screen.findByText("3.21%")).toBeTruthy();
+	});
+
 	it("formats a share with 2 decimals, always both", () => {
 		expect(retentionPct(0.0345)).toBe("3.45%");
 		expect(retentionPct(0.01)).toBe("1.00%");

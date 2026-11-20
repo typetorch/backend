@@ -265,6 +265,24 @@ export interface RetentionCohort {
 	/** The day in progress (today, UTC), so far: offset -> share back already, and how many. Only that offset, missing otherwise. */
 	partial: Record<string, number>;
 	partialPlayers: Record<string, number>;
+	/** The day in progress, predicted at midnight UTC: the players back so far scaled by `forecast.arrived`. Same offsets as `partial`. */
+	forecast: Record<string, number>;
+	forecastPlayers: Record<string, number>;
+}
+
+/** How the in-progress cells are predicted to end the day. */
+export interface RetentionForecast {
+	/**
+	 * history: the share of returning players (same offsets, same filters) who were already back by this time of day (UTC),
+	 * over the last complete days. linear: too few of those, so the share of the day over.
+	 */
+	method: "history" | "linear";
+	/** The share of a day's returners back by now, 0-1: the cells so far are divided by it. */
+	arrived: number;
+	/** Returner-days the history share is built from. */
+	samples: number;
+	/** Complete days looked back over. */
+	lookbackDays: number;
 }
 
 export interface RetentionResult {
@@ -276,7 +294,14 @@ export interface RetentionResult {
 	todayElapsed: number;
 	/** Weighted over the cohorts whose day is over. */
 	average: Record<string, number | null>;
+	forecast: RetentionForecast;
 }
+
+/** Complete days the forecast learns the time-of-day arrival pattern from, and the fewest returner-days it trusts. */
+export const FORECAST_LOOKBACK_DAYS = 28;
+export const FORECAST_MIN_SAMPLES = 30;
+/** The arrived share is never taken below this (very early in the day the estimate would blow up). */
+const FORECAST_MIN_ARRIVED = 0.02;
 
 export const retention = defineQuery<RetentionOptions, RetentionResult>({
 	name: "retention",
@@ -298,17 +323,20 @@ export const retention = defineQuery<RetentionOptions, RetentionResult>({
 				`WITH ${cohortCtes(ctx, f, window)} ` +
 				`SELECT cday, k, COUNT(DISTINCT pid) AS kept FROM (SELECT c.pid AS pid, c.cday AS cday, a.day - c.cday AS k FROM c JOIN a ON a.pid = c.pid) x ` +
 				`WHERE k IN (${o.days.map((d) => int(d)).join(", ")}) GROUP BY cday, k ORDER BY cday, k ${lim(10_000)}`,
+			arrival: arrivalSql(ctx, f, o.days),
 		};
 	},
 	shape(rows, ctx, f, o) {
 		const today = Math.floor(ctx.now / DAY_MS);
+		const elapsedDay = (ctx.now - today * DAY_MS) / DAY_MS;
+		const forecast = forecastOf(rows.arrival[0], elapsedDay);
 		const kept = new Map<string, number>();
 		for (const r of rows.kept) kept.set(`${num(r.cday)}:${num(r.k)}`, num(r.kept));
 		const sums: Record<string, { kept: number; size: number }> = {};
 		const cohorts = rows.cohorts.map((r) => {
 			const cday = num(r.cday);
 			const size = num(r.size);
-			const out: RetentionCohort = { date: isoDay(cday), size, kept: {}, keptPlayers: {}, partial: {}, partialPlayers: {} };
+			const out: RetentionCohort = { date: isoDay(cday), size, kept: {}, keptPlayers: {}, partial: {}, partialPlayers: {}, forecast: {}, forecastPlayers: {} };
 			for (const d of o.days) {
 				if (cday + d >= today) {
 					out.kept[d] = null;
@@ -317,6 +345,9 @@ export const retention = defineQuery<RetentionOptions, RetentionResult>({
 						const k = kept.get(`${cday}:${d}`) ?? 0;
 						out.partial[d] = ratio(k, size);
 						out.partialPlayers[d] = k;
+						const predicted = Math.min(size, Math.max(k, Math.round(k / forecast.arrived)));
+						out.forecast[d] = ratio(predicted, size);
+						out.forecastPlayers[d] = predicted;
 					}
 					continue;
 				}
@@ -331,10 +362,43 @@ export const retention = defineQuery<RetentionOptions, RetentionResult>({
 		});
 		const average: Record<string, number | null> = {};
 		for (const d of o.days) average[d] = sums[d] ? ratio(sums[d].kept, sums[d].size) : null;
-		const todayElapsed = Math.round(((ctx.now - today * DAY_MS) / DAY_MS) * 1000) / 1000;
-		return { from: iso(f.from), to: iso(f.to), days: o.days, cohorts, todayElapsed, average };
+		const todayElapsed = Math.round(elapsedDay * 1000) / 1000;
+		return { from: iso(f.from), to: iso(f.to), days: o.days, cohorts, todayElapsed, average, forecast };
 	},
 });
+
+/**
+ * For the forecast: over the last complete days, the cohort players (same filters) back on one of `days` after joining,
+ * and how many of them had started their first session that day before the current time of day (UTC). Returners come
+ * at the same hours every day (the player base sits in a few time zones), so today's count so far divided by that share
+ * predicts the count at midnight better than the share of the day over.
+ */
+function arrivalSql(ctx: QueryContext, f: NormalizedFilters, days: number[]): string {
+	const today = Math.floor(ctx.now / DAY_MS);
+	const from = (today - FORECAST_LOOKBACK_DAYS) * DAY_MS;
+	const to = today * DAY_MS;
+	// Minute steps: the statement stays the same within a minute.
+	const tod = Math.floor((ctx.now - to) / 60_000) * 60_000;
+	return (
+		`WITH ${cohortCte(ctx, f)}, ` +
+		`s AS (SELECT e.pid AS pid, MIN(e.t) AS t0 FROM ${ctx.table("events", from, to)} e ` +
+		`WHERE e.t >= ${int(from)} AND e.t < ${int(to)} AND e.pid IS NOT NULL AND e.pid <> '' AND e.sid IS NOT NULL AND e.sid <> '' AND ${NOT_STUDIO} ` +
+		`GROUP BY e.pid, e.sid), ` +
+		`d AS (SELECT pid, day, MIN(t0) - day * ${int(DAY_MS)} AS tod FROM (SELECT pid, t0, ${dayOf("t0")} AS day FROM s) x GROUP BY pid, day) ` +
+		`SELECT COUNT(*) AS total, SUM(CASE WHEN d.tod < ${int(tod)} THEN 1 ELSE 0 END) AS early ` +
+		`FROM c JOIN d ON d.pid = c.pid WHERE d.day - c.cday IN (${days.map((d) => int(d)).join(", ")}) ${ctx.dialect.limit(1)}`
+	);
+}
+
+/** The arrived share from the history row, or the share of the day over when the history is too thin. */
+export function forecastOf(row: Record<string, unknown> | undefined, elapsedDay: number): RetentionForecast {
+	const samples = num(row?.total);
+	const early = num(row?.early);
+	const history = samples >= FORECAST_MIN_SAMPLES;
+	const raw = history ? early / samples : elapsedDay;
+	const arrived = Math.round(Math.min(1, Math.max(FORECAST_MIN_ARRIVED, raw)) * 10_000) / 10_000;
+	return { method: history ? "history" : "linear", arrived, samples, lookbackDays: FORECAST_LOOKBACK_DAYS };
+}
 
 // top events ------------------------------------------------------------------------------------------------------------
 
