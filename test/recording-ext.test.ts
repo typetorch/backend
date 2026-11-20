@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { animationIdsOf, decodeTtExt1, EXT_LIMITS, parseTtExt1Chunk, unpackQuat } from "../src/recording-ext.ts";
 import { ExtChunkWriter, packQuat, type Quat } from "./fixtures/ext-encoder.ts";
+import { frameworkOf } from "../src/queries/recordings.ts";
 
 const T0 = 1_700_000_000_000;
 
@@ -309,5 +310,17 @@ describe("tt-ext-1 decoding", () => {
 		const other = { ...c.row(0, T0), codec: "tt-rec-1" as const };
 		expect(decodeTtExt1([other], T0)).toMatchObject({ chunks: 0, view: [] });
 		expect(decodeTtExt1([], T0)).toMatchObject({ chunks: 0, gaps: 0, entities: [], ui: [] });
+	});
+});
+
+describe("framework version (framework 0.7.4: recording_meta ext_start fw)", () => {
+	test("frameworkOf reads ext_start's fw, ignores other events and bad values", () => {
+		const meta = (name: string, props?: Record<string, unknown>) => ({ kind: "recording_meta", name, props });
+		expect(frameworkOf([meta("start"), meta("ext_start", { secs: 900, fw: "0.7.4" })])).toBe("0.7.4");
+		expect(frameworkOf([meta("ext_start", { secs: 900 })])).toBeNull();
+		expect(frameworkOf([meta("ext_start", { fw: 7 })])).toBeNull();
+		expect(frameworkOf([meta("ext_start", { fw: "<script>" })])).toBeNull();
+		expect(frameworkOf([{ kind: "custom", name: "ext_start", props: { fw: "0.7.4" } }])).toBeNull();
+		expect(frameworkOf([])).toBeNull();
 	});
 });

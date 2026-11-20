@@ -707,6 +707,8 @@ export interface RecordingReplayResult {
 	fps?: [number, number][];
 	/** plans/36: the session's extended streams (tt-ext-1), null without them. */
 	extended?: ExtendedReplay | null;
+	/** The TypeTorch framework that recorded it (framework 0.7.4+ extended recordings); null when unknown. */
+	framework?: string | null;
 	inputs?: RecInput[];
 	events?: { t: number; kind: string; name: string; state?: string | null; props?: Record<string, unknown> }[];
 	signals?: { t: number; kind: "idle" | "camera_spin" | "repeated_clicks"; amount: number; target?: string; zone?: string }[];

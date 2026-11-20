@@ -185,6 +185,32 @@ export interface DeployDetail {
 	/** The release before and after it on the same branch. */
 	previous: DeployNeighbor | null;
 	next: DeployNeighbor | null;
+	/**
+	 * The live servers running this release's artifact by TypeTorch framework version (the framework's built-in Fleet
+	 * column `tt_framework`, framework 0.7.4+; null: an older framework or no column values), most servers first.
+	 */
+	frameworks: { version: string | null; servers: number }[];
+}
+
+/** Framework 0.7.4: the built-in Fleet column with the server's TypeTorch framework version. */
+export const FRAMEWORK_COLUMN = "tt_framework";
+
+/** The live servers' `cv` texts -> servers per framework version (null: none reported), most servers first. */
+export function frameworkCounts(cvs: readonly (string | null)[]): { version: string | null; servers: number }[] {
+	const counts = new Map<string | null, number>();
+	for (const text of cvs) {
+		let version: string | null = null;
+		if (text) {
+			try {
+				const value = (JSON.parse(text) as Record<string, unknown> | null)?.[FRAMEWORK_COLUMN];
+				if (typeof value === "string" && value) version = value;
+			} catch {
+				// a bad row counts as unknown
+			}
+		}
+		counts.set(version, (counts.get(version) ?? 0) + 1);
+	}
+	return [...counts].map(([version, servers]) => ({ version, servers })).sort((a, b) => b.servers - a.servers || String(a.version).localeCompare(String(b.version)));
 }
 
 /** A deploy page lists at most this many of the release's alerts. */
@@ -1837,6 +1863,9 @@ export class FleetService {
 			alerts,
 			previous: await neighbor("SELECT seq, kind, artifact, t, received FROM deploys WHERE branch IS ? AND seq < ? ORDER BY seq DESC LIMIT 1"),
 			next: await neighbor("SELECT seq, kind, artifact, t, received FROM deploys WHERE branch IS ? AND seq > ? ORDER BY seq LIMIT 1"),
+			frameworks: row.artifact
+				? frameworkCounts((await this.db.all<{ cv: string | null }>("SELECT cv FROM servers WHERE closed_at IS NULL AND lost_at IS NULL AND last_seen >= ? AND artifact = ?", [now - LOST_AFTER_MS, row.artifact])).map((r) => r.cv))
+				: [],
 		};
 	}
 

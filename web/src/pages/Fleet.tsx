@@ -333,6 +333,9 @@ function IpText({ server: s }: { server: FleetServer }) {
 	);
 }
 
+/** Framework 0.7.4: the built-in column every server declares with its TypeTorch framework version. */
+export const FRAMEWORK_COLUMN = "tt_framework";
+
 /** Plans/34: a column id for a game-declared column (`cv.<name>`), so it never meets a built-in id. */
 export const gameColumnId = (name: string) => `cv.${name}`;
 
@@ -361,6 +364,9 @@ export function gameColumns(columns: readonly GameColumn[]): DataColumn<FleetSer
 				accessor: (s) => (typeof value(s) === "number" ? value(s) : null),
 				className: "tabular-nums",
 			};
+		// Framework 0.7.4: the framework's own column (each server's TypeTorch framework version), shown by default.
+		if (c.n === FRAMEWORK_COLUMN)
+			return { id: gameColumnId(c.n), header, title: "The TypeTorch framework each server runs (framework 0.7.4+)", type: "enum", accessor: (s) => (value(s) === null ? null : String(value(s))), className: "font-mono text-xs" };
 		return { id: gameColumnId(c.n), header, title, type: "enum", defaultHidden: true, accessor: (s) => (value(s) === null ? null : String(value(s))), className: "text-xs" };
 	});
 }

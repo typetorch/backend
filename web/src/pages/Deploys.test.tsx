@@ -9,7 +9,7 @@ import { api, ApiError } from "@/lib/api";
 import type { DeployDetail as Detail, DeployRecord } from "@/lib/deploys";
 import type { DeployMark } from "@/lib/perf";
 import type { ErrorList } from "@/lib/types";
-import DeployDetailPage from "./DeployDetail";
+import DeployDetailPage, { frameworkText } from "./DeployDetail";
 import Deploys from "./Deploys";
 
 beforeAll(() => {
@@ -196,5 +196,19 @@ describe("deploy markers on bars", () => {
 		await waitFor(() => expect(document.querySelectorAll("[data-mark]").length).toBe(0));
 		expect(localStorage.getItem("tt-explorer-deploy-marks")).toBe("off");
 		expect(toggle.getAttribute("aria-pressed")).toBe("false");
+	});
+});
+
+describe("framework versions (framework 0.7.4)", () => {
+	it("names the live servers' framework versions on the release", () => {
+		expect(frameworkText(undefined)).toBe("no live servers");
+		expect(frameworkText([])).toBe("no live servers");
+		expect(frameworkText([{ version: "0.7.4", servers: 1 }])).toBe("0.7.4 (1 server)");
+		expect(
+			frameworkText([
+				{ version: "0.7.4", servers: 12 },
+				{ version: null, servers: 2 },
+			]),
+		).toBe("0.7.4 (12 servers), unknown (before 0.7.4) (2)");
 	});
 });

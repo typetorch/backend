@@ -157,6 +157,11 @@ export function ReplayPlayer({
 				<Badge variant={replay.why === "left" ? "destructive" : "secondary"}>Ended: {whyLabel(replay.why)}</Badge>
 				{replay.gaps ? <Badge variant="outline">{replay.gaps} chunk(s) lost</Badge> : null}
 				{replay.extended ? <Badge variant="secondary">Extended</Badge> : null}
+				{replay.framework ? (
+					<Badge variant="outline" className="font-mono" title="The TypeTorch framework that recorded it" data-testid="replay-framework">
+						framework {replay.framework}
+					</Badge>
+				) : null}
 				{replay.extended?.gaps ? <Badge variant="outline">{replay.extended.gaps} extended chunk(s) lost</Badge> : null}
 				{replay.extended?.failed ? <Badge variant="outline" title={replay.extended.failed}>Extended data partly unreadable</Badge> : null}
 				{replay.extended?.truncated ? <Badge variant="outline">Extended data cut at the size cap</Badge> : null}

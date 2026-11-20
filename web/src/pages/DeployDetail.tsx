@@ -27,6 +27,12 @@ function Unavailable({ error, what }: { error: unknown; what: string }) {
 	return <ErrorState error={error} title={`Could not load the ${what.toLowerCase()}`} />;
 }
 
+/** "0.7.4 (12 servers), unknown (2)"; "no live servers" when none run the artifact. */
+export function frameworkText(frameworks: Detail["frameworks"]): string {
+	if (!frameworks?.length) return "no live servers";
+	return frameworks.map((f, i) => `${f.version ?? "unknown (before 0.7.4)"} (${f.servers}${i === 0 ? (f.servers === 1 ? " server" : " servers") : ""})`).join(", ");
+}
+
 const SUMMARY_COLUMNS: DataColumn<{ result: string; servers: number }>[] = [
 	{ id: "result", header: "Result", type: "enum", accessor: (r) => r.result, cell: (r) => <Badge variant={r.result === "failed" || r.result === "rolled_back" ? "destructive" : "secondary"}>{r.result}</Badge> },
 	{ id: "servers", header: "Servers", type: "number", accessor: (r) => r.servers },
@@ -195,6 +201,11 @@ function Body({ data }: { data: Detail }) {
 					<KeyValue label="first report">{fmtTime(d.firstReport)}</KeyValue>
 					<KeyValue label="last report">{fmtTime(d.lastReport)}</KeyValue>
 					{d.message ? <KeyValue label="note">{d.message}</KeyValue> : null}
+					<KeyValue label="framework">
+						<span className="font-mono text-xs" data-testid="deploy-framework" title="The TypeTorch framework of the live servers on this artifact (framework 0.7.4+ report it)">
+							{frameworkText(data.frameworks)}
+						</span>
+					</KeyValue>
 				</div>
 			</Section>
 			<Section title="Server reports">{data.report ? <Report data={data.report} /> : <KeptSummary deploy={d} />}</Section>

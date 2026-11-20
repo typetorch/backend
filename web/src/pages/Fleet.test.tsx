@@ -5,7 +5,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DataTable } from "@/components/data-table";
 import { reasonLines, reasonText } from "@/components/HealthReasons";
 import type { FleetServer, FleetServers, HealthReason } from "@/lib/types";
-import { budgetPressure, budgetText, ByCountry, countriesText, memoryHigh, SERVER_COLUMNS, serverColumns, tpsLow, tpsText } from "./Fleet";
+import { budgetPressure, budgetText, ByCountry, countriesText, FRAMEWORK_COLUMN, gameColumnId, memoryHigh, SERVER_COLUMNS, serverColumns, tpsLow, tpsText } from "./Fleet";
 
 beforeAll(() => {
 	globalThis.ResizeObserver ??= class {
@@ -224,5 +224,22 @@ describe("server locations", () => {
 			</MemoryRouter>,
 		);
 		expect(container.textContent).toBe("");
+	});
+});
+
+describe("the framework column (framework 0.7.4)", () => {
+	it("shows tt_framework by default; the game's own columns stay hidden until picked", () => {
+		const columns = serverColumns(false, [
+			{ n: FRAMEWORK_COLUMN, l: "Framework", t: "string" },
+			{ n: "phase", l: "Phase", t: "string" },
+		]);
+		const fw = columns.find((c) => c.id === gameColumnId(FRAMEWORK_COLUMN));
+		const phase = columns.find((c) => c.id === gameColumnId("phase"));
+		expect(fw?.header).toBe("Framework");
+		expect(fw?.defaultHidden).toBeFalsy();
+		expect(phase?.defaultHidden).toBe(true);
+		const server = { cv: { tt_framework: "0.7.4" } } as unknown as FleetServer;
+		expect(fw?.accessor(server)).toBe("0.7.4");
+		expect(fw?.accessor({ cv: null } as unknown as FleetServer)).toBeNull();
 	});
 });

@@ -57,6 +57,8 @@ export interface DeployDetail {
 	alerts: FleetAlert[];
 	previous: DeployNeighbor | null;
 	next: DeployNeighbor | null;
+	/** The live servers on this release's artifact by TypeTorch framework version (null: before framework 0.7.4). */
+	frameworks?: { version: string | null; servers: number }[];
 }
 
 // Words and tones -------------------------------------------------------------------------------------------------------

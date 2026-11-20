@@ -1048,6 +1048,16 @@ export interface ReplayOptions {
 	mapKey: string;
 }
 
+/** The framework version an extended recording's `ext_start` names (`fw`, framework 0.7.4+), else null. */
+export function frameworkOf(events: readonly { kind: string; name: string; props?: Record<string, unknown> }[]): string | null {
+	for (const e of events) {
+		if (e.kind !== "recording_meta" || e.name !== "ext_start") continue;
+		const fw = e.props?.fw;
+		if (typeof fw === "string" && /^\d+\.\d+\.\d+[\w.+-]{0,24}$/.test(fw)) return fw;
+	}
+	return null;
+}
+
 export interface ReplayResult {
 	found: boolean;
 	sid: string;
@@ -1070,6 +1080,8 @@ export interface ReplayResult {
 	fps?: [number, number][];
 	/** plans/36: the session's extended streams (tt-ext-1 rows), decoded; null when it has none. */
 	extended?: ExtTimeline | null;
+	/** The TypeTorch framework that recorded it (recording_meta ext_start `fw`, framework 0.7.4+); null when unknown. */
+	framework?: string | null;
 	inputs?: (Omit<RecordingInput, "t"> & { t: number })[];
 	events?: { t: number; kind: string; name: string; state?: string | null; props?: Record<string, unknown> }[];
 	signals?: { t: number; kind: SignalKind; amount: number; target?: string; zone?: string }[];
@@ -1212,6 +1224,7 @@ export const recordingReplay = defineQuery<ReplayOptions, ReplayResult>({
 			samples,
 			fps,
 			extended,
+			framework: frameworkOf(events),
 			inputs: track.inputs.map((i) => ({ ...i, t: rel(i.t) })),
 			events: events.map((e) => ({ ...e, t: rel(e.t) })),
 			signals: detectSignals(trackToDecoded(track), zoneTimeline(events)).map((sig) => ({

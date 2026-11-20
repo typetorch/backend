@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { openSqlite } from "../src/fleet/db.ts";
 import { deployOutcome, DEPLOY_ERRORS_KEPT, DEPLOY_ERROR_TEXT_MAX } from "../src/fleet/deploys.ts";
-import { FleetService, KEEP_REPORTS_MS, parseDeploy, STUCK_WINDOW_MS } from "../src/fleet/service.ts";
+import { FleetService, frameworkCounts, KEEP_REPORTS_MS, parseDeploy, STUCK_WINDOW_MS } from "../src/fleet/service.ts";
 import { ADMIN, API, asJson, bearer, harness, post, T0, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
@@ -118,6 +118,29 @@ describe("the service", () => {
 		expect((await fleet.deployDetail(12))?.previous).toBeNull();
 		expect(await fleet.deployDetail(99)).toBeUndefined();
 		await fleet.close();
+	});
+
+	test("framework 0.7.4: the live servers on the release's artifact by framework version (the tt_framework column)", async () => {
+		const fleet = await service(() => T0);
+		await fleet.deploy({ s: 30, b: "prod", a: "art-30", k: "deploy", t: T0 - MIN });
+		await fleet.heartbeat({ ...heartbeat("job-1", 30), xh: "h1", cv: { tt_framework: "0.7.4", phase: "Lobby" } });
+		await fleet.heartbeat({ ...heartbeat("job-2", 30), xh: "h1", cv: { tt_framework: "0.7.4" } });
+		await fleet.heartbeat(heartbeat("job-3", 30));
+		await fleet.heartbeat({ ...heartbeat("job-4", 31), xh: "h1", cv: { tt_framework: "0.7.3" } });
+		expect((await fleet.deployDetail(30))?.frameworks).toEqual([
+			{ version: "0.7.4", servers: 2 },
+			{ version: null, servers: 1 },
+		]);
+		expect((await fleet.deployDetail(31))).toBeUndefined();
+		await fleet.close();
+	});
+
+	test("frameworkCounts: bad or missing column values count as unknown", () => {
+		expect(frameworkCounts([null, "not json", "{}", '{"tt_framework":7}', '{"tt_framework":"0.7.4"}'])).toEqual([
+			{ version: null, servers: 4 },
+			{ version: "0.7.4", servers: 1 },
+		]);
+		expect(frameworkCounts([])).toEqual([]);
 	});
 
 	test("stuck servers are counted on the release when the sweep raises server_stuck", async () => {
