@@ -61,6 +61,8 @@ export interface PlayerSummary {
 	newInRange: boolean;
 	/** When their latest session in the range started (for a player in a server now: the current session). */
 	lastSessionStart: string;
+	/** The device of their latest session in the range (desktop, phone, tablet, console, vr, unknown); null when no row says. */
+	device: string | null;
 	/** The UserId, when the analytics server knows it (identity rows; added by the server, not the query). */
 	uid?: number;
 }
@@ -105,16 +107,19 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 				: "p.last_t DESC, p.pid";
 		return {
 			players:
-				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp FROM ${table} e WHERE ${playerRows(f, ctx, search)}), ` +
+				`WITH ev AS (SELECT e.pid AS pid, e.sid AS sid, e.t AS t, e.newp AS newp, e.dev AS dev FROM ${table} e WHERE ${playerRows(f, ctx, search)}), ` +
 				// One row per distinct purchase row (no receipt id exists; a resent copy is an exact duplicate), server-sent only.
 				`pr AS (SELECT DISTINCT e.pid AS pid, e.sid AS sid, e.t AS t, e.name AS name, e.props AS props, e.src AS esrc FROM ${table} e ` +
 				`WHERE ${playerRows(f, ctx, search)} AND e.kind = 'purchase'), ` +
 				`pu AS (SELECT pid, SUM(COALESCE(${robux}, 0)) AS robux FROM pr WHERE ${SERVER_PURCHASE} GROUP BY pid), ` +
-				`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS start_t, MAX(t) - MIN(t) AS len FROM ev GROUP BY sid), ` +
+				// A session's device: a known one over 'unknown' (as demographics does).
+				`s AS (SELECT sid, MIN(pid) AS pid, MIN(t) AS start_t, MAX(t) - MIN(t) AS len, COALESCE(MAX(NULLIF(NULLIF(dev, ''), 'unknown')), MAX(NULLIF(dev, ''))) AS dev FROM ev GROUP BY sid), ` +
 				`sp AS (SELECT pid, COUNT(*) AS sessions, SUM(len) AS playtime_ms, MAX(start_t) AS last_start FROM s GROUP BY pid), ` +
+				// The device of their latest session (for a player in a server now: what they play on right now).
+				`ld AS (SELECT s.pid AS pid, MAX(s.dev) AS dev FROM s JOIN sp ON sp.pid = s.pid AND s.start_t = sp.last_start GROUP BY s.pid), ` +
 				`p AS (SELECT pid, MIN(t) AS first_t, MAX(t) AS last_t, COUNT(*) AS events, MAX(CASE WHEN newp THEN 1 ELSE 0 END) AS isnew FROM ev GROUP BY pid) ` +
-				`SELECT p.pid AS pid, p.first_t AS first_t, p.last_t AS last_t, p.events AS events, p.isnew AS isnew, sp.sessions AS sessions, sp.playtime_ms AS playtime_ms, sp.last_start AS last_start, COALESCE(pu.robux, 0) AS robux ` +
-				`FROM p JOIN sp ON sp.pid = p.pid LEFT JOIN pu ON pu.pid = p.pid ORDER BY ${order} ${ctx.dialect.limit(o.limit)}`,
+				`SELECT p.pid AS pid, p.first_t AS first_t, p.last_t AS last_t, p.events AS events, p.isnew AS isnew, sp.sessions AS sessions, sp.playtime_ms AS playtime_ms, sp.last_start AS last_start, ld.dev AS device, COALESCE(pu.robux, 0) AS robux ` +
+				`FROM p JOIN sp ON sp.pid = p.pid LEFT JOIN pu ON pu.pid = p.pid LEFT JOIN ld ON ld.pid = p.pid ORDER BY ${order} ${ctx.dialect.limit(o.limit)}`,
 		};
 	},
 	shape: (rows) => ({
@@ -128,6 +133,7 @@ export const players = defineQuery<PlayersOptions, PlayersResult>({
 			robux: round(num(r.robux), 2),
 			newInRange: num(r.isnew) === 1,
 			lastSessionStart: iso(num(r.last_start)),
+			device: r.device == null || r.device === "" ? null : str(r.device),
 		})),
 	}),
 });

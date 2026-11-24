@@ -656,6 +656,11 @@ describe("explorer lookups", () => {
 			const starts = new Map<string, number>();
 			for (const e of mine) starts.set(e.sid as string, Math.min(starts.get(e.sid as string) ?? Infinity, e.t as number));
 			expect(p.lastSessionStart).toBe(new Date(Math.max(...starts.values())).toISOString());
+			// The latest session's device: a known one over "unknown".
+			const lastSid = [...starts].find(([, t]) => t === Math.max(...starts.values()))?.[0];
+			const devs = mine.filter((e) => e.sid === lastSid).map((e) => e.dev as string | undefined).filter((d): d is string => !!d);
+			const known = devs.filter((d) => d !== "unknown").sort();
+			expect(p.device).toBe(known.at(-1) ?? devs.sort().at(-1) ?? null);
 		}
 		const found = await store.query("players", {}, { search: "p000", limit: 1000 });
 		expect(found.players.map((x) => x.pid).every((pid) => pid.includes("p000"))).toBe(true);
