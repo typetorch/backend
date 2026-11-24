@@ -2,7 +2,7 @@
  * The Players tab (op `players`): who is in the server, dev or not by the kernel's rule, ping, account age and how their
  * client start went. "Logs" opens that player's client logs in the Logs tab. Each UserId is mapped to its pid (identity
  * rows), so the name links to the Players page with the hover card, and the analytics `players` query (all time) adds
- * the current session's length, the session count and the total playtime.
+ * the current session's length, the platform (device) they are on, the session count and the total playtime.
  */
 import { useQueries } from "@tanstack/react-query";
 import { ScrollText } from "lucide-react";
@@ -91,16 +91,6 @@ function playerColumns(onLogs: (userId: number) => void, ready: boolean, known: 
 				</Button>
 			),
 		},
-		{ id: "userId", header: "UserId", type: "text", accessor: (p) => String(p.userId), className: "font-mono text-xs" },
-		{
-			id: "dev",
-			header: "Access",
-			type: "enum",
-			accessor: (p) => (p.dev ? (p.role ?? "dev") : "player"),
-			cell: (p) => <span title={p.reason}>{p.dev ? (p.role ?? "dev") : "player"}</span>,
-		},
-		{ id: "ping", header: "Ping", hint: "ms", type: "number", firstSort: "desc", accessor: (p) => p.pingMs ?? null, cell: (p) => fmtInt(p.pingMs) },
-		{ id: "accountAge", header: "Account age", hint: "days", type: "number", accessor: (p) => p.accountAge ?? null, cell: (p) => fmtInt(p.accountAge) },
 		{
 			id: "session",
 			header: "Session",
@@ -119,6 +109,28 @@ function playerColumns(onLogs: (userId: number) => void, ready: boolean, known: 
 				return ms === null ? "" : fmtDuration(ms);
 			},
 		},
+		{
+			id: "platform",
+			header: "Platform",
+			title: "The device of their latest session (for a player in this server: the one they are on now)",
+			type: "enum",
+			options: ["desktop", "phone", "tablet", "console", "vr", "unknown"],
+			accessor: (p) => known(p.userId)?.stats?.device ?? null,
+			cell: (p) => {
+				const k = known(p.userId);
+				return k?.stats?.device ? <span className="capitalize">{k.stats.device}</span> : missing(k);
+			},
+		},
+		{ id: "userId", header: "UserId", type: "text", accessor: (p) => String(p.userId), className: "font-mono text-xs" },
+		{
+			id: "dev",
+			header: "Access",
+			type: "enum",
+			accessor: (p) => (p.dev ? (p.role ?? "dev") : "player"),
+			cell: (p) => <span title={p.reason}>{p.dev ? (p.role ?? "dev") : "player"}</span>,
+		},
+		{ id: "ping", header: "Ping", hint: "ms", type: "number", firstSort: "desc", accessor: (p) => p.pingMs ?? null, cell: (p) => fmtInt(p.pingMs) },
+		{ id: "accountAge", header: "Account age", hint: "days", type: "number", accessor: (p) => p.accountAge ?? null, cell: (p) => fmtInt(p.accountAge) },
 		{
 			id: "sessions",
 			header: "Sessions",
