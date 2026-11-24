@@ -761,6 +761,8 @@ export interface PlayerSummary {
 	newInRange: boolean;
 	/** When their latest session in the range started. Older backends leave it out. */
 	lastSessionStart?: string;
+	/** The device of their latest session in the range (desktop, phone, tablet, console, vr, unknown). Older backends leave it out. */
+	device?: string | null;
 	/** The UserId, when the server knows it (identity rows). */
 	uid?: number;
 }
