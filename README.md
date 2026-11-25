@@ -285,7 +285,7 @@ It needs the fleet part (the alert store lives there).
 |---|---|---|
 | Error spike (`backend_error_spike`) | one error kind's count in the last N minutes is at least F times its usual rate per N minutes over the hours before, and at least a minimum | warning; 10 min, 5x, 50 errors, usual rate over 24 h |
 | New error after a deploy (`backend_error_new`) | an error kind first seen within X minutes after the latest deploy (the fleet's `deploys` table) reaches a count; the alert carries the deploy's seq, branch and artifact | warning; 30 min, 20 errors |
-| Players online drop (`backend_ccu_drop`) | players online (fleet heartbeats) fall by X% from the window's peak within N minutes while servers still send heartbeats | critical; 50%, 10 min, peak of 20+ players |
+| Players online drop (`backend_ccu_drop`) | players online (fleet heartbeats) fall by X% from the window's peak within N minutes while servers still send heartbeats | warning; 50%, 10 min, peak of 40+ players (a smaller fleet swings too much to mean anything) |
 | Fleet silent (`backend_fleet_silent`) | no heartbeat (and no analytics ingest, when analytics run) for N minutes, after players were online in the hour before | critical; 10 min, 10+ players before |
 | Ingest stopped (`backend_ingest_stopped`) | analytics ingest accepted no rows for N minutes after steady traffic (rows in 75%+ of the 30 minutes before) while players are online | warning; 10 min, 100+ rows / min before |
 | Slow requests (`backend_latency`) | request p99 above the threshold in every minute of the window (minutes with few requests don't count) | warning; 2000 ms, 5 min, 30 requests / min |
@@ -325,10 +325,10 @@ value; an invalid one stops the start like every other setting:
 | `TYPETORCH_ALERT_<RULE>_<THRESHOLD>` | e.g. `TYPETORCH_ALERT_CCU_DROP_PERCENT=40`, `TYPETORCH_ALERT_DISK_LOW_GB=5`; the names and bounds are in `src/alerts/rules.ts` and on the Settings page (hover a field) |
 
 **Players online milestone** (`ccuMilestone`, level info): milestones from `START` (10), twice as many each step (10, 20,
-40, 80, ...); one fires when the fleet's players online first reach it, re-arms once they drop below `REARM_PERCENT` (70)
-% of it, and fires at most once per `COOLDOWN_MINUTES` (30) per milestone (that cooldown is its repeat window, in place of
-the general one). A jump past several fires only the highest; the first sample after a start only learns the level (a
-restart never announces it). Besides where alerts go, it is a push to every [mobile app](#mobile-app) registration with
+40, 80, ...); each fires once ever, the first time the fleet's players online reach it. The reached milestones are kept in
+SQLite (`backend_ccu_milestones`; the first start with that table also takes the milestones of past milestone alerts), so
+a dip and a climb back, a restart or a deploy never repeat one. A jump past several fires only the highest; a fresh table,
+a changed `START` or the rule turned back on only learns the current level (it never announces it). Besides where alerts go, it is a push to every [mobile app](#mobile-app) registration with
 milestones on.
 
 A `PATCH /v1/admin/settings` may send part of the value (`{"backendAlerts":{"rules":{"ccuDrop":{"on":false}}}}`): the rest

@@ -57,7 +57,8 @@ const FINDINGS_PER_TICK = 5;
 const LOST_AFTER_MS = 90_000;
 const DEDUP_MAX = 2000;
 
-const SCHEMA = "CREATE TABLE IF NOT EXISTS backend_disk_samples (hour INTEGER PRIMARY KEY, used INTEGER NOT NULL, free INTEGER NOT NULL, total INTEGER NOT NULL);";
+const SCHEMA = `CREATE TABLE IF NOT EXISTS backend_disk_samples (hour INTEGER PRIMARY KEY, used INTEGER NOT NULL, free INTEGER NOT NULL, total INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS backend_ccu_milestones (milestone INTEGER PRIMARY KEY, at INTEGER NOT NULL);`;
 
 /** What the evaluator raises; the host stores it as a fleet alert (source "server"). */
 export interface RaisedAlert {
@@ -133,6 +134,7 @@ export class BackendAlerts {
 	private readonly log: (line: string) => void;
 	private readonly samples: Sample[] = [];
 	private readonly milestones: MilestoneState = newMilestoneState();
+	private milestonesLoaded = false;
 	private lastIngest: number | null = null;
 	private lastRowsIn: number | undefined;
 	private readonly lastRaised = new Map<string, number>();
@@ -207,7 +209,7 @@ export class BackendAlerts {
 			},
 		]);
 		runs.push(["ccuDrop", () => checkCcuDrop(this.samples, now, q("ccuDrop"), tickMs)]);
-		runs.push(["ccuMilestone", () => checkCcuMilestone(this.milestones, this.o.fleet ? this.samples[this.samples.length - 1] : undefined, now, q("ccuMilestone"))]);
+		runs.push(["ccuMilestone", () => this.ccuMilestone(now, q("ccuMilestone"))]);
 		runs.push(["fleetSilent", () => checkFleetSilent(this.samples, sample.lastHeartbeat, this.o.analytics() ? this.lastIngest : undefined, now, q("fleetSilent"))]);
 		runs.push(["ingestStopped", () => checkIngestStopped(this.samples, now, q("ingestStopped"), tickMs)]);
 		runs.push(["backendLatency", () => checkLatency(minutes(), now, q("backendLatency"))]);
@@ -267,6 +269,30 @@ export class BackendAlerts {
 			}
 		}
 		return { lastHeartbeat };
+	}
+
+	/**
+	 * The milestone rule with its memory in SQLite: the first run loads every milestone reached before (and the ones past
+	 * milestone alerts name, from before the table), then each tick stores what it adds. A fresh table primes from the
+	 * first sample instead (what is reached then is never announced).
+	 */
+	private async ccuMilestone(now: number, q: { start: number }): Promise<Verdict> {
+		const state = this.milestones;
+		if (!this.milestonesLoaded) {
+			const rows = await this.o.db.all<{ milestone: number }>("SELECT milestone FROM backend_ccu_milestones");
+			const past = this.o.fleet ? await this.o.db.all<{ milestone: number | null }>("SELECT DISTINCT CAST(json_extract(details, '$.milestone') AS INTEGER) AS milestone FROM alerts WHERE code = 'backend_ccu_milestone'") : [];
+			for (const r of [...rows, ...past]) if (r.milestone !== null && Number(r.milestone) > 0) state.reached.add(Number(r.milestone));
+			for (const r of past) if (r.milestone !== null && Number(r.milestone) > 0) await this.o.db.run("INSERT OR IGNORE INTO backend_ccu_milestones (milestone, at) VALUES (?, ?)", [Number(r.milestone), now]);
+			if (state.reached.size) {
+				state.primed = true;
+				state.start = q.start;
+			}
+			this.milestonesLoaded = true;
+		}
+		const before = new Set(state.reached);
+		const verdict = checkCcuMilestone(state, this.o.fleet ? this.samples[this.samples.length - 1] : undefined, q);
+		for (const m of state.reached) if (!before.has(m)) await this.o.db.run("INSERT OR IGNORE INTO backend_ccu_milestones (milestone, at) VALUES (?, ?)", [m, now]);
+		return verdict;
 	}
 
 	/** The loudest kinds of the last `minutes` (at least minCount), with their count in the hours before. */

@@ -7,20 +7,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { checkCcuMilestone, milestonesUpTo, newMilestoneState, type Verdict } from "../src/alerts/checks.ts";
-import { alertSettingsFromEnv, defaultAlertSettings } from "../src/alerts/rules.ts";
+import { alertSettingsFromEnv, checkAlertSettings, defaultAlertSettings } from "../src/alerts/rules.ts";
 import { CcuHistory, formatDuration, formatHours, milestoneBody, seriesMinutes } from "../src/server/mobile-live.ts";
 import { EXPO_PUSH_URL, EXPO_RECEIPTS_URL } from "../src/server/mobile-push.ts";
 import { ADMIN, API, T0, asJson, bearer, harness, type Harness } from "./harness.ts";
 
 const MIN = 60_000;
 const DAY = 86_400_000;
-const Q = { start: 10, rearmPercent: 70, cooldownMinutes: 30 };
+const Q = { start: 10 };
 const fired = (v: Verdict): number[] => (v.state === "firing" ? v.findings.map((f) => Number(f.details.milestone)) : []);
 
 describe("ccuMilestone: the state machine", () => {
 	/** Feeds CCU values one minute apart from `t0`; returns what fired at each step. */
-	function run(values: number[], q = Q, t0 = T0, state = newMilestoneState()) {
-		return values.map((players, i) => fired(checkCcuMilestone(state, { players, servers: 2 }, t0 + i * MIN, q)));
+	function run(values: number[], q: { start: number } = Q, state = newMilestoneState()) {
+		return values.map((players, i) => fired(checkCcuMilestone(state, { players, servers: 2 }, q)));
 	}
 
 	test("milestones double from start", () => {
@@ -41,47 +41,38 @@ describe("ccuMilestone: the state machine", () => {
 		expect(run([15, 50, 60, 79])).toEqual([[], [40], [], []]);
 	});
 
-	test("re-arms below 70 % of the milestone; the cooldown (per milestone) keeps a bounce quiet", () => {
-		const state = newMilestoneState();
-		const at = (players: number, minute: number) => fired(checkCcuMilestone(state, { players, servers: 1 }, T0 + minute * MIN, Q));
-		expect(at(0, 0)).toEqual([]);
-		expect(at(20, 1)).toEqual([20]);
-		// 15 is 75 % of 20: not re-armed, so back at 20 it stays quiet.
-		expect(at(15, 2)).toEqual([]);
-		expect(at(20, 3)).toEqual([]);
-		// 13 is below 14 (70 %): re-armed; back at 20 within 30 min of the first: the cooldown keeps it quiet.
-		expect(at(13, 4)).toEqual([]);
-		expect(at(21, 5)).toEqual([]);
-		// Dropped again, back after the cooldown: fires.
-		expect(at(12, 20)).toEqual([]);
-		expect(at(22, 32)).toEqual([20]);
-		// Below 7 (70 % of 10) re-arms 10 too; climbing again fires 10, then 20 is still within its cooldown.
-		expect(at(6, 40)).toEqual([]);
-		expect(at(11, 41)).toEqual([10]);
-		expect(at(20, 42)).toEqual([]);
+	test("each milestone fires once ever: a dip and a climb back stay quiet", () => {
+		expect(run([0, 20, 13, 21, 0, 11, 22, 39, 40, 5, 41])).toEqual([[], [20], [], [], [], [], [], [], [40], [], []]);
+	});
+
+	test("a state loaded with what was reached before (a restart) fires only new milestones", () => {
+		const state = { ...newMilestoneState(), primed: true, start: 10, reached: new Set([10, 20]) };
+		expect(run([23, 15, 25, 41], Q, state)).toEqual([[], [], [], [40]]);
 	});
 
 	test("the finding: key, message, details and its own repeat window", () => {
 		const state = newMilestoneState();
-		checkCcuMilestone(state, { players: 150, servers: 9 }, T0, Q);
-		const v = checkCcuMilestone(state, { players: 163, servers: 10 }, T0 + MIN, Q);
+		checkCcuMilestone(state, { players: 150, servers: 9 }, Q);
+		const v = checkCcuMilestone(state, { players: 163, servers: 10 }, Q);
 		expect(v.state).toBe("firing");
 		const f = v.state === "firing" ? v.findings[0] : undefined;
-		expect(f).toMatchObject({ key: "160", message: "Reached 160 CCU (163 players online on 10 servers)", details: { milestone: 160, ccu: 163, servers: 10 }, repeatMinutes: 30 });
-		expect(checkCcuMilestone(state, undefined, T0, Q).state).toBe("waiting");
+		expect(f).toMatchObject({ key: "160", message: "Reached 160 CCU (163 players online on 10 servers)", details: { milestone: 160, ccu: 163, servers: 10 } });
+		expect(checkCcuMilestone(state, undefined, Q).state).toBe("waiting");
 	});
 
-	test("a changed start begins again (learns the level first)", () => {
+	test("a changed start learns the level first", () => {
 		const state = newMilestoneState();
-		run([0, 12], Q, T0, state);
-		expect(run([12, 26], { ...Q, start: 25 }, T0 + 10 * MIN, state)).toEqual([[], [25]]);
+		run([0, 12], Q, state);
+		expect(run([12, 26], { start: 25 }, state)).toEqual([[], [25]]);
 	});
 
 	test("settings: defaults, env names and bounds", () => {
-		expect(defaultAlertSettings().rules.ccuMilestone).toEqual({ on: true, level: "info", params: { start: 10, rearmPercent: 70, cooldownMinutes: 30 } });
-		const env = alertSettingsFromEnv({ TYPETORCH_ALERT_CCU_MILESTONE_START: "100", TYPETORCH_ALERT_CCU_MILESTONE_REARM_PERCENT: "80", TYPETORCH_ALERT_CCU_MILESTONE_COOLDOWN_MINUTES: "60" });
-		expect(env.rules.ccuMilestone.params).toEqual({ start: 100, rearmPercent: 80, cooldownMinutes: 60 });
-		expect(() => alertSettingsFromEnv({ TYPETORCH_ALERT_CCU_MILESTONE_REARM_PERCENT: "100" })).toThrow("must be from 10 to 99");
+		expect(defaultAlertSettings().rules.ccuMilestone).toEqual({ on: true, level: "info", params: { start: 10 } });
+		const env = alertSettingsFromEnv({ TYPETORCH_ALERT_CCU_MILESTONE_START: "100" });
+		expect(env.rules.ccuMilestone.params).toEqual({ start: 100 });
+		expect(() => alertSettingsFromEnv({ TYPETORCH_ALERT_CCU_MILESTONE_START: "0" })).toThrow("must be from 1 to");
+		// A saved value from before still loads: the retired thresholds are dropped.
+		expect(checkAlertSettings({ rules: { ccuMilestone: { params: { start: 20, rearmPercent: 70, cooldownMinutes: 30 } } } }).rules.ccuMilestone.params).toEqual({ start: 20 });
 	});
 });
 

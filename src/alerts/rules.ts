@@ -41,6 +41,8 @@ export interface RuleDef {
 	on: boolean;
 	needs: RuleNeeds[];
 	params: readonly ParamDef[];
+	/** Thresholds the rule no longer has: a saved value that still holds them loads with them dropped. */
+	retired?: readonly string[];
 }
 
 export const RULE_IDS = ["errorSpike", "errorNewAfterDeploy", "ccuDrop", "ccuMilestone", "fleetSilent", "ingestStopped", "backendLatency", "backendMemory", "backendLoopLag", "backend5xx", "diskLow", "diskGrowth"] as const;
@@ -85,11 +87,11 @@ export const RULES: readonly RuleDef[] = [
 		env: "CCU_DROP",
 		group: "players",
 		label: "Players online drop",
-		help: "Players online (fleet heartbeats) fall by this share within the window while servers are still up.",
-		level: "critical",
+		help: "Players online (fleet heartbeats) fall by this share within the window while servers are still up. Quiet while the window's peak is under the minimum (a small fleet swings a lot).",
+		level: "warning",
 		on: true,
 		needs: ["fleet"],
-		params: [p("percent", "PERCENT", "Drop", "%", 10, 100, 50), p("minutes", "MINUTES", "Within", "min", 2, 120, 10), p("minPlayers", "MIN_PLAYERS", "Peak at least", "players", 1, 10_000_000, 20)],
+		params: [p("percent", "PERCENT", "Drop", "%", 10, 100, 50), p("minutes", "MINUTES", "Within", "min", 2, 120, 10), p("minPlayers", "MIN_PLAYERS", "Peak at least", "players", 1, 10_000_000, 40)],
 	},
 	{
 		id: "ccuMilestone",
@@ -97,11 +99,12 @@ export const RULES: readonly RuleDef[] = [
 		env: "CCU_MILESTONE",
 		group: "players",
 		label: "Players online milestone",
-		help: "Players online (fleet heartbeats) reach a milestone: start, then twice as many each step (10, 20, 40, ...). It fires again only after players fell below the re-arm share of it, and at most once per cooldown. Also sent as a push to the mobile apps that turned milestones on.",
+		help: "Players online (fleet heartbeats) reach a milestone for the first time: start, then twice as many each step (10, 20, 40, ...). Each milestone fires once ever (kept in SQLite, so a restart or a dip and climb back never repeats it). Also sent as a push to the mobile apps that turned milestones on.",
 		level: "info",
 		on: true,
 		needs: ["fleet"],
-		params: [p("start", "START", "First milestone", "players", 1, 1_000_000, 10), p("rearmPercent", "REARM_PERCENT", "Re-arm below", "% of the milestone", 10, 99, 70), p("cooldownMinutes", "COOLDOWN_MINUTES", "Cooldown", "min per milestone", 1, 10_080, 30)],
+		params: [p("start", "START", "First milestone", "players", 1, 1_000_000, 10)],
+		retired: ["rearmPercent", "cooldownMinutes"],
 	},
 	{
 		id: "fleetSilent",
@@ -286,6 +289,7 @@ export function checkAlertSettings(raw: unknown, base: BackendAlertSettings = de
 			if (value.params !== undefined) {
 				if (!isRecord(value.params)) throw new Error(`backendAlerts.rules.${def.id}.params is an object`);
 				for (const [key, n] of Object.entries(value.params)) {
+					if (def.retired?.includes(key)) continue;
 					const param = def.params.find((q) => q.key === key);
 					if (!param) throw new Error(`backendAlerts.rules.${def.id}.params: unknown threshold; the thresholds are ${def.params.map((q) => q.key).join(", ")}`);
 					rule.params[param.key] = checkNumber(param, n, `backendAlerts.rules.${def.id}.params.${param.key}`);

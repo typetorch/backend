@@ -185,9 +185,9 @@ describe("the backendAlerts setting", () => {
 	test("defaults: every rule on, with its level; env variables override one value each", () => {
 		const d = defaultAlertSettings();
 		expect(Object.keys(d.rules)).toEqual(RULES.map((r) => r.id));
-		expect(d.rules.ccuDrop).toEqual({ on: true, level: "critical", params: { percent: 50, minutes: 10, minPlayers: 20 } });
+		expect(d.rules.ccuDrop).toEqual({ on: true, level: "warning", params: { percent: 50, minutes: 10, minPlayers: 40 } });
 		const env = alertSettingsFromEnv({ TYPETORCH_ALERT_CCU_DROP: "off", TYPETORCH_ALERT_CCU_DROP_PERCENT: "30", TYPETORCH_ALERT_5XX_LEVEL: "Critical", TYPETORCH_BACKEND_ALERTS_PER_HOUR: "4" });
-		expect(env.rules.ccuDrop).toEqual({ on: false, level: "critical", params: { percent: 30, minutes: 10, minPlayers: 20 } });
+		expect(env.rules.ccuDrop).toEqual({ on: false, level: "warning", params: { percent: 30, minutes: 10, minPlayers: 40 } });
 		expect(env.rules.backend5xx.level).toBe("critical");
 		expect(env.perHour).toBe(4);
 		expect(() => alertSettingsFromEnv({ TYPETORCH_ALERT_CCU_DROP_PERCENT: "5" })).toThrow("TYPETORCH_ALERT_CCU_DROP_PERCENT must be from 10 to 100");
@@ -337,6 +337,51 @@ describe("the evaluator", () => {
 		await r.fleet.close();
 	});
 
+	test("players online drop: a peak under 40 stays quiet", async () => {
+		const r = await rig();
+		onlyRules(r.settings, "ccuDrop");
+		for (let i = 0; i <= 10; i++) {
+			const t = T0 + i * MIN;
+			r.setNow(t);
+			await r.db.run("INSERT INTO servers (job, players, first_seen, last_seen) VALUES ('job-a', ?, ?, ?) ON CONFLICT(job) DO UPDATE SET players = excluded.players, last_seen = excluded.last_seen", [i < 8 ? 35 : 10, t, t]);
+			await r.alerts.tick();
+		}
+		expect(r.raised).toEqual([]);
+		expect(r.alerts.status().rules.find((x) => x.id === "ccuDrop")?.note).toContain("below 40");
+		await r.fleet.close();
+	});
+
+	test("players online milestones fire once ever: a dip and climb back, or a restart, never repeat one", async () => {
+		const db = await openSqlite(":memory:");
+		const beat = (r: Rig, players: number, at: number) =>
+			r.db.run("INSERT INTO servers (job, players, first_seen, last_seen) VALUES ('job-a', ?, ?, ?) ON CONFLICT(job) DO UPDATE SET players = excluded.players, last_seen = excluded.last_seen", [players, at, at]);
+		const r = await rig({ db });
+		onlyRules(r.settings, "ccuMilestone");
+		let minute = 0;
+		const feed = async (rr: Rig, values: number[]) => {
+			for (const players of values) {
+				const t = T0 + minute++ * MIN;
+				rr.setNow(t);
+				await beat(rr, players, t);
+				await rr.alerts.tick();
+			}
+		};
+		await feed(r, [0, 12, 21, 5, 22, 11]);
+		expect(r.raised.map((a) => a.message)).toEqual(["Reached 10 CCU (12 players online on 1 server)", "Reached 20 CCU (21 players online on 1 server)"]);
+		// A restart (a new evaluator on the same database): 10 and 20 are remembered, 40 is new.
+		const again = await rig({ db });
+		onlyRules(again.settings, "ccuMilestone");
+		await feed(again, [23, 12, 25, 44, 30, 45]);
+		expect(again.raised.map((a) => a.details.milestone)).toEqual([40]);
+		// The first start with the table (empty): the milestones past alerts name count as reached.
+		await db.run("DELETE FROM backend_ccu_milestones");
+		const upgraded = await rig({ db });
+		onlyRules(upgraded.settings, "ccuMilestone");
+		await feed(upgraded, [41, 10, 45, 81]);
+		expect(upgraded.raised.map((a) => a.details.milestone)).toEqual([80]);
+		await upgraded.fleet.close();
+	});
+
 	test("health rules read the metrics' whole minutes; the throttle caps alerts per hour; the master switch stops everything", async () => {
 		const r = await rig();
 		onlyRules(r.settings, "backendMemory", "backendLoopLag", "backend5xx", "diskLow");
@@ -413,7 +458,7 @@ describe("routes", () => {
 		const good = await patch({ backendAlerts: { rules: { ccuDrop: { on: false } } } });
 		expect(good.status).toBe(200);
 		const now = h.app.settings.get("backendAlerts");
-		expect(now.rules.ccuDrop).toEqual({ on: false, level: "critical", params: { percent: 40, minutes: 10, minPlayers: 20 } });
+		expect(now.rules.ccuDrop).toEqual({ on: false, level: "warning", params: { percent: 40, minutes: 10, minPlayers: 40 } });
 		await h.app.backendAlerts?.tick();
 		expect(h.app.backendAlerts?.status().rules.find((r) => r.id === "ccuDrop")?.state).toBe("off");
 	});

@@ -135,19 +135,18 @@ export function checkCcuDrop(samples: readonly Sample[], now: number, q: { perce
 const MILESTONE_STEPS = 40;
 
 /**
- * The CCU milestone rule's memory, kept by the evaluator between ticks: which milestones are reached (and not re-armed
- * yet) and when each one last fired. Bounded: at most MILESTONE_STEPS + 1 milestones exist for a given `start`.
+ * The CCU milestone rule's memory: every milestone ever reached. The evaluator loads it from SQLite and stores what a
+ * tick adds, so a milestone fires once ever. Bounded: at most MILESTONE_STEPS + 1 milestones exist for a given `start`.
  */
 export interface MilestoneState {
-	/** False until the first sample: what is already reached then is taken as known, never announced. */
+	/** False until the first sample of a fresh state: what is already reached then is taken as known, never announced. */
 	primed: boolean;
-	/** The `start` the state was built for (a changed start begins again, primed from the next sample). */
+	/** The `start` the state was primed for (a changed start primes again, so the new lower steps aren't announced). */
 	start: number;
 	reached: Set<number>;
-	firedAt: Map<number, number>;
 }
 
-export const newMilestoneState = (): MilestoneState => ({ primed: false, start: 0, reached: new Set(), firedAt: new Map() });
+export const newMilestoneState = (): MilestoneState => ({ primed: false, start: 0, reached: new Set() });
 
 /** The milestones start, 2 x start, 4 x start, ... up to `ccu` (none below start). */
 export function milestonesUpTo(ccu: number, start: number): number[] {
@@ -158,25 +157,21 @@ export function milestonesUpTo(ccu: number, start: number): number[] {
 }
 
 /**
- * Players online milestones (10, 20, 40, ... from `start`): a milestone fires when the CCU first reaches it, and re-arms
- * once the CCU has dropped below `rearmPercent` % of it; one milestone fires at most once every `cooldownMinutes`. A
- * jump past several at once fires only the highest one crossed (the others count as reached). The first sample after a
- * start (or a change of `start`) only learns what is already reached: a restart never announces the current level.
- * Mutates `state`.
+ * Players online milestones (10, 20, 40, ... from `start`): a milestone fires the first time the CCU reaches it, and
+ * never again (a dip and a climb back stay quiet). A jump past several at once fires only the highest one crossed (the
+ * others count as reached). An unprimed state (nothing stored yet, the rule turned back on, or a changed `start`) only
+ * learns what is already reached. Mutates `state`: the caller stores what was added to `reached`.
  */
-export function checkCcuMilestone(state: MilestoneState, sample: { players: number; servers: number } | undefined, now: number, q: { start: number; rearmPercent: number; cooldownMinutes: number }): Verdict {
+export function checkCcuMilestone(state: MilestoneState, sample: { players: number; servers: number } | undefined, q: { start: number }): Verdict {
 	if (!sample) return waiting("no sample yet");
 	if (state.start !== q.start) {
 		state.primed = false;
 		state.start = q.start;
-		state.reached.clear();
-		state.firedAt.clear();
 	}
 	const ccu = sample.players;
-	for (const m of state.reached) if (ccu < (m * q.rearmPercent) / 100) state.reached.delete(m);
 	const crossed = milestonesUpTo(ccu, q.start).filter((m) => !state.reached.has(m));
 	for (const m of crossed) state.reached.add(m);
-	const next = milestonesUpTo(Number.MAX_SAFE_INTEGER, q.start).find((m) => m > ccu) ?? null;
+	const next = milestonesUpTo(Number.MAX_SAFE_INTEGER, q.start).find((m) => m > ccu && !state.reached.has(m)) ?? null;
 	const note = `${ccu} players online${next !== null ? `, next milestone ${next}` : ""}`;
 	if (!state.primed) {
 		state.primed = true;
@@ -184,15 +179,11 @@ export function checkCcuMilestone(state: MilestoneState, sample: { players: numb
 	}
 	const top = crossed.length ? (crossed[crossed.length - 1] as number) : null;
 	if (top === null) return ok(note);
-	const last = state.firedAt.get(top);
-	if (last !== undefined && now - last < q.cooldownMinutes * MINUTE) return ok(`${note} (${top} reached again within ${q.cooldownMinutes} min: quiet)`);
-	state.firedAt.set(top, now);
 	return firing(`reached ${top}`, [
 		{
 			key: String(top),
 			message: `Reached ${top} CCU (${ccu} players online on ${plural(sample.servers, "server")})`,
 			details: { milestone: top, ccu, servers: sample.servers },
-			repeatMinutes: q.cooldownMinutes,
 		},
 	]);
 }
