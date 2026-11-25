@@ -993,6 +993,42 @@ export interface RealtimeResult {
 	devices: { now: Record<string, number>; names: string[]; series: { hour: string; avg: Record<string, number>; peak: Record<string, number> }[] };
 }
 
+// First-play bounce (query first-play-bounce) -----------------------------------------------------------------------
+
+export interface BounceCount {
+	/** bounced / firstSessions, 0-1; null when there were none. */
+	rate: number | null;
+	bounced: number;
+	firstSessions: number;
+}
+
+export interface FirstPlayBounceBucket extends BounceCount {
+	t: number;
+	time: string;
+	byDevice: Record<string, BounceCount>;
+}
+
+export interface FirstPlayBounceSummary extends BounceCount {
+	/** The unweighted mean of the non-empty buckets' rates (Creator Hub's headline). */
+	dailyMean: number | null;
+	byDevice: Record<string, BounceCount & { dailyMean: number | null }>;
+	/** First sessions still running in the period (not counted). */
+	running: number;
+}
+
+export interface FirstPlayBounceResult {
+	from: string;
+	to: string;
+	bounceSeconds: number;
+	bucketMinutes: number;
+	/** Device classes with first sessions in the period, busiest first. */
+	devices: string[];
+	buckets: FirstPlayBounceBucket[];
+	summary: FirstPlayBounceSummary;
+	previous: FirstPlayBounceSummary;
+	truncated: boolean;
+}
+
 // Session time explorer (query session-time) -------------------------------------------------------------------------
 
 export interface SessionTimeDevice {
@@ -1519,6 +1555,7 @@ export interface QueryResults {
 	realtime: RealtimeResult;
 	trends: TrendsResult;
 	"session-time": SessionTimeResult;
+	"first-play-bounce": FirstPlayBounceResult;
 	"perf-client": PerfSeriesResult;
 	"perf-server": PerfSeriesResult;
 	"perf-compare": PerfCompareResult;

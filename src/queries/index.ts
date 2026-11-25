@@ -26,6 +26,7 @@ import { playerStats } from "./player.ts";
 import { firstAction, quitAutopsy, recordingLayers, recordingReplay, recordingSessions } from "./recordings.ts";
 import { playerEvents, playerSummary } from "./player-support.ts";
 import { sessionTime } from "./session-time.ts";
+import { firstPlayBounce } from "./first-play-bounce.ts";
 import { perfClient, perfCompare, perfServer } from "./perf.ts";
 
 export const QUERIES = {
@@ -64,6 +65,7 @@ export const QUERIES = {
 	realtime,
 	trends,
 	"session-time": sessionTime,
+	"first-play-bounce": firstPlayBounce,
 	"perf-client": perfClient,
 	"perf-server": perfServer,
 	"perf-compare": perfCompare,
