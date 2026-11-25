@@ -2,11 +2,12 @@
  * Session time: the counterpart of Creator Hub's Performance > Session time "Explore" view, from our own events (query
  * session-time). Follows the filter bar's range; per bucket the average length of the sessions that ended in it (or
  * started), in total and per device class, playtime, playtime per player and sessions, with a summary vs the period
- * before, a length histogram and the bucket rows. Smoothing is a centered rolling average done here.
+ * before, a length histogram and the bucket rows, and the first-play bounce rate by device (components/FirstPlayBounce). Smoothing is a centered rolling average done here.
  */
 import { useMemo } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChangeChip, InfoTip } from "@/components/ChangeChip";
+import { FirstPlayBounce } from "@/components/FirstPlayBounce";
 import { EmptyState, Metric, PageHeader, QueryState, Section } from "@/components/common";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -364,6 +365,7 @@ export default function SessionTime() {
 						)}
 					</QueryState>
 				</Section>
+				<FirstPlayBounce />
 				<div className="grid gap-6 lg:grid-cols-2">
 					<Section title="Session lengths" description="Sessions counted in the range, by length.">
 						<QueryState query={q} isEmpty={(r) => r.summary.sessions === 0} empty="No sessions ended in this range.">
