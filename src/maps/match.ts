@@ -15,6 +15,8 @@ import type { Bounds, ExportEntry, Vec3 } from "./format.ts";
 import { mapKey } from "./script.ts";
 
 export const ALIGN_MARGIN = 8;
+/** The lobby's name in the list and its override's key (the events never name it). Matched exactly, never by mapKey, so a round map named "Lobby" keeps its own override. */
+export const LOBBY = "(lobby)";
 export const ALIGNED_SHARE = 0.8;
 export const PARTIAL_SHARE = 0.2;
 export const MIN_SAMPLES = 10;
@@ -63,7 +65,8 @@ function rank(a: ExportEntry, b: ExportEntry): number {
 /** An override by map name, ignoring case and punctuation. */
 export function overrideFor<T>(overrides: Record<string, T>, name: string): T | undefined {
 	const key = mapKey(name);
-	for (const [k, v] of Object.entries(overrides)) if (mapKey(k) === key) return v;
+	if (name === LOBBY) return overrides[LOBBY];
+	for (const [k, v] of Object.entries(overrides)) if (k !== LOBBY && mapKey(k) === key) return v;
 	return undefined;
 }
 

@@ -523,6 +523,23 @@ describe("the maps routes", () => {
 		expect((await asJson(await h.call("/v1/maps", { headers: bearer(ADMIN) }))).overrides).toEqual({});
 	});
 
+	test("the lobby takes an offset (not a path), kept apart from a round map named like it", async () => {
+		const json = { ...bearer(ADMIN), "content-type": "application/json" };
+		const lobby = `/v1/maps/${encodeURIComponent(LOBBY)}/override`;
+		expect((await h.call(lobby, { method: "PUT", body: JSON.stringify({ path: "Workspace.Lobby" }), headers: json })).status).toBe(400);
+		expect((await h.call(lobby, { method: "PUT", body: JSON.stringify({ offset: [10, -2, 300] }), headers: json })).status).toBe(200);
+		// A round map called "Lobby" is mapKey-equal to "(lobby)" but has its own override.
+		expect((await h.call("/v1/maps/Lobby/override", { method: "PUT", body: JSON.stringify({ offset: [1, 1, 1] }), headers: json })).status).toBe(200);
+		h.setNow(T0 + 41 * 60_000);
+		const list = await asJson(await h.call("/v1/maps", { headers: bearer(ADMIN) }));
+		const map = list.maps.find((m: { name: string }) => m.name === LOBBY);
+		expect(map).toMatchObject({ kind: "lobby", offset: [10, -2, 300], override: { offset: [10, -2, 300] }, alignment: { state: "unknown" } });
+		expect(list.overrides).toMatchObject({ [LOBBY]: { offset: [10, -2, 300] }, Lobby: { offset: [1, 1, 1] } });
+		expect((await h.call(lobby, { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
+		expect((await asJson(await h.call("/v1/maps", { headers: bearer(ADMIN) }))).overrides).toEqual({ Lobby: { offset: [1, 1, 1], by: "admin token", at: expect.any(Number) } });
+		expect((await h.call("/v1/maps/Lobby/override", { method: "DELETE", headers: bearer(ADMIN) })).status).toBe(200);
+	});
+
 	test("another instance on the same data dir (a rolling deploy) sees the index change", async () => {
 		const other = new MapStore({ dataDir: h.dir });
 		expect(other.latest?.maps.length).toBe(3);

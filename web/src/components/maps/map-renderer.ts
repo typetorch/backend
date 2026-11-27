@@ -56,6 +56,8 @@ export interface SceneOptions {
 	markers: boolean;
 	/** Decals, Textures, MaterialVariants and the built-in materials' look (default on). */
 	textures?: boolean;
+	/** An offset change keeps the camera where it is (the live map's offset editor previews as the owner types). */
+	holdCamera?: boolean;
 }
 
 /** A unit box's 12 edges (24 endpoints), for the mesh / union outlines. */
@@ -371,7 +373,7 @@ export class MapRenderer {
 			this.controls = this.makeControls(options.mode);
 			this.controls.enabled = this.view === null;
 		}
-		if (geometryChanged || modeChanged || offsetChanged) this.fit();
+		if (geometryChanged || modeChanged || (offsetChanged && !options.holdCamera)) this.fit();
 		this.buildGrid();
 		this.render();
 	}

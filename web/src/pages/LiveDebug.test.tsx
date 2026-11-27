@@ -22,12 +22,14 @@ import ServerPage from "./Server";
 vi.setConfig({ testTimeout: 20_000 });
 
 vi.mock("@/components/maps/MapScene", () => ({
-	default: (props: { mode: string; layers: MapLayer[]; label?: string; band?: [number, number] | null; onPick?: (p: { x: number; z: number }) => void; onHover?: (p: { x: number; z: number } | null, at: { left: number; top: number }) => void }) => (
+	default: (props: { mode: string; layers: MapLayer[]; label?: string; band?: [number, number] | null; offset?: number[]; holdCamera?: boolean; onPick?: (p: { x: number; z: number }) => void; onHover?: (p: { x: number; z: number } | null, at: { left: number; top: number }) => void }) => (
 		<div
 			data-testid="scene"
 			aria-label={props.label}
 			data-mode={props.mode}
 			data-band={props.band ? props.band.join("..") : "all"}
+			data-offset={(props.offset ?? [0, 0, 0]).join(",")}
+			data-hold={String(Boolean(props.holdCamera))}
 			data-layers={props.layers.map((l) => l.id).join(",")}
 			data-colors={props.layers.map((l) => l.color).join(",")}
 			data-paths={props.layers.map((l) => (l.paths ?? []).map((p) => p.length).join("+")).join(",")}
@@ -347,6 +349,57 @@ describe("/live", () => {
 		expect(within(players).getByText("Charlie")).toBeTruthy();
 		expect(within(players).getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual(["/servers/job-aaaaaaaa-1", "/servers/job-bbbbbbbb-2"]);
 		expect(screen.getByText(/2 servers, 4 players/)).toBeTruthy();
+	});
+
+	it("owners line the map up from here: typing previews the offset (camera held), Save stores it", async () => {
+		const calls: { url: string; method: string; body?: string }[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string, init?: RequestInit) => {
+				const url = String(input);
+				calls.push({ url, method: init?.method ?? "GET", ...(init?.body ? { body: String(init.body) } : {}) });
+				if (url === "/api/v1/maps") return Response.json({ ...view(MAPS), canExport: true });
+				if (url.endsWith("/override")) return Response.json({ override: { offset: [500, 0, 0], by: "x", at: 1 } });
+				if (/\/geometry(\?v=2)?$/.test(url)) return new Response(ttmp([{ pos: [0, -1, 0], size: [200, 2, 200] }]) as Uint8Array<ArrayBuffer>);
+				return new Response("{}", { status: 404 });
+			}),
+		);
+		vi.spyOn(api, "watchLiveMap").mockResolvedValue({ ok: true, until: Date.now() + 60_000, wake: true });
+		vi.spyOn(api, "liveMap").mockResolvedValue({
+			watchedUntil: Date.now() + 60_000,
+			servers: [{ job: "job-aaaaaaaa-1", branch: "prod", artifact: "art-1", at: 1000, players: [{ u: 1, n: "Alpha", x: 500, y: 5, z: 0, st: "alive" }] }],
+		});
+		render(
+			<QueryClientProvider client={client()}>
+				<MemoryRouter initialEntries={["/live"]}>
+					<LivePage />
+				</MemoryRouter>
+			</QueryClientProvider>,
+		);
+		const scene = await screen.findByTestId("scene", {}, { timeout: 10_000 });
+		await waitFor(() => expect(scene.dataset.layers).toBe("dot:job-aaaaaaaa-1:1"));
+		expect(scene.dataset.hold).toBe("true");
+		const x = await screen.findByLabelText("Offset x", {}, { timeout: 10_000 });
+		fireEvent.change(x, { target: { value: "500" } });
+		await waitFor(() => expect(screen.getByTestId("scene").dataset.offset).toBe("500,0,0"));
+		expect(screen.getByText("Previewing, not saved")).toBeTruthy();
+		expect(calls.some((c) => c.method === "PUT")).toBe(false);
+		fireEvent.click(screen.getByRole("button", { name: "Save" }));
+		await waitFor(() => expect(calls.some((c) => c.url === "/api/v1/maps/Lobby/override" && c.method === "PUT" && c.body === '{"offset":[500,0,0]}')).toBe(true));
+	});
+
+	it("viewers get no offset editor on the live map", async () => {
+		vi.spyOn(api, "watchLiveMap").mockResolvedValue({ ok: true, until: Date.now() + 60_000, wake: true });
+		vi.spyOn(api, "liveMap").mockResolvedValue({ watchedUntil: Date.now() + 60_000, servers: [] });
+		render(
+			<QueryClientProvider client={client()}>
+				<MemoryRouter initialEntries={["/live"]}>
+					<LivePage />
+				</MemoryRouter>
+			</QueryClientProvider>,
+		);
+		await screen.findByTestId("scene", {}, { timeout: 10_000 });
+		expect(screen.queryByLabelText("Offset x")).toBeNull();
 	});
 
 	it("moves each server's dots between its last two frames", () => {

@@ -310,7 +310,7 @@ function MapPanel({ map, view }: { map: MapInfo; view: MapsView }) {
 						</div>
 					</Section>
 				) : null}
-				{isMap ? <AlignmentCard map={map} view={view} canEdit={view.canExport} /> : null}
+				<AlignmentCard map={map} view={view} canEdit={view.canExport} />
 			</div>
 		</div>
 	);
@@ -354,21 +354,32 @@ function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; c
 	const parsed = offset.map(Number);
 	const offsetOk = parsed.every((v) => Number.isFinite(v));
 	const text = ALIGN_TEXT[a.state];
+	// The lobby is Workspace's other parts where the place saves them: no positions say where it is, and no model path picks it.
+	const lobby = map.kind === "lobby";
 	return (
 		<Section title="Alignment">
 			<div className="space-y-2 text-sm">
-				<span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${text.tone}`}>{text.label}</span>
-				<p className="text-xs text-muted-foreground" data-testid="alignment-source">
-					{source === "recordings" ? `${fmtInt(a.samples)} recorded positions on this map (recordings, this range)` : `${fmtInt(a.samples)} positioned events (last 30 days)`}; {fmtPct(a.inside, 0)} inside the map's box.
-					{loading ? " Checking the recordings…" : ""}
-					{map.offset.some((v) => v !== 0) ? ` Offset ${map.offset.join(", ")} applied.` : ""}
-				</p>
-				{unconfirmed ? (
+				{lobby ? (
+					<p className="text-xs text-muted-foreground" data-testid="alignment-lobby">
+						The lobby is drawn where the saved place has Workspace's other parts. If the game moves them when it runs, set the offset (the running position minus the saved one).
+						{map.offset.some((v) => v !== 0) ? ` Offset ${map.offset.join(", ")} applied.` : ""}
+					</p>
+				) : (
+					<>
+						<span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${text.tone}`}>{text.label}</span>
+						<p className="text-xs text-muted-foreground" data-testid="alignment-source">
+							{source === "recordings" ? `${fmtInt(a.samples)} recorded positions on this map (recordings, this range)` : `${fmtInt(a.samples)} positioned events (last 30 days)`}; {fmtPct(a.inside, 0)} inside the map's box.
+							{loading ? " Checking the recordings…" : ""}
+							{map.offset.some((v) => v !== 0) ? ` Offset ${map.offset.join(", ")} applied.` : ""}
+						</p>
+					</>
+				)}
+				{!lobby && unconfirmed ? (
 					<p className="text-xs text-muted-foreground" data-testid="alignment-unconfirmed">
 						The recordings never show a player inside this map's zone (their samples were only credited to it because the server ran it: a lobby or tutorial area), so they can't tell where the map is. No offset is suggested from them.
 					</p>
 				) : null}
-				{a.state === "off" && a.suggestedOffset ? (
+				{!lobby && a.state === "off" && a.suggestedOffset ? (
 					<div className="space-y-1">
 						<p>Suggested offset: {a.suggestedOffset.join(", ")}</p>
 						{canEdit ? (
@@ -383,11 +394,11 @@ function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; c
 						className="space-y-2 border-t pt-2"
 						onSubmit={(e) => {
 							e.preventDefault();
-							save.mutate({ ...(path.trim() ? { path: path.trim() } : {}), ...(offsetOk && parsed.some((v) => v !== 0) ? { offset: parsed as Vec3 } : {}) });
+							save.mutate({ ...(!lobby && path.trim() ? { path: path.trim() } : {}), ...(offsetOk && parsed.some((v) => v !== 0) ? { offset: parsed as Vec3 } : {}) });
 						}}
 					>
 						<div className="text-xs font-medium text-muted-foreground">Override (owners)</div>
-						<Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="Model path, e.g. ReplicatedStorage.assets.maps.Mall" aria-label="Model path" className="h-8 text-xs" />
+						{lobby ? null : <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="Model path, e.g. ReplicatedStorage.assets.maps.Mall" aria-label="Model path" className="h-8 text-xs" />}
 						<div className="grid grid-cols-3 gap-1">
 							{["x", "y", "z"].map((axis, i) => (
 								<Input key={axis} value={offset[i]} onChange={(e) => setOffset((o) => o.map((v, k) => (k === i ? e.target.value : v)))} aria-label={`Offset ${axis}`} className="h-8 text-xs" inputMode="decimal" />
@@ -404,7 +415,7 @@ function AlignmentCard({ map, view, canEdit }: { map: MapInfo; view: MapsView; c
 							) : null}
 						</div>
 						{save.error ? <p className="text-xs text-destructive">{(save.error as Error).message}</p> : null}
-						<p className="text-xs text-muted-foreground">A model path applies at the next export; an offset at once.</p>
+						<p className="text-xs text-muted-foreground">{lobby ? "Offset x, y, z in studs; applies at once." : "A model path applies at the next export; an offset at once."}</p>
 					</form>
 				) : null}
 			</div>
