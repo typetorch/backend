@@ -4,7 +4,6 @@ import { ChangeChip } from "@/components/ChangeChip";
 import { CompareToggle } from "@/components/CompareToggle";
 import { DayBars, fillDays, fillSteps, type DayPoint } from "@/components/DayBars";
 import { DeployMarksToggle, useDeployMarks, useOpenDeploy } from "@/components/DeployMarkers";
-import { ExplainButton, ExplainPanel } from "@/components/ExplainPanel";
 import { SavedQueryTile } from "@/components/SavedQueryView";
 import { StorageCard } from "@/components/StorageCard";
 import { Metric, PageHeader, QueryState, Section } from "@/components/common";
@@ -16,7 +15,7 @@ import { describeRange } from "@/lib/filters";
 import { fmtInt, fmtMinutes, fmtNum } from "@/lib/format";
 import { bucketText } from "@/lib/perf";
 import { useAnalytics, useFilters } from "@/lib/hooks";
-import type { ExplainMetric, OverviewResult } from "@/lib/types";
+import type { OverviewResult } from "@/lib/types";
 
 const CHARTS: { key: "players" | "newPlayers" | "sessions" | "playtimeHours"; label: string; decimals?: number }[] = [
 	{ key: "players", label: "Players" },
@@ -25,16 +24,16 @@ const CHARTS: { key: "players" | "newPlayers" | "sessions" | "playtimeHours"; la
 	{ key: "playtimeHours", label: "Playtime (hours)", decimals: 1 },
 ];
 
-/** The stat tiles: label, value, the number the change chip compares, and the `explain` metric behind its "Why?". */
-const TILES: { label: string; value(d: OverviewResult): number; text(d: OverviewResult): string; explain?: ExplainMetric }[] = [
-	{ label: "Players", value: (d) => d.players, text: (d) => fmtInt(d.players), explain: "players" },
-	{ label: "New players", value: (d) => d.newPlayers, text: (d) => fmtInt(d.newPlayers), explain: "newPlayers" },
-	{ label: "Returning", value: (d) => d.returningPlayers, text: (d) => fmtInt(d.returningPlayers), explain: "returningPlayers" },
-	{ label: "Sessions", value: (d) => d.sessions, text: (d) => fmtInt(d.sessions), explain: "sessions" },
+/** The stat tiles: label, value, and the number the change chip compares. */
+const TILES: { label: string; value(d: OverviewResult): number; text(d: OverviewResult): string }[] = [
+	{ label: "Players", value: (d) => d.players, text: (d) => fmtInt(d.players) },
+	{ label: "New players", value: (d) => d.newPlayers, text: (d) => fmtInt(d.newPlayers) },
+	{ label: "Returning", value: (d) => d.returningPlayers, text: (d) => fmtInt(d.returningPlayers) },
+	{ label: "Sessions", value: (d) => d.sessions, text: (d) => fmtInt(d.sessions) },
 	{ label: "Events", value: (d) => d.events, text: (d) => fmtInt(d.events) },
-	{ label: "Playtime", value: (d) => d.playtimeHours, text: (d) => `${fmtNum(d.playtimeHours, 1)} h`, explain: "playtime" },
-	{ label: "Avg session", value: (d) => d.avgSessionMinutes, text: (d) => fmtMinutes(d.avgSessionMinutes), explain: "avgSession" },
-	{ label: "Playtime per player", value: (d) => d.playtimePerPlayerMinutes, text: (d) => fmtMinutes(d.playtimePerPlayerMinutes), explain: "playtimePerPlayer" },
+	{ label: "Playtime", value: (d) => d.playtimeHours, text: (d) => `${fmtNum(d.playtimeHours, 1)} h` },
+	{ label: "Avg session", value: (d) => d.avgSessionMinutes, text: (d) => fmtMinutes(d.avgSessionMinutes) },
+	{ label: "Playtime per player", value: (d) => d.playtimePerPlayerMinutes, text: (d) => fmtMinutes(d.playtimePerPlayerMinutes) },
 ];
 
 const DAY_MS = 86_400_000;
@@ -62,19 +61,7 @@ export function Body({ data, previous, branch }: { data: OverviewResult; previou
 		<>
 			<div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
 				{TILES.map((t) => (
-					<Metric
-						key={t.label}
-						label={t.label}
-						value={t.text(data)}
-						delta={
-							previous ? (
-								<span className="inline-flex items-center gap-0.5">
-									<ChangeChip change={change(t.value(data), t.value(previous))} against="the previous period" />
-									{t.explain ? <ExplainButton metric={t.explain} label={t.label} /> : null}
-								</span>
-							) : undefined
-						}
-					/>
+					<Metric key={t.label} label={t.label} value={t.text(data)} delta={previous ? <ChangeChip change={change(t.value(data), t.value(previous))} against="the previous period" /> : undefined} />
 				))}
 			</div>
 			{deploys.all.length ? (
@@ -132,7 +119,6 @@ export default function Overview() {
 			</QueryState>
 			<PinnedQueries />
 			{readOnly ? null : <StorageCard />}
-			<ExplainPanel />
 		</>
 	);
 }

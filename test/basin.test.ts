@@ -108,19 +108,6 @@ describe("Basin results equal DuckDB results (Basin SQL run on DuckDB through sh
 		expect(await basinStore().query("playtime-funnel", {}, { measure: "first" })).toEqual(expected);
 	});
 
-	test("explain: D1, money, a drill-down", async () => {
-		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
-		for (const options of [
-			{ metric: "d1" },
-			{ metric: "robuxPerPlayer", dimension: "country" },
-			{ metric: "avgSession", within: { dimension: "device", value: "phone" } },
-			{ metric: "players", within: { dimension: "language", value: null } },
-		]) {
-			const expected = await duck.query("explain", {}, options as never);
-			expect(await basinStore().query("explain", {}, options as never)).toEqual(expected);
-		}
-	});
-
 	test("funnel-players: drop-offs and the playtime funnels", async () => {
 		const duck = new DuckDbStore(connection, (n) => n, () => NOW);
 		for (const options of [

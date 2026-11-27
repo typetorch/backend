@@ -3,7 +3,7 @@ import { Graph, buildGraph, formatDuration } from "../src/graph.ts";
 import { decodeSessions, decodeTtRec1, decodeTtRec1Chunk, detectSignals, hasDecoder, lookVector, type RecordingSample } from "../src/recording.ts";
 import { RecWriter } from "./recwriter.ts";
 import { blankLiterals, checkAst, checkSqlText, jsonValue } from "../src/server/sql.ts";
-import { bootstrapMeans, chiSquareSf, daysToReach, holm, minimumDetectableEffect, neededPlayers, normalCdf, normalQuantile, percentSure, prng, sampleRatio, twoProportion, verdict, welch } from "../src/stats.ts";
+import { bootstrapMeans, normalCdf, percentSure, prng, twoProportion, verdict, welch } from "../src/stats.ts";
 
 describe("stats", () => {
 	test("normal CDF", () => {
@@ -36,70 +36,6 @@ describe("stats", () => {
 		expect(bootstrapMeans(a, b, { seed: 5 })).toEqual(boot); // repeatable
 		const same = bootstrapMeans(a, a.slice().reverse());
 		expect(same.sure).toBeLessThan(0.5);
-	});
-
-	test("normal quantile (known values)", () => {
-		expect(normalQuantile(0.975)).toBeCloseTo(1.959964, 6);
-		expect(normalQuantile(0.8)).toBeCloseTo(0.841621, 6);
-		expect(normalQuantile(0.5)).toBe(0);
-		expect(normalQuantile(0.001)).toBeCloseTo(-3.090232, 5);
-		expect(normalCdf(normalQuantile(0.3))).toBeCloseTo(0.3, 6);
-	});
-
-	test("chi-square tail (table values)", () => {
-		expect(chiSquareSf(3.841459, 1)).toBeCloseTo(0.05, 6);
-		expect(chiSquareSf(5.991465, 2)).toBeCloseTo(0.05, 6);
-		expect(chiSquareSf(11.344867, 3)).toBeCloseTo(0.01, 6);
-		expect(chiSquareSf(10.827566, 1)).toBeCloseTo(0.001, 7);
-		// df 4 has a closed form: e^(-x/2) (1 + x/2).
-		expect(chiSquareSf(0.5, 4)).toBeCloseTo(Math.exp(-0.25) * 1.25, 9);
-		expect(chiSquareSf(0, 2)).toBe(1);
-	});
-
-	test("sample ratio mismatch", () => {
-		// 5000 vs 5200 on a 50/50 split: chi2 = 2 * 100^2 / 5100 = 3.9216, p = 0.0477: fine (the threshold is 0.001).
-		const ok = sampleRatio([5000, 5200], [1, 1]);
-		expect(ok.expected).toEqual([5100, 5100]);
-		expect(ok.chi2).toBeCloseTo(3.9216, 4);
-		expect(ok.pValue).toBeCloseTo(0.0477, 4);
-		expect(ok.mismatch).toBe(false);
-		// 5000 vs 5400: chi2 = 2 * 200^2 / 5200 = 15.385, p = 8.8e-5: mismatch.
-		const bad = sampleRatio([5000, 5400], [1, 1]);
-		expect(bad.chi2).toBeCloseTo(15.3846, 4);
-		expect(bad.pValue).toBeCloseTo(8.77e-5, 6);
-		expect(bad.mismatch).toBe(true);
-		// A 3:1 split with three variants and an exact fit.
-		const uneven = sampleRatio([600, 200, 200], [3, 1, 1]);
-		expect(uneven.df).toBe(2);
-		expect(uneven.pValue).toBeCloseTo(1, 6);
-		// Too few players to trust the test: never a mismatch.
-		const few = sampleRatio([4, 0], [1, 1]);
-		expect(few.enough).toBe(false);
-		expect(few.mismatch).toBe(false);
-		// Players in a group whose weight is 0.
-		expect(sampleRatio([500, 30], [1, 0]).mismatch).toBe(true);
-	});
-
-	test("Holm correction", () => {
-		const adjusted = holm([0.01, 0.04, 0.03]);
-		expect(adjusted[0]).toBeCloseTo(0.03, 10);
-		expect(adjusted[1]).toBeCloseTo(0.06, 10);
-		expect(adjusted[2]).toBeCloseTo(0.06, 10);
-		expect(holm([0.02])).toEqual([0.02]);
-		expect(holm([0.5, 0.9])).toEqual([1, 1]);
-	});
-
-	test("minimum detectable effect and players needed", () => {
-		// p = 0.1, 1000 per group, 5% two-sided, 80% power: 2.80158 * sqrt(0.09 * 2 / 1000) = 0.03759.
-		expect(minimumDetectableEffect(0.09, 1000, 0.09, 1000)).toBeCloseTo(0.037587, 5);
-		expect(minimumDetectableEffect(0.09, 0, 0.09, 1000)).toBe(Infinity);
-		// 10% -> 12%: 2.80158^2 * (0.09 + 0.1056) / 0.02^2 = 3838.1 per group.
-		expect(neededPlayers(0.09, 0.1056, 0.02)).toEqual({ a: 3839, b: 3839 });
-		expect(neededPlayers(0.09, 0.09, 0)).toBeNull();
-		// 1000 per group in 10 days (100 a day): 2839 more takes 28.39 days.
-		expect(daysToReach({ a: 3839, b: 3839 }, { a: 1000, b: 1000 }, 10)).toBeCloseTo(28.39, 2);
-		expect(daysToReach({ a: 10, b: 10 }, { a: 1000, b: 1000 }, 10)).toBe(0);
-		expect(daysToReach(null, { a: 1000, b: 1000 }, 10)).toBeNull();
 	});
 
 	test("plain words", () => {

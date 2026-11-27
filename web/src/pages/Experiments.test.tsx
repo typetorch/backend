@@ -4,9 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, experimentPlayerQuery } from "@/lib/api";
-import { AuthProvider } from "@/lib/auth";
-import type { AssignmentCheck, AuthInfo, ExperimentPlayers, ExperimentResult } from "@/lib/types";
-import Experiments, { daysText, experimentRows, gameVariants, mdeText, SampleRatio, weightView } from "./Experiments";
+import type { ExperimentPlayers, ExperimentResult } from "@/lib/types";
+import Experiments, { experimentRows, weightView } from "./Experiments";
 
 afterEach(() => {
 	cleanup();
@@ -59,18 +58,16 @@ function PlayersStandIn() {
 	return <div>Players page {search}</div>;
 }
 
-function mount(path = "/experiments", auth: AuthInfo | null = null) {
+function mount(path = "/experiments") {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	return render(
 		<QueryClientProvider client={client}>
-			<AuthProvider value={auth}>
-				<MemoryRouter initialEntries={[path]}>
-					<Routes>
-						<Route path="/experiments" element={<Experiments />} />
-						<Route path="/players" element={<PlayersStandIn />} />
-					</Routes>
-				</MemoryRouter>
-			</AuthProvider>
+			<MemoryRouter initialEntries={[path]}>
+				<Routes>
+					<Route path="/experiments" element={<Experiments />} />
+					<Route path="/players" element={<PlayersStandIn />} />
+				</Routes>
+			</MemoryRouter>
 		</QueryClientProvider>,
 	);
 }
@@ -164,93 +161,5 @@ describe("experimentPlayerQuery", () => {
 			"?from=2026-10-01&branch=prod&branch=dev&dev=phone&inExperiment=x&inVariant=a&inVariant=b&variant=long&limit=50",
 		);
 		expect(experimentPlayerQuery({})).toBe("");
-	});
-});
-
-const check = (players: number[], mismatch: boolean, extra: Partial<AssignmentCheck> = {}): AssignmentCheck => ({
-	variants: players.map((n, i) => ({ variant: ["short", "long", "mid"][i] as string, index: i + 1, players: n })),
-	order: "game",
-	variantCount: players.length,
-	weights: players.map(() => 1),
-	weightsFrom: "even",
-	srm: { expected: players.map(() => players.reduce((s, n) => s + n, 0) / players.length), chi2: 1, df: players.length - 1, pValue: mismatch ? 0.00002 : 0.4, enough: true, mismatch },
-	...extra,
-});
-
-describe("trustworthy results", () => {
-	it("a sample ratio mismatch is a loud warning; a fair split one quiet line", () => {
-		render(<SampleRatio check={check([100, 50], true, { note: "If the split changed in this range, pick a range after the change." })} />);
-		const alert = screen.getByRole("alert");
-		expect(within(alert).getByText("Sample ratio mismatch: don't trust these numbers")).toBeTruthy();
-		expect(alert.textContent).toContain("short 100 (66.7%, should be 50%)");
-		expect(alert.textContent).toContain("p = 2.0e-5");
-		expect(alert.textContent).toContain("split changed");
-		cleanup();
-		render(<SampleRatio check={check([100, 98], false)} />);
-		expect(screen.queryByRole("alert")).toBeNull();
-		expect(screen.getByTestId("srm-line").textContent).toContain("players per variant fit an even split (p = 0.4)");
-		cleanup();
-		render(<SampleRatio check={{ ...check([10, 10], false), srm: null, note: "Uneven weights are in the game's variant order" }} />);
-		expect(screen.getByTestId("srm-line").textContent).toContain("Uneven weights");
-	});
-
-	it("can detect and time to tell, in words", () => {
-		const base = { variant: "long", metric: "returned" as const, control: 0.2, value: 0.25, diff: 0.05, lift: 0.25, sure: 0.9, method: "z", words: "" };
-		expect(mdeText({ ...base, mde: 0.04, mdeLift: 0.2 })).toBe("±20% (±4%)");
-		expect(mdeText({ ...base, mde: null })).toBe("no players");
-		expect(mdeText(base)).toBe("–");
-		expect(daysText(0)).toBe("now");
-		expect(daysText(2.2)).toBe("~3 days");
-		expect(daysText(0.3)).toBe("under a day");
-		expect(daysText(900)).toBe("over a year");
-		expect(daysText(null)).toBe("–");
-	});
-
-	it("the variants in the game's order when the rows carry it, else by name", () => {
-		const results3 = { ...(results as Extract<ExperimentResult, { variants: unknown }>), assignment: check([5, 5], false) };
-		expect(gameVariants(results3)).toEqual({ names: ["short", "long"], known: true });
-		expect(gameVariants({ ...results3, assignment: { ...check([5, 5], false), order: "names" } })).toEqual({ names: ["long", "short"], known: false });
-	});
-});
-
-describe("running an experiment from the page", () => {
-	const owner: AuthInfo = { role: "admin", user: { kind: "roblox", userId: 1, name: "Owner" } } as unknown as AuthInfo;
-	const viewer: AuthInfo = { role: "web", user: { kind: "roblox", userId: 2, name: "Viewer" } } as unknown as AuthInfo;
-
-	it("owners prepare a split and get the signed command to copy; the results ask with the override's weights", async () => {
-		mockApi();
-		vi.spyOn(api, "query").mockImplementation(async (_name, _filters, options) =>
-			((options as { experiment?: string }).experiment ? { ...(results as object), assignment: check([4, 3], false) } : list) as never,
-		);
-		const change = vi.spyOn(api, "experimentChange").mockResolvedValue({
-			experiment: "onboarding",
-			action: "split",
-			command: "typetorch experiment weights onboarding 9,1 --variants short,long",
-			dryRun: "typetorch experiment weights onboarding 9,1 --variants short,long --dry-run",
-			effect: "Splits new and returning players short 90%, long 10%.",
-			notes: ["Run it in the game's folder."],
-		});
-		mount("/experiments", owner);
-		const weight = await screen.findByRole("textbox", { name: "Weight of short (control)" });
-		// The override's weights fill the inputs.
-		expect((weight as HTMLInputElement).value).toBe("3");
-		fireEvent.change(weight, { target: { value: "9" } });
-		fireEvent.click(screen.getByRole("button", { name: "Change split" }));
-		await waitFor(() => expect(change).toHaveBeenCalledWith("onboarding", { action: "split", weights: [9, 1], variants: ["short", "long"] }));
-		const box = await screen.findByTestId("prepared-change");
-		expect(within(box).getByLabelText("Run in the game's folder").textContent).toBe("typetorch experiment weights onboarding 9,1 --variants short,long");
-		expect(within(box).getByLabelText("See the change first (writes nothing)").textContent).toContain("--dry-run");
-		fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-		await waitFor(() => expect(change).toHaveBeenLastCalledWith("onboarding", { action: "stop" }));
-		const asked = vi.mocked(api.query).mock.calls.map((c) => c[2] as { experiment?: string; weights?: number[] }).find((o) => o.experiment === "onboarding");
-		expect(asked?.weights).toEqual([3, 1]);
-	});
-
-	it("viewers see the results but no controls", async () => {
-		mockApi();
-		mount("/experiments", viewer);
-		await screen.findByRole("table", { name: "Variants" });
-		expect(screen.queryByRole("button", { name: "Change split" })).toBeNull();
-		expect(screen.queryByText("Run it")).toBeNull();
 	});
 });

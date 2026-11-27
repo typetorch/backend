@@ -4,7 +4,6 @@ import { benchmarks, realtime, trends } from "./benchmarks.ts";
 import { confusion } from "./confusion.ts";
 import { demographics } from "./demographics.ts";
 import { economy } from "./economy.ts";
-import { explain } from "./explain.ts";
 import type { QueryContext, QueryDef, Rows, RunStatements } from "./core.ts";
 import { experiment, experimentPlayers } from "./experiment.ts";
 import { events, players, values } from "./explore.ts";
@@ -28,7 +27,6 @@ export const QUERIES = {
 	roblox,
 	retention,
 	demographics,
-	explain,
 	funnel,
 	"funnel-progress": funnelProgress,
 	"playtime-funnel": playtimeFunnel,
