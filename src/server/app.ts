@@ -382,6 +382,7 @@ export async function startApp(config: ServerConfig, options: AppOptions = {}): 
 			threads: config.threads,
 			keepDays: () => runtime.get("keepDays"),
 			rawKeepDays: () => runtime.get("rawKeepDays"),
+			extKeepDays: () => runtime.get("extKeepDays"),
 			compactMb: config.compactMb,
 			queryTimeoutSeconds: config.queryTimeoutSeconds,
 			queryConcurrency: config.queryConcurrency,

@@ -106,6 +106,8 @@ export interface WarehouseOptions {
 	/** Days of day files and of raw archives kept (0 = forever); a function is read at every prune (a runtime setting). */
 	keepDays: number | (() => number);
 	rawKeepDays: number | (() => number);
+	/** Days extended replays (codec tt-ext-1) stay in the recordings day files (0 = as long as the file); optional. */
+	extKeepDays?: number | (() => number);
 	compactMb: number;
 	queryTimeoutSeconds: number;
 	queryConcurrency: number;
@@ -412,7 +414,7 @@ export class Warehouse {
 				days.push(dayString(day));
 			}
 			if (days.length) await this.rebuildPlayers();
-			const pruned = this.prune(now);
+			const pruned = this.prune(now) + (await this.trimExtended(now));
 			let compacted = false;
 			if (existsSync(this.layout.live) && statSync(this.layout.live).size > this.options.compactMb * 1024 * 1024) {
 				await this.compact();
@@ -523,6 +525,31 @@ export class Warehouse {
 				`TO ${pathLit(`${target}.tmp`)} (FORMAT parquet, COMPRESSION zstd)`,
 		);
 		renameSync(`${target}.tmp`, target);
+	}
+
+	/**
+	 * Cuts extended replays (codec tt-ext-1) out of recordings day files older than extKeepDays, keeping the normal replays
+	 * (tt-rec-1) for the full keepDays: extended data is most of the recordings' size. A file with none left is not touched
+	 * again (one COUNT per old file and night). Returns files rewritten.
+	 */
+	private async trimExtended(now: number): Promise<number> {
+		const read = (v: number | (() => number) | undefined) => (typeof v === "function" ? v() : (v ?? 0));
+		const extKeepDays = read(this.options.extKeepDays);
+		if (extKeepDays <= 0) return 0;
+		const today = Math.floor(now / DAY_MS);
+		let rewritten = 0;
+		for (const file of dayFiles(this.layout.recordings)) {
+			if (file.day >= today - extKeepDays) continue;
+			const hit = Number((await readRows(this.writer, `SELECT COUNT(*) AS n FROM read_parquet(${pathLit(file.path)}) WHERE codec = 'tt-ext-1'`))[0].n);
+			if (!hit) continue;
+			await this.writer.run(
+				`COPY (SELECT * FROM read_parquet(${pathLit(file.path)}) WHERE codec IS DISTINCT FROM 'tt-ext-1' ORDER BY pid, t) TO ${pathLit(`${file.path}.tmp`)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)`,
+			);
+			renameSync(`${file.path}.tmp`, file.path);
+			this.liveVersion++;
+			rewritten++;
+		}
+		return rewritten;
 	}
 
 	/** Deletes day files older than keepDays and raw archives older than rawKeepDays. Returns files removed. */

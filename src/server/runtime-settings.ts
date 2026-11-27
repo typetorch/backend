@@ -60,6 +60,7 @@ export interface RuntimeValues {
 	fleetNewJobsPerMinute: number;
 	keepDays: number;
 	rawKeepDays: number;
+	extKeepDays: number;
 	errorKeepDays: number;
 	errorMaxKinds: number;
 	errorRowsPerDay: number;
@@ -138,6 +139,7 @@ export const SETTINGS: readonly SettingDef[] = [
 	{ key: "fleetNewJobsPerMinute", env: "TYPETORCH_NEW_JOBS_PER_MINUTE", group: "limits", kind: "number", min: 100, max: 1_000_000, unit: "servers / min", label: "New servers per minute", help: "Never-seen JobIds let in per minute (fleet and error logs, counted apart)." },
 	{ key: "keepDays", env: "TYPETORCH_KEEP_DAYS", group: "retention", kind: "number", min: 7, max: 36_500, zero: "forever", unit: "days", label: "Analytics history", help: "Days of Parquet day files kept; 0 keeps them forever. Applied at the nightly export." },
 	{ key: "rawKeepDays", env: "TYPETORCH_RAW_KEEP_DAYS", group: "retention", kind: "number", min: 1, max: 3650, zero: "forever", unit: "days", label: "Raw archives", help: "Days of raw batch archives kept; 0 keeps them forever. Applied at the nightly export." },
+	{ key: "extKeepDays", env: "TYPETORCH_EXT_KEEP_DAYS", group: "retention", kind: "number", min: 1, max: 36_500, zero: "forever", unit: "days", label: "Extended recordings", help: "Days extended replays (tt-ext-1) are kept; older ones are cut out of the recordings day files, normal replays stay. 0 keeps them as long as the day files. Applied at the nightly export." },
 	{ key: "errorKeepDays", env: "TYPETORCH_ERROR_KEEP_DAYS", group: "retention", kind: "number", min: 1, max: 3650, unit: "days", label: "Error log history", help: "Days of error counts kept (pruned hourly)." },
 	{ key: "errorMaxKinds", env: "TYPETORCH_ERROR_MAX_KINDS", group: "retention", kind: "number", min: 100, max: 1_000_000, unit: "kinds", label: "Error kinds stored", help: "Past it, new kinds are dropped and counted." },
 	{ key: "errorRowsPerDay", env: "TYPETORCH_ERROR_ROWS_PER_DAY", group: "retention", kind: "number", min: 10_000, max: 1_000_000_000, unit: "rows / day", label: "Error rows per day", help: "New error count and player rows per UTC day; past it they are dropped and counted." },
@@ -378,6 +380,7 @@ export function envValues(config: ServerConfig): RuntimeValues {
 		fleetNewJobsPerMinute: config.fleetNewJobsPerMinute,
 		keepDays: config.keepDays,
 		rawKeepDays: config.rawKeepDays,
+		extKeepDays: config.extKeepDays,
 		errorKeepDays: config.errorKeepDays,
 		errorMaxKinds: config.errorMaxKinds,
 		errorRowsPerDay: config.errorRowsPerDay,
