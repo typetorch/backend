@@ -201,6 +201,8 @@ export interface ServerConfig {
 	/** Days of day files to keep (0 = forever). */
 	keepDays: number;
 	rawKeepDays: number;
+	/** Days extended replays (codec tt-ext-1) stay in the recordings day files (0 = as long as the day file). */
+	extKeepDays: number;
 	/** Compact live.duckdb after the nightly export when it is bigger than this. */
 	compactMb: number;
 	queryTimeoutSeconds: number;
@@ -675,6 +677,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), realEnv: Reco
 		loadSeconds: num(env, "TYPETORCH_LOAD_SECONDS", 5, 0.2, 3600),
 		keepDays: num(env, "TYPETORCH_KEEP_DAYS", 400, 0, 100_000),
 		rawKeepDays: num(env, "TYPETORCH_RAW_KEEP_DAYS", 14, 0, 100_000),
+		extKeepDays: num(env, "TYPETORCH_EXT_KEEP_DAYS", 0, 0, 100_000),
 		compactMb: num(env, "TYPETORCH_COMPACT_MB", 256, 1, 1_000_000),
 		queryTimeoutSeconds: num(env, "TYPETORCH_QUERY_TIMEOUT", 60, 1, 3600),
 		queryConcurrency: num(env, "TYPETORCH_QUERY_CONCURRENCY", 2, 1, 16),
